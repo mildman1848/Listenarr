@@ -23,7 +23,7 @@ using Microsoft.AspNetCore.Mvc;
 
 namespace Listenarr.Api.Features.Library
 {
-    public sealed class LibraryMoveWorkflow
+    public sealed partial class LibraryMoveWorkflow
     {
         private readonly IAudiobookRepository _repo;
         private readonly IServiceScopeFactory _scopeFactory;
@@ -181,7 +181,7 @@ namespace Listenarr.Api.Features.Library
                     }
 
                     targetBoundary = new MoveRootBoundary(
-                        final,
+                        customTargetResolution.BoundaryPath,
                         customTargetResolution.Semantics,
                         FileSystemCaseSensitivityMode.Auto);
                 }
@@ -216,21 +216,61 @@ namespace Listenarr.Api.Features.Library
                     return new BadRequestObjectResult(new { message = "Invalid target path" });
                 }
 
-                try
+                var nearestTargetAncestor = TryFindNearestExistingDirectory(targetParent);
+                var ancestorReason = "No existing target ancestor is available.";
+                if (string.IsNullOrWhiteSpace(nearestTargetAncestor)
+                    || !_fileSystem.TryValidateMutationTarget(
+                        final,
+                        [nearestTargetAncestor],
+                        out final,
+                        out ancestorReason))
                 {
-                    if (!_fileSystem.DirectoryExists(targetParent)) _fileSystem.CreateDirectory(targetParent);
+                    _logger.LogWarning(
+                        "Blocked move destination for audiobook {AudiobookId}: {Destination}. Reason: {Reason}",
+                        id,
+                        final,
+                        ancestorReason);
+                    return new BadRequestObjectResult(new { message = "Target parent path is unavailable" });
                 }
-                catch (Exception ex) when (ex is not OperationCanceledException && ex is not OutOfMemoryException && ex is not StackOverflowException)
+
+                var sourceFull = Path.GetFullPath(sourcePath);
+                var targetIdentity = PathIdentitySnapshot.FromResolution(
+                    targetBoundary.Semantics,
+                    targetBoundary.CaseSensitivityMode,
+                    targetBoundary.Path,
+                    final);
+                var sourceBoundary = FindAllowedMoveRoot(sourceFull, allowedMoveRoots);
+                PathIdentitySnapshot sourceIdentity;
+                if (sourceBoundary != null)
                 {
-                    _logger.LogWarning(ex, "Failed to access or create target parent {TargetParent}", targetParent);
-                    return new BadRequestObjectResult(new { message = "Target parent path is not writable or unavailable" });
+                    sourceIdentity = PathIdentitySnapshot.FromResolution(
+                        sourceBoundary.Semantics,
+                        sourceBoundary.CaseSensitivityMode,
+                        sourceBoundary.Path,
+                        sourceFull);
+                }
+                else
+                {
+                    var sourceResolution = await _semanticsResolver.ResolveAsync(sourceFull);
+                    if (sourceResolution.State != PathIdentityState.Valid)
+                    {
+                        return new BadRequestObjectResult(new { message = sourceResolution.Reason ?? "Source filesystem identity is unavailable." });
+                    }
+
+                    sourceIdentity = PathIdentitySnapshot.FromResolution(
+                        sourceResolution.Semantics,
+                        FileSystemCaseSensitivityMode.Auto,
+                        sourceResolution.BoundaryPath,
+                        sourceFull);
                 }
 
                 try
                 {
-                    var srcFull = Path.GetFullPath(sourcePath);
-                    var tgtFull = Path.GetFullPath(final);
-                    if (FileSystemPathIdentity.AreEquivalent(srcFull, tgtFull, targetBoundary.Semantics))
+                    if (AreSameMoveEndpoint(
+                        sourceFull,
+                        sourceIdentity,
+                        final,
+                        targetIdentity))
                     {
                         return new BadRequestObjectResult(new { message = "Source and target paths are identical; nothing to move." });
                     }
@@ -271,12 +311,14 @@ namespace Listenarr.Api.Features.Library
                 }
 
                 var jobId = await _moveQueueService.EnqueueMoveAsync(
-                    id,
-                    final,
-                    sourcePath,
-                    deleteEmptySource,
-                    sourceCleanupBoundary);
-                await BroadcastQueuedAsync(jobId, id);
+                    new MoveEnqueueCommand(
+                        id,
+                        sourceFull,
+                        sourceIdentity,
+                        final,
+                        targetIdentity,
+                        deleteEmptySource,
+                        sourceCleanupBoundary));
 
                 return new AcceptedResult(string.Empty, new { message = "Move enqueued", jobId });
             }
@@ -346,143 +388,8 @@ namespace Listenarr.Api.Features.Library
                 return new BadRequestObjectResult(new { message = "Unable to requeue job (not found or invalid status)" });
             }
 
-            await BroadcastQueuedAsync(newJobId.Value, audiobookId: null);
             return new AcceptedResult(string.Empty, new { message = "Requeued move job", jobId = newJobId });
         }
 
-        private string? TryNormalizeMoveRoot(string? path, string description)
-        {
-            if (string.IsNullOrWhiteSpace(path))
-            {
-                return null;
-            }
-
-            if (FileUtils.TryNormalizeUserProvidedDirectoryPathForCurrentOs(
-                path,
-                out var normalizedPath,
-                out var validationReason,
-                allowFileSystemRoot: true,
-                rejectParentTraversal: true))
-            {
-                return normalizedPath;
-            }
-
-            _logger.LogWarning(
-                "Skipping invalid move boundary from {Description}: {Reason}",
-                description,
-                validationReason);
-            return null;
-        }
-
-        private async Task AddAllowedMoveRootAsync(
-            List<MoveRootBoundary> allowedRoots,
-            string? normalizedRoot,
-            FileSystemCaseSensitivityMode caseSensitivityMode)
-        {
-            if (string.IsNullOrEmpty(normalizedRoot))
-            {
-                return;
-            }
-
-            var resolution = await _semanticsResolver.ResolveAsync(normalizedRoot, caseSensitivityMode);
-            if (resolution.State != PathIdentityState.Valid)
-            {
-                _logger.LogWarning(
-                    "Skipping move boundary {Root}: {Reason}",
-                    LogRedaction.SanitizeFilePath(normalizedRoot),
-                    resolution.Reason ?? "filesystem identity unavailable");
-                return;
-            }
-
-            var existingIndex = allowedRoots.FindIndex(root => FileSystemPathIdentity.AreEquivalent(
-                root.Path,
-                normalizedRoot,
-                resolution.Semantics));
-            if (existingIndex >= 0)
-            {
-                // A configured root-folder override is authoritative when the same path was
-                // already contributed by the legacy output-path setting in Auto mode.
-                if (caseSensitivityMode != FileSystemCaseSensitivityMode.Auto
-                    && allowedRoots[existingIndex].CaseSensitivityMode == FileSystemCaseSensitivityMode.Auto)
-                {
-                    allowedRoots[existingIndex] = new MoveRootBoundary(
-                        normalizedRoot,
-                        resolution.Semantics,
-                        caseSensitivityMode);
-                }
-
-                return;
-            }
-
-            allowedRoots.Add(new MoveRootBoundary(
-                normalizedRoot,
-                resolution.Semantics,
-                caseSensitivityMode));
-        }
-
-        private string? TryFindNearestExistingDirectory(string path)
-        {
-            try
-            {
-                var current = Path.GetFullPath(path);
-                while (!string.IsNullOrWhiteSpace(current))
-                {
-                    if (_fileSystem.DirectoryExists(current))
-                    {
-                        return current;
-                    }
-
-                    current = _fileSystem.GetParentDirectory(current);
-                }
-            }
-            catch (Exception ex) when (ex is not OperationCanceledException && ex is not OutOfMemoryException && ex is not StackOverflowException)
-            {
-                _logger.LogDebug(ex, "Unable to resolve nearest existing custom move destination directory.");
-            }
-
-            return null;
-        }
-
-        private static MoveRootBoundary? FindAllowedMoveRoot(
-            string path,
-            IReadOnlyCollection<MoveRootBoundary> allowedRoots)
-        {
-            return allowedRoots.FirstOrDefault(root => FileSystemPathIdentity.IsSameOrInside(
-                path,
-                root.Path,
-                root.Semantics));
-        }
-
-        private sealed record MoveRootBoundary(
-            string Path,
-            FileSystemPathSemantics Semantics,
-            FileSystemCaseSensitivityMode CaseSensitivityMode);
-
-        private static IActionResult ToApplicationExceptionResult(ListenarrApplicationException exception) =>
-            exception switch
-            {
-                ApplicationNotFoundException => new NotFoundObjectResult(new { message = exception.SafeDetail, code = exception.Code }),
-                ApplicationConflictException => new ConflictObjectResult(new { message = exception.SafeDetail, code = exception.Code }),
-                ApplicationValidationException => new BadRequestObjectResult(new { message = exception.SafeDetail, code = exception.Code }),
-                _ => new ObjectResult(new { message = exception.SafeDetail, code = exception.Code })
-                {
-                    StatusCode = StatusCodes.Status500InternalServerError
-                }
-            };
-
-        private async Task BroadcastQueuedAsync(Guid jobId, int? audiobookId)
-        {
-            try
-            {
-                using var scope = _scopeFactory.CreateScope();
-                var hub = scope.ServiceProvider.GetRequiredService<IHubBroadcaster>();
-                var job = new { jobId = jobId.ToString(), audiobookId, status = "Queued", enqueuedAt = DateTime.UtcNow };
-                await hub.BroadcastAsync(RealtimeHubTarget.Downloads, "MoveJobUpdate", job);
-            }
-            catch (Exception ex) when (ex is not OperationCanceledException && ex is not OutOfMemoryException && ex is not StackOverflowException)
-            {
-                _logger.LogWarning(ex, "Failed to broadcast MoveJobUpdate for job {JobId}", jobId);
-            }
-        }
     }
 }

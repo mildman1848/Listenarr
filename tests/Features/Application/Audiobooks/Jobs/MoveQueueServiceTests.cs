@@ -188,6 +188,77 @@ namespace Listenarr.Tests.Features.Application.Audiobooks.Jobs
         }
 
         [Fact]
+        public async Task NotifyPersistedJobState_CanceledWaiter_ReleasesPublicationGateEntry()
+        {
+            var job = new MoveJob
+            {
+                Id = Guid.NewGuid(),
+                AudiobookId = 42,
+                Status = MoveJobStatus.Running
+            };
+            var persistence = new Mock<IMoveQueuePersistence>();
+            persistence.Setup(store => store.GetByIdAsync(
+                    job.Id,
+                    It.IsAny<CancellationToken>()))
+                .ReturnsAsync(job);
+            var relocation = new Mock<IRootFolderRelocationService>();
+            relocation.Setup(service => service.OnMoveJobStateChangedAsync(
+                    job.Id,
+                    It.IsAny<CancellationToken>()))
+                .Returns(Task.CompletedTask);
+            var firstBroadcastEntered = new TaskCompletionSource(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+            var releaseFirstBroadcast = new TaskCompletionSource(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+            var broadcaster = new Mock<IHubBroadcaster>();
+            broadcaster.SetupSequence(service => service.BroadcastAsync(
+                    "MoveJobUpdate",
+                    It.IsAny<object>(),
+                    It.IsAny<CancellationToken>()))
+                .Returns(async () =>
+                {
+                    firstBroadcastEntered.TrySetResult();
+                    await releaseFirstBroadcast.Task;
+                })
+                .Returns(Task.CompletedTask);
+            var service = new MoveQueueService(
+                NullLogger<MoveQueueService>.Instance,
+                persistence.Object,
+                broadcaster.Object,
+                TimeProvider.System,
+                BuildSemanticsResolver(),
+                relocation.Object);
+
+            var first = service.NotifyPersistedJobStateAsync(
+                job.Id,
+                MoveJobStatus.Running);
+            await firstBroadcastEntered.Task;
+            using var cancellation = new CancellationTokenSource();
+            var second = service.NotifyPersistedJobStateAsync(
+                job.Id,
+                MoveJobStatus.Running,
+                cancellationToken: cancellation.Token);
+            for (var attempt = 0;
+                attempt < 100 && service.GetPublicationGateReferenceCount(job.Id) != 2;
+                attempt++)
+            {
+                await Task.Delay(10);
+            }
+            Assert.Equal(2, service.GetPublicationGateReferenceCount(job.Id));
+
+            cancellation.Cancel();
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => second);
+            releaseFirstBroadcast.TrySetResult();
+            await first;
+
+            Assert.Equal(0, service.PublicationGateCount);
+            broadcaster.Verify(service => service.BroadcastAsync(
+                "MoveJobUpdate",
+                It.IsAny<object>(),
+                It.IsAny<CancellationToken>()), Times.Once);
+        }
+
+        [Fact]
         public async Task UpdateJobStatus_PersistsAndUpdatesInMemory()
         {
             var dbOpts = new DbContextOptionsBuilder<ListenArrDbContext>()
@@ -287,11 +358,19 @@ namespace Listenarr.Tests.Features.Application.Audiobooks.Jobs
                 conflictKind == "source-source" ? sourcePath : requestedPath);
             var persistence = new Mock<IMoveQueuePersistence>();
             var relocation = new Mock<IRootFolderRelocationService>();
+            var checkedPaths = new List<string>();
             relocation.Setup(service => service.IsBoundaryProtectedAsync(
-                    protectedPath,
+                    It.IsAny<string>(),
                     It.IsAny<FileSystemPathSemantics>(),
                     It.IsAny<CancellationToken>()))
-                .ReturnsAsync(true);
+                .Returns<string, FileSystemPathSemantics, CancellationToken>((path, _, _) =>
+                {
+                    checkedPaths.Add(path);
+                    return Task.FromResult(FileSystemPathIdentity.AreEquivalent(
+                        path,
+                        protectedPath,
+                        FileSystemPathSemantics.CurrentHostDefault));
+                });
             var service = new MoveQueueService(
                 NullLogger<MoveQueueService>.Instance,
                 persistence.Object,
@@ -300,10 +379,17 @@ namespace Listenarr.Tests.Features.Application.Audiobooks.Jobs
                 BuildSemanticsResolver(),
                 relocation.Object);
 
-            var exception = await Assert.ThrowsAsync<MoveRelocationConflictException>(() =>
+            var captured = await Record.ExceptionAsync(() =>
                 service.EnqueueMoveAsync(7, requestedPath, sourcePath));
+            var exception = Assert.IsType<MoveRelocationConflictException>(captured);
 
-            Assert.Contains(conflictKind.StartsWith("source", StringComparison.Ordinal) ? "source" : "target", exception.Message);
+            Assert.Contains(
+                conflictKind.StartsWith("source", StringComparison.Ordinal) ? "source" : "target",
+                exception.Message);
+            Assert.Contains(checkedPaths, path => FileSystemPathIdentity.AreEquivalent(
+                path,
+                protectedPath,
+                FileSystemPathSemantics.CurrentHostDefault));
             persistence.Verify(
                 store => store.AddAsync(It.IsAny<MoveJob>(), It.IsAny<CancellationToken>()),
                 Times.Never);
@@ -585,11 +671,16 @@ namespace Listenarr.Tests.Features.Application.Audiobooks.Jobs
             };
             var persistence = CreateInMemoryPersistence([job]);
             var relocation = new Mock<IRootFolderRelocationService>();
+            var protectedTarget = FileSystemPathIdentity.ResolveNativeAbsolutePath(job.RequestedPath);
             relocation.Setup(service => service.IsBoundaryProtectedAsync(
-                    FileSystemPathIdentity.ResolveNativeAbsolutePath(job.RequestedPath),
+                    It.IsAny<string>(),
                     It.IsAny<FileSystemPathSemantics>(),
                     It.IsAny<CancellationToken>()))
-                .ReturnsAsync(true);
+                .Returns<string, FileSystemPathSemantics, CancellationToken>((path, _, _) =>
+                    Task.FromResult(FileSystemPathIdentity.AreEquivalent(
+                        path,
+                        protectedTarget,
+                        FileSystemPathSemantics.CurrentHostDefault)));
             var service = new MoveQueueService(
                 NullLogger<MoveQueueService>.Instance,
                 persistence.Object,

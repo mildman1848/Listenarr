@@ -29,6 +29,8 @@ internal static class PersistenceRegistrationExtensions
 
         services.AddScoped<IUnitOfWork, EfUnitOfWork>();
         services.AddSingleton<IMoveQueuePersistence, EfMoveQueuePersistence>();
+        services.AddSingleton<IMoveExecutionStore, EfMoveExecutionStore>();
+        services.AddSingleton<IMoveScanHandoffStore, EfMoveScanHandoffStore>();
         services.AddScoped<IHistoryRepository, EfHistoryRepository>();
         return services;
     }

@@ -5,7 +5,12 @@ namespace Listenarr.Infrastructure.Library.Scanning;
 
 public partial class ScanJobProcessor
 {
-    private async Task<bool> RecordScanCompletionAsync(
+    private sealed record ScanTerminalDecision(
+        string Status,
+        string? Error,
+        bool MoveOwned);
+
+    private async Task<ScanTerminalDecision> RecordScanCompletionAsync(
         IHistoryRepository historyRepository,
         ScanJob job,
         Audiobook audiobook,
@@ -14,8 +19,36 @@ public partial class ScanJobProcessor
         string scanRoot,
         CancellationToken cancellationToken)
     {
+        if (job.MoveScanHandoffId.HasValue && _moveScanHandoffStore != null)
+        {
+            var result = await _moveScanHandoffStore.CompleteAttemptAsync(
+                job.MoveScanHandoffId.Value,
+                job.MoveScanAttemptGeneration,
+                job.Id,
+                MoveScanTerminalOutcome.Succeeded,
+                error: null,
+                found,
+                created,
+                scanRoot,
+                _timeProvider.GetUtcNow(),
+                cancellationToken);
+            return ToTerminalDecision(result);
+        }
+
         var correlationId = job.CorrelationId ?? job.Id.ToString("N");
-        var completion = new History
+        var idempotencyKey = $"scan:{job.Id:N}:completed";
+        var existing = await historyRepository.GetByCorrelationIdAsync(
+            correlationId,
+            cancellationToken);
+        if (existing.Any(history => string.Equals(
+                history.IdempotencyKey,
+                idempotencyKey,
+                StringComparison.Ordinal)))
+        {
+            return new ScanTerminalDecision("Completed", null, MoveOwned: false);
+        }
+
+        await historyRepository.AddAsync(new History
         {
             AudiobookId = audiobook.Id,
             AudiobookTitle = audiobook.Title,
@@ -25,8 +58,9 @@ public partial class ScanJobProcessor
             Outcome = HistoryOutcome.Succeeded,
             Source = "LibraryScan",
             Message = $"Library scan completed: {found} found, {created} created",
-            Timestamp = DateTime.UtcNow,
+            Timestamp = _timeProvider.GetUtcNow().UtcDateTime,
             CorrelationId = correlationId,
+            IdempotencyKey = idempotencyKey,
             Data = JsonSerializer.Serialize(new
             {
                 ScanJobId = job.Id,
@@ -34,56 +68,44 @@ public partial class ScanJobProcessor
                 Created = created,
                 Path = scanRoot
             })
-        };
-        if (!string.IsNullOrWhiteSpace(job.CorrelationId)
-            && job.CorrelationId.StartsWith("move:", StringComparison.Ordinal))
-        {
-            await _queue.CommitTerminalJobStatusAsync(
-                job.Id,
-                async () =>
-                {
-                    var correlated = await historyRepository.GetByCorrelationIdAsync(
-                        correlationId,
-                        cancellationToken);
-                    if (FindCompletedMoveScanHistory(correlated) != null)
-                    {
-                        return ("Completed", (string?)null);
-                    }
-
-                    var failed = FindFailedMoveScanHistory(correlated);
-                    if (failed != null)
-                    {
-                        return ("Failed", failed.Error);
-                    }
-
-                    await historyRepository.AddAsync(completion, cancellationToken);
-                    return ("Completed", (string?)null);
-                },
-                cancellationToken);
-            return true;
-        }
-
-        await historyRepository.AddAsync(completion, cancellationToken);
-        return false;
+        }, cancellationToken);
+        return new ScanTerminalDecision("Completed", null, MoveOwned: false);
     }
 
-    private async Task<bool> RecordScanFailureHistoryAsync(
+    private async Task<ScanTerminalDecision> RecordScanFailureHistoryAsync(
         IHistoryRepository historyRepository,
         ScanJob job,
         Audiobook? audiobook,
         string error,
         CancellationToken cancellationToken)
     {
-        if (!string.IsNullOrWhiteSpace(job.CorrelationId)
-            && job.CorrelationId.StartsWith("move:", StringComparison.Ordinal))
+        if (job.MoveScanHandoffId.HasValue && _moveScanHandoffStore != null)
         {
-            await RecordMoveScanFailureAsync(
-                historyRepository,
-                job,
-                audiobook,
+            var result = await _moveScanHandoffStore.CompleteAttemptAsync(
+                job.MoveScanHandoffId.Value,
+                job.MoveScanAttemptGeneration,
+                job.Id,
+                MoveScanTerminalOutcome.Failed,
                 error,
+                found: 0,
+                created: 0,
+                job.Path,
+                _timeProvider.GetUtcNow(),
                 cancellationToken);
-            return true;
+            return ToTerminalDecision(result);
+        }
+
+        var correlationId = job.CorrelationId ?? job.Id.ToString("N");
+        var idempotencyKey = $"scan:{job.Id:N}:failed";
+        var existing = await historyRepository.GetByCorrelationIdAsync(
+            correlationId,
+            cancellationToken);
+        if (existing.Any(history => string.Equals(
+                history.IdempotencyKey,
+                idempotencyKey,
+                StringComparison.Ordinal)))
+        {
+            return new ScanTerminalDecision("Failed", error, MoveOwned: false);
         }
 
         await historyRepository.AddAsync(new History
@@ -97,92 +119,78 @@ public partial class ScanJobProcessor
             Source = "LibraryScan",
             Message = "Library scan failed",
             Error = error,
-            Timestamp = DateTime.UtcNow,
-            CorrelationId = job.Id.ToString("N"),
+            Timestamp = _timeProvider.GetUtcNow().UtcDateTime,
+            CorrelationId = correlationId,
+            IdempotencyKey = idempotencyKey,
             Data = JsonSerializer.Serialize(new { ScanJobId = job.Id, job.Path })
         }, cancellationToken);
-        return false;
+        return new ScanTerminalDecision("Failed", error, MoveOwned: false);
     }
 
-    private async Task RecordMoveScanFailureAsync(
+    private async Task<ScanTerminalDecision> RecordMoveScanSupersededAsync(
+        ScanJob job,
+        string error,
+        CancellationToken cancellationToken)
+    {
+        if (!job.MoveScanHandoffId.HasValue || _moveScanHandoffStore == null)
+        {
+            return new ScanTerminalDecision("Superseded", error, MoveOwned: false);
+        }
+
+        var result = await _moveScanHandoffStore.CompleteAttemptAsync(
+            job.MoveScanHandoffId.Value,
+            job.MoveScanAttemptGeneration,
+            job.Id,
+            MoveScanTerminalOutcome.Superseded,
+            error,
+            found: 0,
+            created: 0,
+            scanPath: job.Path,
+            _timeProvider.GetUtcNow(),
+            cancellationToken);
+        return ToTerminalDecision(result);
+    }
+
+    private async Task<ScanTerminalDecision> RecordMoveScanFailureAsync(
         IHistoryRepository historyRepository,
         ScanJob job,
         Audiobook? audiobook,
         string error,
         CancellationToken cancellationToken)
     {
-        var isMoveHandoff = !string.IsNullOrWhiteSpace(job.CorrelationId)
-            && job.CorrelationId.StartsWith("move:", StringComparison.Ordinal);
-        if (!isMoveHandoff)
-        {
-            UpdateFailedScanStatus(job, error);
-            return;
-        }
-
-        var correlationId = job.CorrelationId!;
-        await _queue.CommitTerminalJobStatusAsync(
-            job.Id,
-            async () =>
-            {
-                var correlated = await historyRepository.GetByCorrelationIdAsync(
-                    correlationId,
-                    cancellationToken);
-                var failed = FindFailedMoveScanHistory(correlated);
-                if (failed != null)
-                {
-                    return ("Failed", failed.Error);
-                }
-
-                if (FindCompletedMoveScanHistory(correlated) != null)
-                {
-                    return ("Completed", (string?)null);
-                }
-
-                await historyRepository.AddAsync(new History
-                {
-                    AudiobookId = audiobook?.Id ?? job.AudiobookId,
-                    AudiobookTitle = audiobook?.Title,
-                    SourceTitle = audiobook?.Title,
-                    DownloadId = job.DownloadId,
-                    EventType = HistoryEvents.ScanFailed,
-                    Outcome = HistoryOutcome.Failed,
-                    Source = "LibraryScan",
-                    Message = "Post-move library scan failed",
-                    Error = error,
-                    Timestamp = DateTime.UtcNow,
-                    CorrelationId = correlationId,
-                    Data = JsonSerializer.Serialize(new
-                    {
-                        ScanJobId = job.Id,
-                        job.Path
-                    })
-                }, cancellationToken);
-                return ("Failed", error);
-            },
+        var decision = await RecordScanFailureHistoryAsync(
+            historyRepository,
+            job,
+            audiobook,
+            error,
             cancellationToken);
+        ApplyTerminalStatus(job, decision);
+        return decision;
     }
 
-    private static History? FindCompletedMoveScanHistory(IEnumerable<History> history) =>
-        history.FirstOrDefault(entry =>
-            string.Equals(entry.EventType, HistoryEvents.ScanCompleted, StringComparison.Ordinal)
-            && entry.Outcome == HistoryOutcome.Succeeded);
+    private static ScanTerminalDecision ToTerminalDecision(MoveScanAttemptResult result) =>
+        result.Outcome switch
+        {
+            MoveScanAttemptOutcome.Completed => new ScanTerminalDecision("Completed", null, MoveOwned: true),
+            MoveScanAttemptOutcome.Failed => new ScanTerminalDecision("Failed", result.Error, MoveOwned: true),
+            _ => new ScanTerminalDecision(
+                "Superseded",
+                "A newer move scan attempt owns the durable handoff.",
+                MoveOwned: true)
+        };
 
-    private static History? FindFailedMoveScanHistory(IEnumerable<History> history) =>
-        history.FirstOrDefault(entry =>
-            string.Equals(entry.EventType, HistoryEvents.ScanFailed, StringComparison.Ordinal)
-            && entry.Outcome == HistoryOutcome.Failed);
-
-    private void UpdateFailedScanStatus(ScanJob job, string error)
+    private void ApplyTerminalStatus(ScanJob job, ScanTerminalDecision decision)
     {
         try
         {
-            _queue.UpdateJobStatus(job.Id, "Failed", error);
+            _queue.UpdateJobStatus(job.Id, decision.Status, decision.Error);
         }
         catch (Exception exception) when (WorkerExceptionClassifier.IsNonFatal(exception))
         {
             _logger.LogDebug(
                 exception,
-                "Unable to update failed scan job {JobId}",
+                "Unable to apply terminal scan status {Status} for job {JobId}",
+                decision.Status,
                 job.Id);
         }
     }

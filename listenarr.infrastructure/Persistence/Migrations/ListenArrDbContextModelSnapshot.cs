@@ -131,6 +131,10 @@ namespace Listenarr.Infrastructure.Persistence.Migrations
                         .HasMaxLength(100)
                         .HasColumnType("TEXT");
 
+                    b.Property<string>("IdempotencyKey")
+                        .HasMaxLength(200)
+                        .HasColumnType("TEXT");
+
                     b.Property<string>("Message")
                         .HasColumnType("TEXT");
 
@@ -165,6 +169,10 @@ namespace Listenarr.Infrastructure.Persistence.Migrations
                     b.HasIndex("DownloadId");
 
                     b.HasIndex("EventType");
+
+                    b.HasIndex("IdempotencyKey")
+                        .IsUnique()
+                        .HasFilter("\"IdempotencyKey\" IS NOT NULL");
 
                     b.HasIndex("Outcome");
 
@@ -688,16 +696,48 @@ namespace Listenarr.Infrastructure.Persistence.Migrations
                     b.Property<string>("RequestedPath")
                         .HasColumnType("TEXT");
 
+                    b.Property<string>("SourceCaseSensitivity")
+                        .HasMaxLength(16)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("SourceCaseSensitivityMode")
+                        .HasMaxLength(16)
+                        .HasColumnType("TEXT");
+
                     b.Property<string>("SourceCleanupBoundary")
+                        .HasMaxLength(2000)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("SourceIdentityBoundary")
                         .HasMaxLength(2000)
                         .HasColumnType("TEXT");
 
                     b.Property<string>("SourcePath")
                         .HasColumnType("TEXT");
 
+                    b.Property<string>("SourcePathSyntax")
+                        .HasMaxLength(16)
+                        .HasColumnType("TEXT");
+
                     b.Property<string>("Status")
                         .IsRequired()
                         .HasMaxLength(32)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("TargetCaseSensitivity")
+                        .HasMaxLength(16)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("TargetCaseSensitivityMode")
+                        .HasMaxLength(16)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("TargetIdentityBoundary")
+                        .HasMaxLength(2000)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("TargetPathSyntax")
+                        .HasMaxLength(16)
                         .HasColumnType("TEXT");
 
                     b.Property<DateTime?>("UpdatedAt")
@@ -716,6 +756,33 @@ namespace Listenarr.Infrastructure.Persistence.Migrations
                     b.HasIndex("Status", "NextAttemptAt", "LeaseExpiresAt");
 
                     b.ToTable("MoveJobs");
+                });
+
+            modelBuilder.Entity("Listenarr.Domain.Audiobooks.MoveJobCreatedDirectory", b =>
+                {
+                    b.Property<long>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("INTEGER");
+
+                    b.Property<Guid>("MoveJobId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Path")
+                        .IsRequired()
+                        .HasMaxLength(2000)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("State")
+                        .IsRequired()
+                        .HasMaxLength(16)
+                        .HasColumnType("TEXT");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("MoveJobId", "Path")
+                        .IsUnique();
+
+                    b.ToTable("MoveJobCreatedDirectories", (string)null);
                 });
 
             modelBuilder.Entity("Listenarr.Domain.Audiobooks.MoveJobEntry", b =>
@@ -763,6 +830,67 @@ namespace Listenarr.Infrastructure.Persistence.Migrations
                         .IsUnique();
 
                     b.ToTable("MoveJobEntries", (string)null);
+                });
+
+            modelBuilder.Entity("Listenarr.Domain.Audiobooks.MoveScanHandoff", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid?>("ActiveScanJobId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<int>("AttemptGeneration")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<int>("AudiobookId")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("LastError")
+                        .HasMaxLength(4000)
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime?>("LeaseExpiresAt")
+                        .HasColumnType("TEXT");
+
+                    b.Property<int>("LeaseGeneration")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("LeaseOwner")
+                        .HasMaxLength(200)
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid>("MoveJobId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime?>("NextAttemptAt")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Status")
+                        .IsRequired()
+                        .HasMaxLength(24)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("TargetPath")
+                        .IsRequired()
+                        .HasMaxLength(2000)
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime>("UpdatedAt")
+                        .HasColumnType("TEXT");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("MoveJobId")
+                        .IsUnique();
+
+                    b.HasIndex("Status", "NextAttemptAt", "LeaseExpiresAt");
+
+                    b.ToTable("MoveScanHandoffs", (string)null);
                 });
 
             modelBuilder.Entity("Listenarr.Domain.Audiobooks.QualityProfile", b =>
@@ -1767,11 +1895,33 @@ namespace Listenarr.Infrastructure.Persistence.Migrations
                     b.Navigation("Relocation");
                 });
 
+            modelBuilder.Entity("Listenarr.Domain.Audiobooks.MoveJobCreatedDirectory", b =>
+                {
+                    b.HasOne("Listenarr.Domain.Audiobooks.MoveJob", "MoveJob")
+                        .WithMany("CreatedDirectories")
+                        .HasForeignKey("MoveJobId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("MoveJob");
+                });
+
             modelBuilder.Entity("Listenarr.Domain.Audiobooks.MoveJobEntry", b =>
                 {
                     b.HasOne("Listenarr.Domain.Audiobooks.MoveJob", "MoveJob")
                         .WithMany("Entries")
                         .HasForeignKey("MoveJobId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("MoveJob");
+                });
+
+            modelBuilder.Entity("Listenarr.Domain.Audiobooks.MoveScanHandoff", b =>
+                {
+                    b.HasOne("Listenarr.Domain.Audiobooks.MoveJob", "MoveJob")
+                        .WithOne("ScanHandoff")
+                        .HasForeignKey("Listenarr.Domain.Audiobooks.MoveScanHandoff", "MoveJobId")
                         .OnDelete(DeleteBehavior.Cascade)
                         .IsRequired();
 
@@ -1810,7 +1960,11 @@ namespace Listenarr.Infrastructure.Persistence.Migrations
 
             modelBuilder.Entity("Listenarr.Domain.Audiobooks.MoveJob", b =>
                 {
+                    b.Navigation("CreatedDirectories");
+
                     b.Navigation("Entries");
+
+                    b.Navigation("ScanHandoff");
                 });
 
             modelBuilder.Entity("Listenarr.Domain.Audiobooks.RootFolder", b =>

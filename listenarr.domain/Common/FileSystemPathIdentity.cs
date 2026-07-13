@@ -49,6 +49,50 @@ public readonly record struct FileSystemPathSemantics(
             : FileSystemCaseSensitivity.Sensitive);
 }
 
+public readonly record struct PathIdentitySnapshot(
+    FileSystemPathSyntax Syntax,
+    FileSystemCaseSensitivity CaseSensitivity,
+    FileSystemCaseSensitivityMode RequestedMode,
+    string BoundaryPath)
+{
+    public FileSystemPathSemantics Semantics => new(Syntax, CaseSensitivity);
+
+    public void ValidateForPath(string path)
+    {
+        if (CaseSensitivity == FileSystemCaseSensitivity.Unknown)
+        {
+            throw new InvalidOperationException(
+                "Filesystem case sensitivity must be resolved before persisting a path identity snapshot.");
+        }
+
+        var canonicalBoundary = FileSystemPathIdentity.Canonicalize(BoundaryPath, Syntax);
+        var canonicalPath = FileSystemPathIdentity.Canonicalize(path, Syntax);
+        if (!FileSystemPathIdentity.IsSameOrInside(
+                canonicalPath,
+                canonicalBoundary,
+                Semantics))
+        {
+            throw new InvalidOperationException(
+                "The path identity boundary does not contain the persisted path.");
+        }
+    }
+
+    public static PathIdentitySnapshot FromResolution(
+        FileSystemPathSemantics semantics,
+        FileSystemCaseSensitivityMode requestedMode,
+        string boundaryPath,
+        string path)
+    {
+        var snapshot = new PathIdentitySnapshot(
+            semantics.Syntax,
+            semantics.CaseSensitivity,
+            requestedMode,
+            FileSystemPathIdentity.Canonicalize(boundaryPath, semantics.Syntax));
+        snapshot.ValidateForPath(path);
+        return snapshot;
+    }
+}
+
 public static partial class FileSystemPathIdentity
 {
     private static readonly Regex WindowsDrivePattern = new(
@@ -114,7 +158,8 @@ public static partial class FileSystemPathIdentity
     public static string CreateKey(
         string scope,
         string path,
-        FileSystemPathSemantics semantics)
+        FileSystemPathSemantics semantics,
+        int version = 2)
     {
         if (semantics.CaseSensitivity == FileSystemCaseSensitivity.Unknown)
         {
@@ -127,9 +172,14 @@ public static partial class FileSystemPathIdentity
             canonical = canonical.ToUpperInvariant();
         }
 
+        if (version < 1)
+        {
+            throw new ArgumentOutOfRangeException(nameof(version));
+        }
+
         var digest = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(canonical)));
         var sensitivity = semantics.CaseSensitivity == FileSystemCaseSensitivity.Sensitive ? "s" : "i";
-        return $"v2:{scope}:{sensitivity}:{digest}";
+        return $"v{version}:{scope}:{sensitivity}:{digest}";
     }
 
     public static bool TryResolveRelativePathWithinBase(

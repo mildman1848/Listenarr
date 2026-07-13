@@ -71,7 +71,7 @@ public interface IMoveQueuePersistence
         DateTimeOffset leaseExpiresAt,
         CancellationToken cancellationToken = default);
 
-    Task<bool> HeartbeatAsync(
+    Task<MoveHeartbeatOutcome> HeartbeatAsync(
         Guid id,
         string leaseOwner,
         int leaseGeneration,

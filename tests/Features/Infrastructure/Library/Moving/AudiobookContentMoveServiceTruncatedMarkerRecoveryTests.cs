@@ -303,6 +303,136 @@ public partial class AudiobookContentMoveServiceTests
         Assert.False(File.Exists(writePath));
     }
 
+    [Fact]
+    public async Task GetRecoverableMoveAsync_LockedAuthoritativeMarker_IsRetryableAndPreserved()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var source = FileService.GetTempDirectory("content-move-locked-marker-src");
+        var sourceFile = await FileService.GetFileAsync(source, "book.m4b", "audio");
+        var target = FileService.GetTempDirectory("content-move-locked-marker-dst");
+        await FileService.GetFileAsync(target, "book.m4b", "audio");
+        var request = await CreateLeasedMoveRequestAsync(source, target);
+        await PersistFileManifestAsync(request.JobId, "book.m4b", sourceFile);
+        var markerPath = Path.Join(
+            target,
+            $".listenarr-move-{request.JobId:N}.pending");
+        await File.WriteAllTextAsync(
+            markerPath,
+            System.Text.Json.JsonSerializer.Serialize(new
+            {
+                Version = 1,
+                JobId = request.JobId,
+                Source = Path.GetFullPath(source),
+                Target = Path.GetFullPath(target),
+                Stage = "copy-complete"
+            }));
+        await using var lockStream = new FileStream(
+            markerPath,
+            FileMode.Open,
+            FileAccess.ReadWrite,
+            FileShare.None);
+        var service = _provider.GetRequiredService<AudiobookContentMoveService>();
+
+        var exception = await Assert.ThrowsAsync<IOException>(() =>
+            service.GetRecoverableMoveAsync(request, CancellationToken.None));
+
+        Assert.Contains("temporarily unreadable", exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.True(File.Exists(markerPath));
+    }
+
+    [Fact]
+    public async Task GetRecoverableMoveAsync_OversizedAuthoritativeMarker_IsPreservedForReview()
+    {
+        var source = FileService.GetTempDirectory("content-move-oversized-marker-src");
+        var sourceFile = await FileService.GetFileAsync(source, "book.m4b", "audio");
+        var target = FileService.GetTempDirectory("content-move-oversized-marker-dst");
+        await FileService.GetFileAsync(target, "book.m4b", "audio");
+        var request = await CreateLeasedMoveRequestAsync(source, target);
+        await PersistFileManifestAsync(request.JobId, "book.m4b", sourceFile);
+        var markerPath = Path.Join(
+            target,
+            $".listenarr-move-{request.JobId:N}.pending");
+        await File.WriteAllTextAsync(markerPath, new string('x', 70 * 1024));
+        var service = _provider.GetRequiredService<AudiobookContentMoveService>();
+
+        var exception = await Assert.ThrowsAsync<MoveNeedsAttentionException>(() =>
+            service.GetRecoverableMoveAsync(request, CancellationToken.None));
+
+        Assert.Contains("supported size", exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.True(File.Exists(markerPath));
+    }
+
+    [Fact]
+    public async Task GetRecoverableMoveAsync_UnsupportedAuthoritativeMarker_IsPreservedForReview()
+    {
+        var source = FileService.GetTempDirectory("content-move-unsupported-marker-src");
+        var sourceFile = await FileService.GetFileAsync(source, "book.m4b", "audio");
+        var target = FileService.GetTempDirectory("content-move-unsupported-marker-dst");
+        await FileService.GetFileAsync(target, "book.m4b", "audio");
+        var request = await CreateLeasedMoveRequestAsync(source, target);
+        await PersistFileManifestAsync(request.JobId, "book.m4b", sourceFile);
+        var markerPath = Path.Join(
+            target,
+            $".listenarr-move-{request.JobId:N}.pending");
+        await File.WriteAllTextAsync(
+            markerPath,
+            System.Text.Json.JsonSerializer.Serialize(new
+            {
+                Version = 2,
+                JobId = request.JobId,
+                Source = Path.GetFullPath(source),
+                Target = Path.GetFullPath(target),
+                Stage = "copy-complete"
+            }));
+        var service = _provider.GetRequiredService<AudiobookContentMoveService>();
+
+        var exception = await Assert.ThrowsAsync<MoveNeedsAttentionException>(() =>
+            service.GetRecoverableMoveAsync(request, CancellationToken.None));
+
+        Assert.Contains("unsupported", exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.True(File.Exists(markerPath));
+    }
+
+    [Fact]
+    public async Task GetRecoverableMoveAsync_UnsupportedPredecessorWrite_IsPreservedForReview()
+    {
+        var source = FileService.GetTempDirectory("content-move-unsupported-write-src");
+        var sourceFile = await FileService.GetFileAsync(source, "book.m4b", "audio");
+        var target = FileService.GetTempDirectory("content-move-unsupported-write-dst");
+        await FileService.GetFileAsync(target, "book.m4b", "audio");
+        var initialRequest = await CreateLeasedMoveRequestAsync(source, target);
+        await PersistFileManifestAsync(initialRequest.JobId, "book.m4b", sourceFile);
+        var markerPath = Path.Join(
+            target,
+            $".listenarr-move-{initialRequest.JobId:N}.pending");
+        var writePath = CreateTruncatedMarkerWritePath(
+            markerPath,
+            initialRequest.JobId,
+            initialRequest.LeaseGeneration);
+        await File.WriteAllTextAsync(
+            writePath,
+            System.Text.Json.JsonSerializer.Serialize(new
+            {
+                Version = 2,
+                JobId = initialRequest.JobId,
+                Source = Path.GetFullPath(source),
+                Target = Path.GetFullPath(target),
+                Stage = "copy-complete"
+            }));
+        var request = await ReplaceMarkerTestLeaseAsync(initialRequest);
+        var service = _provider.GetRequiredService<AudiobookContentMoveService>();
+
+        var exception = await Assert.ThrowsAsync<MoveNeedsAttentionException>(() =>
+            service.GetRecoverableMoveAsync(request, CancellationToken.None));
+
+        Assert.Contains("unsupported", exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.True(File.Exists(writePath));
+    }
+
     private static Task WriteStructuredRecoveryWriteAsync(
         string writePath,
         AudiobookContentMoveRequest request,

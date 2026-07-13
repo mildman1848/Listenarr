@@ -34,9 +34,7 @@ public sealed partial class RootFolderRelocationService
         }
 
         var now = timeProvider.GetUtcNow().UtcDateTime;
-        var needsTargetSemantics = relocation.SkippedItems.Count > 0
-            || relocation.MoveJobs.Any(job => job.Status is
-                MoveJobStatus.NeedsAttention or MoveJobStatus.Failed or MoveJobStatus.Superseded);
+        var needsTargetSemantics = relocation.SkippedItems.Count > 0;
         FileSystemSemanticsResolution? targetResolution = null;
         if (needsTargetSemantics)
         {
@@ -70,10 +68,20 @@ public sealed partial class RootFolderRelocationService
         foreach (var job in relocation.MoveJobs.Where(job => job.Status is
             MoveJobStatus.NeedsAttention or MoveJobStatus.Failed or MoveJobStatus.Superseded))
         {
+            if (string.IsNullOrWhiteSpace(job.RequestedPath)
+                || !job.TryGetTargetIdentity(out var targetIdentity))
+            {
+                job.Status = MoveJobStatus.NeedsAttention;
+                job.Error = "The move job has no authoritative target filesystem identity.";
+                job.FailureKind = MoveFailureKind.Verification;
+                continue;
+            }
+
             var deduplicationKey = FileSystemPathIdentity.CreateKey(
                 $"move:{job.AudiobookId}",
-                job.RequestedPath!,
-                targetResolution!.Semantics);
+                job.RequestedPath,
+                targetIdentity.Semantics,
+                version: 3);
             var conflictingJob = await db.MoveJobs.AsNoTracking().FirstOrDefaultAsync(
                 candidate => candidate.Id != job.Id
                     && candidate.ActiveDeduplicationKey == deduplicationKey,
@@ -91,11 +99,8 @@ public sealed partial class RootFolderRelocationService
                     "A newer move for this audiobook is already active.");
             }
 
-            job.Status = MoveJobStatus.Queued;
-            job.Error = null;
-            job.FailureKind = MoveFailureKind.None;
-            job.NextAttemptAt = null;
-            job.ActiveDeduplicationKey = deduplicationKey;
+            MoveJobManualRetry.Reset(job, deduplicationKey, now);
+            job.IdentityKeyVersion = 3;
         }
 
         if (relocation.SkippedItems.Count > 0)

@@ -17,6 +17,7 @@
  */
 using Microsoft.AspNetCore.SignalR;
 using Listenarr.Tests.Common;
+using System.Collections.Concurrent;
 using System.Text.Json;
 
 namespace Listenarr.Tests.Features.Infrastructure.Library.Moving
@@ -25,10 +26,10 @@ namespace Listenarr.Tests.Features.Infrastructure.Library.Moving
     {
         private class CapturingClientProxy : IClientProxy
         {
-            public List<(string Method, object?[] Args)> Calls { get; } = new List<(string, object?[])>();
+            public ConcurrentQueue<(string Method, object?[] Args)> Calls { get; } = new();
             public Task SendCoreAsync(string method, object?[] args, CancellationToken cancellationToken = default)
             {
-                Calls.Add((method, args ?? Array.Empty<object?>()));
+                Calls.Enqueue((method, args ?? Array.Empty<object?>()));
                 return Task.CompletedTask;
             }
         }
@@ -84,15 +85,24 @@ namespace Listenarr.Tests.Features.Infrastructure.Library.Moving
             // Enqueue move
             var jobId = await moveQueue.EnqueueMoveAsync(ab.Id, dst, src);
 
-            // Poll for job completion (timeout ~15s)
+            // Durable completion is committed before optional client broadcasts. Wait for
+            // both states so stopping the worker cannot race the post-completion effects.
+            var proxy = ((CapturingHubClients)capturingHub.Clients).Proxy;
             var succeeded = false;
+            var broadcasted = false;
             for (int i = 0; i < 60; i++)
             {
                 var job = await moveQueue.GetJobAsync(jobId);
-                if (job?.Status == MoveJobStatus.Completed)
+                succeeded = job?.Status == MoveJobStatus.Completed;
+                broadcasted = proxy.Calls.Any(call => string.Equals(
+                    call.Method,
+                    "AudiobookUpdate",
+                    StringComparison.OrdinalIgnoreCase));
+                if (succeeded && broadcasted)
                 {
-                    succeeded = true; break;
+                    break;
                 }
+
                 await Task.Delay(250, CancellationToken.None);
             }
 
@@ -100,9 +110,9 @@ namespace Listenarr.Tests.Features.Infrastructure.Library.Moving
             await bg.StopAsync(CancellationToken.None);
 
             Assert.True(succeeded, "Move job did not complete in time");
+            Assert.True(broadcasted, "Move completion effects did not finish in time");
 
             // Assert that the hub received an AudiobookUpdate send with a full DTO (check basePath and files)
-            var proxy = ((CapturingHubClients)capturingHub.Clients).Proxy;
             var calls = proxy.Calls.Where(c => string.Equals(c.Method, "AudiobookUpdate", StringComparison.OrdinalIgnoreCase)).ToList();
             Assert.True(calls.Count >= 1, "No AudiobookUpdate calls were captured on the hub");
 

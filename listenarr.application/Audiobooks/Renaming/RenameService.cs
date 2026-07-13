@@ -33,6 +33,7 @@ namespace Listenarr.Application.Audiobooks.Renaming
         private readonly IRootFolderService? _rootFolderService;
         private readonly IFileSystemSemanticsResolver _semanticsResolver;
         private readonly IHistoryRepository? _historyRepository;
+        private readonly IAudiobookOperationCoordinator? _audiobookOperationCoordinator;
 
         public RenameService(
             IConfigurationService configService,
@@ -43,7 +44,8 @@ namespace Listenarr.Application.Audiobooks.Renaming
             ILogger<RenameService> logger,
             IFileSystemSemanticsResolver semanticsResolver,
             IRootFolderService? rootFolderService = null,
-            IHistoryRepository? historyRepository = null)
+            IHistoryRepository? historyRepository = null,
+            IAudiobookOperationCoordinator? audiobookOperationCoordinator = null)
         {
             _configService = configService;
             _fileNamingService = fileNamingService;
@@ -54,6 +56,7 @@ namespace Listenarr.Application.Audiobooks.Renaming
             _semanticsResolver = semanticsResolver;
             _rootFolderService = rootFolderService;
             _historyRepository = historyRepository;
+            _audiobookOperationCoordinator = audiobookOperationCoordinator;
         }
 
         public async Task<List<RenamePreview>> PreviewRenameAsync(int[] audiobookIds, CancellationToken ct = default)
@@ -83,7 +86,16 @@ namespace Listenarr.Application.Audiobooks.Renaming
             var settings = await _configService.GetApplicationSettingsAsync();
             var rootFolders = await LoadRootFoldersAsync();
             var results = new List<RenameResult>();
-            foreach (var op in operations) results.Add(await ExecuteSingleAsync(op, settings, rootFolders, ct));
+            foreach (var op in operations)
+            {
+                var result = _audiobookOperationCoordinator != null
+                    ? await _audiobookOperationCoordinator.ExecuteExclusiveAsync(
+                        op.AudiobookId,
+                        token => ExecuteSingleAsync(op, settings, rootFolders, token),
+                        ct)
+                    : await ExecuteSingleAsync(op, settings, rootFolders, ct);
+                results.Add(result);
+            }
             return results;
         }
 
@@ -261,6 +273,27 @@ namespace Listenarr.Application.Audiobooks.Renaming
                 return item;
             }
 
+            if (!_fileSystem.TryValidateMutationTarget(
+                    source,
+                    allowedRoots,
+                    out var validatedSource,
+                    out _)
+                || !_fileSystem.TryValidateMutationTarget(
+                    dest,
+                    allowedRoots,
+                    out var validatedDestination,
+                    out _))
+            {
+                item.Success = false;
+                item.Error = "File path could not be resolved safely within the allowed library roots.";
+                return item;
+            }
+
+            source = validatedSource;
+            dest = validatedDestination;
+            item.PreviousPath = source;
+            item.NewPath = dest;
+
             if (!_fileSystem.FileExists(source))
             {
                 item.Success = false;
@@ -323,11 +356,32 @@ namespace Listenarr.Application.Audiobooks.Renaming
             var normalizedNew = NormalizePath(newFolderPath);
             if (!IsPathWithinAllowedRoots(normalizedCurrent, allowedRoots, semantics) || !IsPathWithinAllowedRoots(normalizedNew, allowedRoots, semantics))
                 return (false, "Destination path is outside the allowed library roots.");
+            if (!_fileSystem.TryValidateMutationTarget(
+                    normalizedNew,
+                    allowedRoots,
+                    out var validatedNew,
+                    out _))
+            {
+                return (false, "Destination path could not be resolved safely within the allowed library roots.");
+            }
+
+            normalizedNew = validatedNew;
             if (!_fileSystem.DirectoryExists(normalizedCurrent))
             {
                 audiobook.BasePath = normalizedNew;
                 return (true, null);
             }
+
+            if (!_fileSystem.TryValidateMutationTarget(
+                    normalizedCurrent,
+                    allowedRoots,
+                    out var validatedCurrent,
+                    out _))
+            {
+                return (false, "Source path could not be resolved safely within the allowed library roots.");
+            }
+
+            normalizedCurrent = validatedCurrent;
             if (_fileSystem.DirectoryExists(normalizedNew) && _fileSystem.EnumerateFileSystemEntries(normalizedNew).Any())
                 return (false, "Target folder already exists and is not empty.");
 

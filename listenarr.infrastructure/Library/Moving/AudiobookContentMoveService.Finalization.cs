@@ -142,6 +142,7 @@ internal sealed partial class AudiobookContentMoveService
                 request.LeaseToken,
                 MoveJobPhase.CleaningArtifacts,
                 cancellationToken);
+            await RetainTargetScaffoldingAsync(request, cancellationToken);
             return;
         }
 
@@ -212,6 +213,13 @@ internal sealed partial class AudiobookContentMoveService
         faultInjector?.OnCompletedArtifactCleanup(
             request.JobId,
             CompletedArtifactCleanupFaultPoint.BeforeFinalDestinationOwnershipValidation);
+        await EnsureMutationAuthorizedAsync(
+            request,
+            result.Source,
+            result.Target,
+            cancellationToken);
+        VerifySourceCleanupState(request, result.Source, result.Target);
+        ValidateMoveTargetRoot(result.Target);
         ValidateExistingDestinationContents(
             result.Source,
             result.Target,
@@ -221,12 +229,23 @@ internal sealed partial class AudiobookContentMoveService
             finalTempOwnership,
             quarantineOwnership: null,
             allowPartialFiles: false);
+        ValidateRecoveryMarkerLocation(
+            result.RecoveryMarkerPath,
+            result.Target,
+            request.TargetSemantics);
         ValidateRecoveryMarker(
             ReadRecoveryMarker(result.RecoveryMarkerPath),
             request,
             result.Source,
             result.Target);
+        if (!File.Exists(result.RecoveryMarkerPath)
+            || (File.GetAttributes(result.RecoveryMarkerPath) & FileAttributes.ReparsePoint) != 0)
+        {
+            throw new MoveNeedsAttentionException(
+                "The completed recovery marker changed before deletion.");
+        }
         File.Delete(result.RecoveryMarkerPath);
+        await RetainTargetScaffoldingAsync(request, cancellationToken);
     }
 
     public async Task MarkCompletionRecordingAsync(

@@ -59,7 +59,9 @@ namespace Listenarr.Tests.Features.Api.Services
             var fileInSource = Path.Join(source, "track1.mp3");
             await File.WriteAllTextAsync(fileInSource, "dummy");
 
-            var mover = new FileMover(new NullLogger<FileMover>());
+            var mover = new FileMover(
+                new NullLogger<FileMover>(),
+                semanticsResolver: new FileSystemSemanticsResolver());
 
             var result = await mover.MoveDirectoryAsync(source, dest);
 
@@ -69,6 +71,186 @@ namespace Listenarr.Tests.Features.Api.Services
             // Destination should contain the file
             var copied = Path.Join(dest, "track1.mp3");
             Assert.True(File.Exists(copied));
+        }
+
+        [Fact]
+        public async Task MoveFileAsync_SamePath_IsNoOpAndPreservesFile()
+        {
+            var file = Path.Join(_root, "same.mp3");
+            await File.WriteAllTextAsync(file, "content");
+            var mover = new FileMover(new NullLogger<FileMover>());
+
+            var ok = await mover.MoveFileAsync(file, Path.GetFullPath(file));
+
+            Assert.True(ok);
+            Assert.True(File.Exists(file));
+            Assert.Equal("content", await File.ReadAllTextAsync(file));
+        }
+
+        [Fact]
+        public async Task PerformActionOn_MoveToSamePath_IsNoOpAndPreservesFile()
+        {
+            var file = Path.Join(_root, "perform-same.mp3");
+            await File.WriteAllTextAsync(file, "content");
+            var mover = new FileMover(new NullLogger<FileMover>());
+
+            var ok = await mover.PerformActionOn(FileAction.Move, file, file);
+
+            Assert.True(ok);
+            Assert.True(File.Exists(file));
+            Assert.Equal("content", await File.ReadAllTextAsync(file));
+        }
+
+        [Fact]
+        public async Task MoveDirectoryAsync_SamePath_IsNoOpAndPreservesContents()
+        {
+            var directory = Path.Join(_root, "same-directory");
+            Directory.CreateDirectory(directory);
+            var file = Path.Join(directory, "track.mp3");
+            await File.WriteAllTextAsync(file, "content");
+            var mover = new FileMover(new NullLogger<FileMover>());
+
+            var ok = await mover.MoveDirectoryAsync(directory, directory);
+
+            Assert.True(ok);
+            Assert.True(File.Exists(file));
+        }
+
+        [Fact]
+        public async Task MoveDirectoryAsync_DestinationInsideSource_IsBlockedWithoutMutation()
+        {
+            var source = Path.Join(_root, "nested-source");
+            var destination = Path.Join(source, "nested", "target");
+            Directory.CreateDirectory(source);
+            await File.WriteAllTextAsync(Path.Join(source, "book.m4b"), "audio");
+            var mover = new FileMover(
+                new NullLogger<FileMover>(),
+                options: Options.Create(new FileMoverOptions { MaxRetries = 1 }),
+                semanticsResolver: new FileSystemSemanticsResolver());
+
+            var result = await mover.MoveDirectoryAsync(source, destination);
+
+            Assert.False(result);
+            Assert.True(Directory.Exists(source));
+            Assert.False(Directory.Exists(destination));
+            Assert.Equal("audio", await File.ReadAllTextAsync(Path.Join(source, "book.m4b")));
+        }
+
+        [Fact]
+        public async Task MoveDirectoryAsync_SymbolicLinkAlias_BlocksCopyDeleteFallback()
+        {
+            if (OperatingSystem.IsWindows())
+            {
+                return;
+            }
+
+            var source = Path.Join(_root, "linked-source");
+            var alias = Path.Join(_root, "linked-alias");
+            Directory.CreateDirectory(source);
+            await File.WriteAllTextAsync(Path.Join(source, "book.m4b"), "audio");
+            Directory.CreateSymbolicLink(alias, source);
+            var mover = new FileMover(
+                new NullLogger<FileMover>(),
+                options: Options.Create(new FileMoverOptions { MaxRetries = 1 }),
+                semanticsResolver: new FileSystemSemanticsResolver());
+
+            var result = await mover.MoveDirectoryAsync(source, alias);
+
+            Assert.False(result);
+            Assert.True(Directory.Exists(source));
+            Assert.Equal("audio", await File.ReadAllTextAsync(Path.Join(source, "book.m4b")));
+        }
+
+        [Fact]
+        public async Task MoveDirectoryAsync_UnknownOverlap_BlocksCopyDeleteFallback()
+        {
+            var source = Path.Join(_root, "unknown-overlap-source");
+            var destination = Path.Join(_root, "unknown-overlap-destination");
+            Directory.CreateDirectory(source);
+            Directory.CreateDirectory(destination);
+            await File.WriteAllTextAsync(Path.Join(source, "book.m4b"), "audio");
+            var resolutionCallCount = 0;
+            var semanticsResolver = new Mock<IFileSystemSemanticsResolver>();
+            semanticsResolver.Setup(service => service.ResolveAsync(
+                    It.IsAny<string>(),
+                    It.IsAny<FileSystemCaseSensitivityMode>(),
+                    It.IsAny<CancellationToken>()))
+                .Returns<string, FileSystemCaseSensitivityMode, CancellationToken>((path, _, _) =>
+                {
+                    var call = Interlocked.Increment(ref resolutionCallCount);
+                    return ValueTask.FromResult(call == 1
+                        ? new FileSystemSemanticsResolution(
+                            FileSystemPathSemantics.CurrentHostDefault,
+                            PathIdentityState.Valid,
+                            Path.GetDirectoryName(path) ?? path)
+                        : new FileSystemSemanticsResolution(
+                            FileSystemPathSemantics.CurrentHostDefault,
+                            PathIdentityState.Unavailable,
+                            Path.GetDirectoryName(path) ?? path,
+                            "simulated overlap probe failure"));
+                });
+            var mover = new FileMover(
+                new NullLogger<FileMover>(),
+                options: Options.Create(new FileMoverOptions { MaxRetries = 1 }),
+                semanticsResolver: semanticsResolver.Object);
+
+            var result = await mover.MoveDirectoryAsync(source, destination);
+
+            Assert.False(result);
+            Assert.True(File.Exists(Path.Join(source, "book.m4b")));
+            Assert.False(File.Exists(Path.Join(destination, "book.m4b")));
+        }
+
+        [Fact]
+        public async Task MoveFileAsync_UnavailableIdentityForSameFileAlias_PreservesSource()
+        {
+            var sourceFile = Path.Join(_root, "same-file.mp3");
+            var aliasedDestination = Path.Join(_root, ".", "same-file.mp3");
+            await File.WriteAllTextAsync(sourceFile, "content");
+            var semanticsResolver = new Mock<IFileSystemSemanticsResolver>();
+            semanticsResolver.Setup(service => service.ResolveAsync(
+                    It.IsAny<string>(),
+                    It.IsAny<FileSystemCaseSensitivityMode>(),
+                    It.IsAny<CancellationToken>()))
+                .Returns<string, FileSystemCaseSensitivityMode, CancellationToken>((path, _, _) =>
+                    ValueTask.FromResult(new FileSystemSemanticsResolution(
+                        FileSystemPathSemantics.CurrentHostDefault,
+                        PathIdentityState.Unavailable,
+                        Path.GetDirectoryName(path) ?? path,
+                        "simulated probe failure")));
+            var mover = new FileMover(
+                new NullLogger<FileMover>(),
+                semanticsResolver: semanticsResolver.Object);
+
+            var result = await mover.MoveFileAsync(sourceFile, aliasedDestination);
+
+            Assert.True(result);
+            Assert.True(File.Exists(sourceFile));
+            Assert.Equal("content", await File.ReadAllTextAsync(sourceFile));
+        }
+
+        [Fact]
+        public async Task MoveFileAsync_SymbolicLinkDestinationToSource_PreservesFileContent()
+        {
+            if (OperatingSystem.IsWindows())
+            {
+                return;
+            }
+
+            var sourceFile = Path.Join(_root, "linked-file-source.mp3");
+            var aliasedDestination = Path.Join(_root, "linked-file-alias.mp3");
+            await File.WriteAllTextAsync(sourceFile, "content");
+            File.CreateSymbolicLink(aliasedDestination, sourceFile);
+            var mover = new FileMover(
+                new NullLogger<FileMover>(),
+                options: Options.Create(new FileMoverOptions { MaxRetries = 1 }),
+                semanticsResolver: new FileSystemSemanticsResolver());
+
+            await mover.MoveFileAsync(sourceFile, aliasedDestination);
+
+            var survivingPath = File.Exists(sourceFile) ? sourceFile : aliasedDestination;
+            Assert.True(File.Exists(survivingPath));
+            Assert.Equal("content", await File.ReadAllTextAsync(survivingPath));
         }
 
         [Fact]
@@ -103,10 +285,15 @@ namespace Listenarr.Tests.Features.Api.Services
                     EnableRobocopy = true,
                     MaxRetries = 1,
                     RobocopyTimeoutMs = 1000,
-                }));
+                }),
+                new FileSystemSemanticsResolver());
 
-            var source = Path.Join(_root, "missing-dir");
-            var dest = Path.Join(_root, "dest-dir");
+            var source = Path.Join(_root, "robocopy-source");
+            var dest = Path.Join(_root, "robocopy-destination");
+            Directory.CreateDirectory(Path.Join(source, "nested"));
+            Directory.CreateDirectory(dest);
+            await File.WriteAllTextAsync(Path.Join(source, "nested", "book.m4b"), "audio");
+            await File.WriteAllTextAsync(Path.Join(dest, "nested"), "destination conflict");
 
             var ok = await mover.MoveDirectoryAsync(source, dest);
 
@@ -141,7 +328,8 @@ namespace Listenarr.Tests.Features.Api.Services
                     EnableRobocopy = true,
                     MaxRetries = 1,
                     RobocopyTimeoutMs = 1000,
-                }));
+                }),
+                new FileSystemSemanticsResolver());
 
             var sourceFile = Path.Join(_root, "missing-file.mp3");
             var destFile = Path.Join(_root, "dest", "missing-file.mp3");

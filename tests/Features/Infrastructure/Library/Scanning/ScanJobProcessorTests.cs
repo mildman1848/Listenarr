@@ -53,7 +53,7 @@ namespace Listenarr.Tests.Features.Infrastructure.Library.Scanning
         }
 
         [Fact]
-        public async Task ProcessJobAsync_Failure_MarksJobFailed()
+        public async Task ProcessJobAsync_BroadcastFailure_DoesNotChangeDurableCompletion()
         {
             var failingProxy = new Mock<IClientProxy>();
             failingProxy
@@ -80,10 +80,71 @@ namespace Listenarr.Tests.Features.Infrastructure.Library.Scanning
             await processor.ProcessJobAsync(job, CancellationToken.None);
 
             Assert.True(queue.TryGetJob(job.Id, out var updatedJob));
-            Assert.Equal("Failed", updatedJob!.Status);
+            Assert.Equal("Completed", updatedJob!.Status);
 
             var metricsMock = _provider.GetRequiredService<Mock<IAppMetricsService>>();
-            metricsMock.Verify(m => m.Increment("worker.scan.job.failed", It.IsAny<double>()), Times.AtLeastOnce);
+            metricsMock.Verify(m => m.Increment("worker.scan.job.completed", It.IsAny<double>()), Times.Once);
+        }
+
+        [Fact]
+        public async Task ProcessJobAsync_ReleasesAudiobookLockBeforeOptionalCompletionEffects()
+        {
+            var broadcastEntered = new TaskCompletionSource(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+            var releaseBroadcast = new TaskCompletionSource(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+            var blockingProxy = new Mock<IClientProxy>();
+            blockingProxy
+                .Setup(proxy => proxy.SendCoreAsync(
+                    It.IsAny<string>(),
+                    It.IsAny<object?[]>(),
+                    It.IsAny<CancellationToken>()))
+                .Returns((string method, object?[] _, CancellationToken _) =>
+                {
+                    if (!string.Equals(method, "AudiobookUpdate", StringComparison.Ordinal))
+                    {
+                        return Task.CompletedTask;
+                    }
+
+                    broadcastEntered.TrySetResult();
+                    return releaseBroadcast.Task;
+                });
+            var hubClients = new Mock<IHubClients>();
+            hubClients.Setup(clients => clients.All).Returns(blockingProxy.Object);
+            var hubContext = new Mock<IHubContext<DownloadHub>>();
+            hubContext.Setup(context => context.Clients).Returns(hubClients.Object);
+            _services.AddSingleton(hubContext.Object);
+            Init();
+
+            var basePath = FileService.GetTempDirectory("scan-processor-post-effects");
+            await FileService.GetFileAsync(basePath, "Post Effects.m4b", "audio");
+            var audiobook = await _audiobookRepository.AddAsync(new Audiobook
+            {
+                Title = "Scan post effects",
+                BasePath = basePath,
+                Monitored = false
+            });
+            var (_, job) = await CreateQueuedScanJobAsync(audiobook);
+            var processor = _provider.GetRequiredService<IScanJobProcessor>();
+
+            var processing = processor.ProcessJobAsync(job, CancellationToken.None);
+            await broadcastEntered.Task.WaitAsync(TimeSpan.FromSeconds(10));
+
+            var coordinator = _provider.GetRequiredService<IAudiobookOperationCoordinator>();
+            var concurrentEntered = new TaskCompletionSource(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+            var concurrentOperation = coordinator.ExecuteExclusiveAsync(
+                audiobook.Id,
+                _ =>
+                {
+                    concurrentEntered.TrySetResult();
+                    return Task.CompletedTask;
+                },
+                CancellationToken.None);
+
+            await concurrentEntered.Task.WaitAsync(TimeSpan.FromSeconds(10));
+            releaseBroadcast.TrySetResult();
+            await Task.WhenAll(processing, concurrentOperation);
         }
 
         [Fact]

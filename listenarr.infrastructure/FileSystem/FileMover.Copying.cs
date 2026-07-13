@@ -12,18 +12,29 @@ namespace Listenarr.Infrastructure.FileSystem
 {
     public partial class FileMover : IFileMover
     {
-        public Task<bool> CopyDirectoryAsync(string sourceDir, string destDir)
+        public async Task<bool> CopyDirectoryAsync(string sourceDir, string destDir)
         {
             try
             {
+                if (await IsSameFilesystemPathAsync(sourceDir, destDir))
+                {
+                    LogMutation(
+                        FileMutationOutcome.Skipped,
+                        FileAction.Copy,
+                        sourceDir,
+                        destDir,
+                        "Source and destination identify the same directory");
+                    return true;
+                }
+
                 CopyDirRecursive(sourceDir, destDir);
                 LogMutation(FileMutationOutcome.Success, FileAction.Copy, sourceDir, destDir);
-                return Task.FromResult(true);
+                return true;
             }
             catch (Exception ex) when (ex is not OperationCanceledException && ex is not OutOfMemoryException && ex is not StackOverflowException)
             {
                 _logger.LogError(ex, "Copy directory failed: {Source} -> {Dest}", sourceDir, destDir);
-                return Task.FromResult(false);
+                return false;
             }
         }
 
@@ -31,6 +42,17 @@ namespace Listenarr.Infrastructure.FileSystem
         {
             try
             {
+                if (await IsSameFilesystemPathAsync(sourceFile, destFile))
+                {
+                    LogMutation(
+                        FileMutationOutcome.Skipped,
+                        FileAction.Copy,
+                        sourceFile,
+                        destFile,
+                        "Source and destination identify the same file");
+                    return true;
+                }
+
                 if (await TrySkipSameContentAsync(FileAction.Copy, sourceFile, destFile))
                 {
                     return true;
@@ -51,6 +73,17 @@ namespace Listenarr.Infrastructure.FileSystem
         {
             try
             {
+                if (await IsSameFilesystemPathAsync(sourceFile, destFile))
+                {
+                    LogMutation(
+                        FileMutationOutcome.Skipped,
+                        FileAction.HardlinkCopy,
+                        sourceFile,
+                        destFile,
+                        "Source and destination identify the same file");
+                    return true;
+                }
+
                 // Ensure destination directory exists
                 var destDir = Path.GetDirectoryName(destFile) ?? string.Empty;
                 if (!string.IsNullOrEmpty(destDir) && !Directory.Exists(destDir))
@@ -212,6 +245,16 @@ namespace Listenarr.Infrastructure.FileSystem
         public async Task<bool> PerformActionOn(FileAction action, string source, string? destination = null)
         {
             if (action == FileAction.None || destination == null) return true;
+            if (await IsSameFilesystemPathAsync(source, destination))
+            {
+                LogMutation(
+                    FileMutationOutcome.Skipped,
+                    action,
+                    source,
+                    destination,
+                    "Source and destination identify the same filesystem path");
+                return true;
+            }
 
             // Ensure destination directory exists
             var directory = Path.GetDirectoryName(destination);
@@ -253,7 +296,22 @@ namespace Listenarr.Infrastructure.FileSystem
 
         private async Task<bool> TryCompleteIdempotentFileMoveAsync(string sourceFile, string destFile)
         {
-            if (!File.Exists(sourceFile) || !File.Exists(destFile))
+            var equivalence = await TryDetermineFilesystemPathEquivalenceAsync(
+                sourceFile,
+                destFile);
+            if (equivalence == true)
+            {
+                return true;
+            }
+
+            // Removing the source is safe only when filesystem identity resolution
+            // conclusively proved that the paths are different. An unavailable probe
+            // can otherwise compare a file with an alias of itself and delete it.
+            if (equivalence == null
+                || IsLinkedOrUnverifiableEntry(sourceFile)
+                || IsLinkedOrUnverifiableEntry(destFile)
+                || !File.Exists(sourceFile)
+                || !File.Exists(destFile))
             {
                 return false;
             }
@@ -273,6 +331,111 @@ namespace Listenarr.Infrastructure.FileSystem
             {
                 _logger.LogWarning(ex, "Failed to remove idempotent move source {Source}", LogRedaction.SanitizeFilePath(sourceFile));
                 return false;
+            }
+        }
+
+        private async Task<bool> IsSameFilesystemPathAsync(string source, string destination) =>
+            await TryDetermineFilesystemPathEquivalenceAsync(source, destination) == true;
+
+        private async Task<bool?> TryDetermineDirectoryOverlapAsync(
+            string source,
+            string destination)
+        {
+            var sourcePath = Path.GetFullPath(
+                FileSystemPathIdentity.ResolveNativeAbsolutePath(source));
+            var destinationPath = Path.GetFullPath(
+                FileSystemPathIdentity.ResolveNativeAbsolutePath(destination));
+            if (_semanticsResolver == null)
+            {
+                return null;
+            }
+
+            try
+            {
+                var resolution = await _semanticsResolver.ResolveAsync(sourcePath);
+                if (resolution.State != PathIdentityState.Valid)
+                {
+                    return null;
+                }
+
+                return FileSystemPathIdentity.IsSameOrInside(
+                        destinationPath,
+                        sourcePath,
+                        resolution.Semantics)
+                    || FileSystemPathIdentity.IsSameOrInside(
+                        sourcePath,
+                        destinationPath,
+                        resolution.Semantics);
+            }
+            catch (Exception exception) when (exception is
+                IOException or UnauthorizedAccessException or ArgumentException or
+                InvalidOperationException or NotSupportedException or PathTooLongException)
+            {
+                _logger.LogDebug(
+                    exception,
+                    "Filesystem identity resolution failed while checking directory overlap for {Source} and {Destination}",
+                    LogRedaction.SanitizeFilePath(sourcePath),
+                    LogRedaction.SanitizeFilePath(destinationPath));
+                return null;
+            }
+        }
+
+        private async Task<bool?> TryDetermineFilesystemPathEquivalenceAsync(
+            string source,
+            string destination)
+        {
+            var sourcePath = Path.GetFullPath(
+                FileSystemPathIdentity.ResolveNativeAbsolutePath(source));
+            var destinationPath = Path.GetFullPath(
+                FileSystemPathIdentity.ResolveNativeAbsolutePath(destination));
+            if (string.Equals(sourcePath, destinationPath, StringComparison.Ordinal))
+            {
+                return true;
+            }
+
+            if (_semanticsResolver == null)
+            {
+                return null;
+            }
+
+            try
+            {
+                var resolution = await _semanticsResolver.ResolveAsync(sourcePath);
+                return resolution.State == PathIdentityState.Valid
+                    ? FileSystemPathIdentity.AreEquivalent(
+                        sourcePath,
+                        destinationPath,
+                        resolution.Semantics)
+                    : null;
+            }
+            catch (Exception exception) when (exception is
+                IOException or UnauthorizedAccessException or ArgumentException or
+                InvalidOperationException or NotSupportedException or PathTooLongException)
+            {
+                _logger.LogDebug(
+                    exception,
+                    "Filesystem identity resolution failed while comparing {Source} and {Destination}; destructive idempotent cleanup will be disabled",
+                    LogRedaction.SanitizeFilePath(sourcePath),
+                    LogRedaction.SanitizeFilePath(destinationPath));
+                return null;
+            }
+        }
+
+        private static bool IsLinkedOrUnverifiableEntry(string path)
+        {
+            try
+            {
+                return (File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0;
+            }
+            catch (Exception exception) when (exception is FileNotFoundException or DirectoryNotFoundException)
+            {
+                return false;
+            }
+            catch (Exception exception) when (exception is
+                IOException or UnauthorizedAccessException or ArgumentException or
+                NotSupportedException or PathTooLongException)
+            {
+                return true;
             }
         }
 

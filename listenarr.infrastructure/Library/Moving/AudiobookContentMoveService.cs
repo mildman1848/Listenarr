@@ -44,9 +44,12 @@ internal sealed partial class AudiobookContentMoveService(
     ILogger<AudiobookContentMoveService> logger,
     IDbContextFactory<ListenArrDbContext> dbContextFactory,
     TimeProvider timeProvider,
-    IMoveFaultInjector? faultInjector = null)
+    IMoveFaultInjector? faultInjector = null,
+    IMoveExecutionStore? moveExecutionStore = null)
 {
     private const int MaxCopyAttempts = 5;
+    private readonly IMoveExecutionStore executionStore =
+        moveExecutionStore ?? new EfMoveExecutionStore(dbContextFactory, timeProvider);
 
     internal void OnCompletionHandoff(
         Guid jobId,
@@ -65,14 +68,6 @@ internal sealed partial class AudiobookContentMoveService(
         var target = NormalizeMoveDirectoryEndpoint(request.Target);
         var sourceSemantics = request.SourceSemantics;
         var targetSemantics = request.TargetSemantics;
-        await ValidatePersistedMoveIdentityAsync(
-            request.JobId,
-            source,
-            target,
-            sourceSemantics,
-            targetSemantics,
-            request.LeaseToken,
-            cancellationToken);
         if (IsFilesystemRoot(source, sourceSemantics)
             || IsFilesystemRoot(target, targetSemantics)
             || FileSystemPathIdentity.AreEquivalent(source, target, sourceSemantics))
@@ -83,6 +78,14 @@ internal sealed partial class AudiobookContentMoveService(
 
         ValidateMoveSourceRoot(source);
         ValidateMoveTargetRoot(target);
+        await ValidatePersistedMoveIdentityAsync(
+            request.JobId,
+            source,
+            target,
+            sourceSemantics,
+            targetSemantics,
+            request.LeaseToken,
+            cancellationToken);
 
         var targetInsideSource = IsSameOrInside(target, source, sourceSemantics);
         var sourceInsideTarget = IsSameOrInside(source, target, targetSemantics);
@@ -93,12 +96,12 @@ internal sealed partial class AudiobookContentMoveService(
             throw new MoveNeedsAttentionException("Invalid target path");
         }
 
-        if (!Directory.Exists(targetParent))
-        {
-            await EnsureMutationAuthorizedAsync(request, source, target, cancellationToken);
-            ValidateMoveRootPath(targetParent, mustExist: false, "target parent");
-            Directory.CreateDirectory(targetParent);
-        }
+        var targetScaffolding = await PlanTargetScaffoldingAsync(
+            request,
+            source,
+            target,
+            targetParent,
+            cancellationToken);
         ValidateMoveTargetRoot(target);
 
         await EnsureMutationAuthorizedAsync(request, source, target, cancellationToken);
@@ -157,13 +160,23 @@ internal sealed partial class AudiobookContentMoveService(
             request.JobId,
             recoveryMarker?.StructuredMarker != null);
         EnsureTargetCanReceiveContents(source, target, sourceInsideTarget, resumingDirectCopy, targetSemantics);
+        var targetStructuralSpine = GetTargetStructuralSpine(
+            source,
+            target,
+            sourceSemantics);
+        ValidateExistingTargetSpine(
+            targetStructuralSpine,
+            target,
+            sourceSemantics);
         var validatedSourceEntries = ValidateSourceTreeForMove(
             source,
             target,
             targetInsideSource,
             sourceSemantics,
             cancellationToken,
-            sourceRecoveryMarker == null ? null : sourceRecoveryMarkerPath);
+            sourceRecoveryMarker == null ? null : sourceRecoveryMarkerPath,
+            targetScaffolding.Select(directory => directory.Path).ToList(),
+            targetStructuralSpine);
 
         var tempName = Path.Join(targetParent, Path.GetFileName(target) + ".tmp-" + request.JobId.ToString("N"));
         if (!FileSystemSafety.TryValidateMutationTarget(tempName, [targetParent], out tempName, out var tempReason))
@@ -179,11 +192,30 @@ internal sealed partial class AudiobookContentMoveService(
                 request.LeaseToken,
                 validatedSourceEntries,
                 cancellationToken);
+        if (persistedManifest.Count > 0)
+        {
+            var currentManifest = await BuildManifestAsync(
+                request.JobId,
+                validatedSourceEntries,
+                cancellationToken,
+                includeRootProofWhenEmpty: true);
+            if (!ManifestMatches(persistedManifest, currentManifest, sourceSemantics))
+            {
+                throw new MoveNeedsAttentionException(
+                    "Source content changed after the move manifest was persisted.");
+            }
+        }
         ValidateTargetManifest(target, manifest, targetSemantics);
         await UpdateJobPhaseAsync(
             request.JobId,
             request.LeaseToken,
             MoveJobPhase.Planned,
+            cancellationToken);
+        await CreateOrValidateTargetScaffoldingAsync(
+            request,
+            source,
+            target,
+            targetScaffolding,
             cancellationToken);
 
         try

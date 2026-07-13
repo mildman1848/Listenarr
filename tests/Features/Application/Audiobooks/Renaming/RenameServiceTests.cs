@@ -334,6 +334,54 @@ namespace Listenarr.Tests.Features.Application.Audiobooks.Renaming
         }
 
         [Fact]
+        public async Task ExecuteRename_SymbolicLinkDestinationOutsideRoot_IsRejected()
+        {
+            if (OperatingSystem.IsWindows())
+            {
+                return;
+            }
+
+            var libraryRoot = Path.Join(_tempRoot, "library-link-guard");
+            var sourceFolder = Path.Join(libraryRoot, "Old");
+            var outsideRoot = Path.Join(_tempRoot, "outside-link-target");
+            var linkedRoot = Path.Join(libraryRoot, "linked");
+            var targetFolder = Path.Join(linkedRoot, "Book");
+            Directory.CreateDirectory(sourceFolder);
+            Directory.CreateDirectory(outsideRoot);
+            Directory.CreateSymbolicLink(linkedRoot, outsideRoot);
+            await File.WriteAllTextAsync(Path.Join(sourceFolder, "book.m4b"), "audio");
+            var settings = new ApplicationSettings
+            {
+                OutputPath = libraryRoot,
+                FolderNamingPattern = "{Author}/{Title}",
+                FileNamingPattern = "{Title}"
+            };
+            var (service, db, _) = BuildService(settings);
+            db.Audiobooks.Add(new Audiobook
+            {
+                Id = 70,
+                Title = "Book",
+                Authors = new List<string> { "Author" },
+                BasePath = sourceFolder
+            });
+            await db.SaveChangesAsync();
+
+            var result = Assert.Single(await service.ExecuteRenameAsync(new List<RenameOperation>
+            {
+                new()
+                {
+                    AudiobookId = 70,
+                    NewFolderPath = targetFolder
+                }
+            }));
+
+            Assert.False(result.Success);
+            Assert.Contains("resolved safely", result.Error, StringComparison.OrdinalIgnoreCase);
+            Assert.True(Directory.Exists(sourceFolder));
+            Assert.False(Directory.Exists(Path.Join(outsideRoot, "Book")));
+        }
+
+        [Fact]
         public async Task ExecuteRename_RecomputesBasePathAfterPartialFileFailures()
         {
             var libraryRoot = Path.Join(_tempRoot, "library");

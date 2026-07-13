@@ -56,16 +56,48 @@ namespace Listenarr.Infrastructure.FileSystem
         private readonly ILogger<FileMover> _logger;
         private readonly IProcessRunner? _processRunner;
         private readonly FileMoverOptions _options;
+        private readonly IFileSystemSemanticsResolver? _semanticsResolver;
 
-        public FileMover(ILogger<FileMover> logger, IProcessRunner? processRunner = null, IOptions<FileMoverOptions>? options = null)
+        public FileMover(
+            ILogger<FileMover> logger,
+            IProcessRunner? processRunner = null,
+            IOptions<FileMoverOptions>? options = null,
+            IFileSystemSemanticsResolver? semanticsResolver = null)
         {
             _logger = logger;
             _processRunner = processRunner;
             _options = options?.Value ?? new FileMoverOptions();
+            _semanticsResolver = semanticsResolver;
         }
 
         public async Task<bool> MoveDirectoryAsync(string sourceDir, string destDir)
         {
+            var pathEquivalence = await TryDetermineFilesystemPathEquivalenceAsync(
+                sourceDir,
+                destDir);
+            if (pathEquivalence == true)
+            {
+                LogMutation(
+                    FileMutationOutcome.Skipped,
+                    FileAction.Move,
+                    sourceDir,
+                    destDir,
+                    "Source and destination identify the same directory");
+                return true;
+            }
+
+            var pathsOverlap = await TryDetermineDirectoryOverlapAsync(sourceDir, destDir);
+            if (pathsOverlap == true)
+            {
+                LogMutation(
+                    FileMutationOutcome.Blocked,
+                    FileAction.Move,
+                    sourceDir,
+                    destDir,
+                    "Source and destination directories overlap");
+                return false;
+            }
+
             // Try move with retries
             var attempt = 0;
             var delay = 1000;
@@ -111,6 +143,33 @@ namespace Listenarr.Infrastructure.FileSystem
                         delay = Math.Min(delay * 2, _options.MaxBackoffMs);
                     }
                 }
+            }
+
+            if (pathEquivalence == null || pathsOverlap != false)
+            {
+                _logger.LogWarning(
+                    "Blocked copy-and-delete directory fallback because filesystem identity could not prove distinct, non-overlapping paths: {Source} -> {Destination}",
+                    LogRedaction.SanitizeFilePath(sourceDir),
+                    LogRedaction.SanitizeFilePath(destDir));
+                return false;
+            }
+
+            if (!FileSystemSafety.TryEnumerateTreeWithoutLinks(
+                    sourceDir,
+                    out _,
+                    out _,
+                    out var sourceTraversalReason)
+                || (Directory.Exists(destDir)
+                    && !FileSystemSafety.TryEnumerateTreeWithoutLinks(
+                        destDir,
+                        out _,
+                        out _,
+                        out sourceTraversalReason)))
+            {
+                _logger.LogWarning(
+                    "Blocked copy-and-delete directory fallback because a filesystem tree could not be traversed safely: {Reason}",
+                    sourceTraversalReason);
+                return false;
             }
 
             // Fallback to copy+delete
@@ -168,6 +227,20 @@ namespace Listenarr.Infrastructure.FileSystem
 
         public async Task<bool> MoveFileAsync(string sourceFile, string destFile)
         {
+            var pathEquivalence = await TryDetermineFilesystemPathEquivalenceAsync(
+                sourceFile,
+                destFile);
+            if (pathEquivalence == true)
+            {
+                LogMutation(
+                    FileMutationOutcome.Skipped,
+                    FileAction.Move,
+                    sourceFile,
+                    destFile,
+                    "Source and destination identify the same file");
+                return true;
+            }
+
             var attempt = 0;
             var delay = 1000;
 
@@ -217,6 +290,17 @@ namespace Listenarr.Infrastructure.FileSystem
                         delay = Math.Min(delay * 2, _options.MaxBackoffMs);
                     }
                 }
+            }
+
+            if (pathEquivalence == null
+                || IsLinkedOrUnverifiableEntry(sourceFile)
+                || IsLinkedOrUnverifiableEntry(destFile))
+            {
+                _logger.LogWarning(
+                    "Blocked copy-and-delete file fallback because filesystem identity or link safety could not prove distinct regular files: {Source} -> {Destination}",
+                    LogRedaction.SanitizeFilePath(sourceFile),
+                    LogRedaction.SanitizeFilePath(destFile));
+                return false;
             }
 
             // Fallback copy+delete

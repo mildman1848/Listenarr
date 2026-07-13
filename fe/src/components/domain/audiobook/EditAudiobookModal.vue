@@ -1391,14 +1391,19 @@ async function initializeForm(audiobook: Audiobook) {
   // Determine which root folder matches the existing basePath
   if (audiobook.basePath && rootStore.folders.length > 0) {
     // Check if basePath starts with any configured root folder
-    const matchingRoot = rootStore.folders.find((folder) => {
-      const pathKind = detectPathKind(folder.path)
-      const caseSensitivity = folder.resolvedCaseSensitivity ?? 'Unknown'
-      return (
-        pathsEqual(audiobook.basePath, folder.path, pathKind, caseSensitivity) ||
-        pathIsInside(audiobook.basePath, folder.path, pathKind, caseSensitivity)
-      )
-    })
+    const matchingRoot = rootStore.folders
+      .filter((folder) => {
+        const pathKind = detectPathKind(folder.path)
+        const caseSensitivity = folder.resolvedCaseSensitivity ?? 'Unknown'
+        return (
+          pathsEqual(audiobook.basePath, folder.path, pathKind, caseSensitivity) ||
+          pathIsInside(audiobook.basePath, folder.path, pathKind, caseSensitivity)
+        )
+      })
+      .sort(
+        (first, second) =>
+          trimTrailingSlash(second.path).length - trimTrailingSlash(first.path).length,
+      )[0]
 
     if (matchingRoot) {
       // Found a matching configured root folder

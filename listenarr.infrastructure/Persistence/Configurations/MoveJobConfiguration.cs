@@ -22,6 +22,14 @@ public sealed class MoveJobConfiguration : IEntityTypeConfiguration<MoveJob>
         builder.Property(job => job.Phase).HasConversion<string>().HasMaxLength(32);
         builder.Property(job => job.FailureKind).HasConversion<string>().HasMaxLength(32);
         builder.Property(job => job.ActiveDeduplicationKey).HasMaxLength(1024);
+        builder.Property(job => job.SourcePathSyntax).HasConversion<string>().HasMaxLength(16);
+        builder.Property(job => job.SourceCaseSensitivity).HasConversion<string>().HasMaxLength(16);
+        builder.Property(job => job.SourceCaseSensitivityMode).HasConversion<string>().HasMaxLength(16);
+        builder.Property(job => job.SourceIdentityBoundary).HasMaxLength(2000);
+        builder.Property(job => job.TargetPathSyntax).HasConversion<string>().HasMaxLength(16);
+        builder.Property(job => job.TargetCaseSensitivity).HasConversion<string>().HasMaxLength(16);
+        builder.Property(job => job.TargetCaseSensitivityMode).HasConversion<string>().HasMaxLength(16);
+        builder.Property(job => job.TargetIdentityBoundary).HasMaxLength(2000);
         builder.Property(job => job.SourceCleanupBoundary).HasMaxLength(2000);
         builder.Property(job => job.LeaseOwner).HasMaxLength(200);
         builder.Property(job => job.LeaseGeneration).HasDefaultValue(0);

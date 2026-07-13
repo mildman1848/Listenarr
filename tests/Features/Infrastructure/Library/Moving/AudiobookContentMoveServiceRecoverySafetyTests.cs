@@ -193,7 +193,7 @@ public partial class AudiobookContentMoveServiceTests
         var exception = await Assert.ThrowsAsync<MoveNeedsAttentionException>(() =>
             service.GetRecoverableMoveAsync(request));
 
-        Assert.Contains("could not be read safely", exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("corrupt or truncated", exception.Message, StringComparison.OrdinalIgnoreCase);
         Assert.True(File.Exists(Path.Join(source, "book.m4b")));
     }
 

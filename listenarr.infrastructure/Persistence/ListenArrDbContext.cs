@@ -28,6 +28,8 @@ namespace Listenarr.Infrastructure.Persistence
         public DbSet<AudiobookFile> AudiobookFiles { get; set; } = null!;
         public DbSet<MoveJob> MoveJobs { get; set; } = null!;
         public DbSet<MoveJobEntry> MoveJobEntries { get; set; } = null!;
+        public DbSet<MoveJobCreatedDirectory> MoveJobCreatedDirectories { get; set; } = null!;
+        public DbSet<MoveScanHandoff> MoveScanHandoffs { get; set; } = null!;
         public DbSet<ApplicationSettings> ApplicationSettings { get; set; } = null!;
         public DbSet<History> History { get; set; } = null!;
         public DbSet<Indexer> Indexers { get; set; } = null!;
@@ -146,6 +148,9 @@ namespace Listenarr.Infrastructure.Persistence
             modelBuilder.Entity<History>().HasIndex(h => h.DownloadId);
             modelBuilder.Entity<History>().HasIndex(h => h.DownloadClientId);
             modelBuilder.Entity<History>().HasIndex(h => h.CorrelationId);
+            modelBuilder.Entity<History>().HasIndex(h => h.IdempotencyKey)
+                .IsUnique()
+                .HasFilter("\"IdempotencyKey\" IS NOT NULL");
 
             modelBuilder.Entity<MoveJob>().HasIndex(m => new { m.AudiobookId, m.Status });
 

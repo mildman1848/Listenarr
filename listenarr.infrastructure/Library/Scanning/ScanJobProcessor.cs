@@ -16,7 +16,6 @@
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
 using System.Text.Json;
-using Listenarr.Application.Mapping;
 using Listenarr.Domain.Common;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
@@ -25,24 +24,10 @@ namespace Listenarr.Infrastructure.Library.Scanning
 {
     public partial class ScanJobProcessor : IScanJobProcessor
     {
-        private readonly IScanQueueService _queue;
-        private readonly IServiceScopeFactory _scopeFactory;
-        private readonly ILogger<ScanJobProcessor> _logger;
-        private readonly IHubContext<DownloadHub> _hubContext;
-        private readonly IAppMetricsService _metrics;
-        private readonly IFileSystemSemanticsResolver _semanticsResolver;
-
-        public ScanJobProcessor(IScanQueueService queue, IServiceScopeFactory scopeFactory, ILogger<ScanJobProcessor> logger, IHubContext<DownloadHub> hubContext, IAppMetricsService metrics, IFileSystemSemanticsResolver semanticsResolver)
-        {
-            _queue = queue;
-            _scopeFactory = scopeFactory;
-            _logger = logger;
-            _hubContext = hubContext;
-            _metrics = metrics;
-            _semanticsResolver = semanticsResolver;
-        }
-
-        public async Task ProcessJobAsync(ScanJob job, CancellationToken stoppingToken)
+        private async Task ProcessJobCoreAsync(
+            ScanJob job,
+            Action<Func<CancellationToken, Task>> registerPostCompletionEffects,
+            CancellationToken stoppingToken)
         {
             using var logScope = _logger.BeginScope(new Dictionary<string, object?>
             {
@@ -88,27 +73,76 @@ namespace Listenarr.Infrastructure.Library.Scanning
 
                 var scanRoot = job.Path;
                 var usedBasePath = false;
+                var moveOwned = job.MoveScanHandoffId.HasValue;
+                if (moveOwned)
+                {
+                    if (string.IsNullOrWhiteSpace(job.Path)
+                        || !job.PathIdentity.HasValue)
+                    {
+                        await RecordMoveScanFailureAsync(
+                            historyRepository,
+                            job,
+                            audiobook,
+                            "The move scan handoff has no authoritative target filesystem identity.",
+                            stoppingToken);
+                        _metrics.Increment("worker.scan.job.skipped");
+                        return;
+                    }
 
-                if (!string.IsNullOrEmpty(audiobook.BasePath))
+                    PathIdentitySnapshot targetIdentity;
+                    try
+                    {
+                        targetIdentity = await ValidateScanIdentityAsync(
+                            job.Path,
+                            job.PathIdentity.Value,
+                            stoppingToken);
+                    }
+                    catch (InvalidOperationException exception)
+                    {
+                        await RecordMoveScanFailureAsync(
+                            historyRepository,
+                            job,
+                            audiobook,
+                            exception.Message,
+                            stoppingToken);
+                        _metrics.Increment("worker.scan.job.skipped");
+                        return;
+                    }
+
+                    if (string.IsNullOrWhiteSpace(audiobook.BasePath)
+                        || !FileSystemPathIdentity.AreEquivalent(
+                            audiobook.BasePath,
+                            job.Path,
+                            targetIdentity.Semantics))
+                    {
+                        var superseded = await RecordMoveScanSupersededAsync(
+                            job,
+                            "A newer audiobook destination superseded this move scan handoff.",
+                            stoppingToken);
+                        ApplyTerminalStatus(job, superseded);
+                        _metrics.Increment("worker.scan.job.skipped");
+                        return;
+                    }
+
+                    scanRoot = job.Path;
+                }
+                else if (!string.IsNullOrEmpty(audiobook.BasePath))
                 {
                     scanRoot = audiobook.BasePath;
                     usedBasePath = true;
                     _logger.LogDebug("Using audiobook BasePath as scan root for job {JobId}: {ScanRoot}", job.Id, scanRoot);
                 }
-                else
+                else if (string.IsNullOrEmpty(scanRoot))
                 {
-                    if (string.IsNullOrEmpty(scanRoot))
+                    try
                     {
-                        try
-                        {
-                            var configService = scope.ServiceProvider.GetRequiredService<IConfigurationService>();
-                            var settings = await configService.GetApplicationSettingsAsync();
-                            scanRoot = settings.OutputPath;
-                        }
-                        catch (Exception ex) when (ex is not OperationCanceledException && ex is not OutOfMemoryException && ex is not StackOverflowException)
-                        {
-                            _logger.LogWarning(ex, "Failed to read settings for scan job {JobId}", job.Id);
-                        }
+                        var configService = scope.ServiceProvider.GetRequiredService<IConfigurationService>();
+                        var settings = await configService.GetApplicationSettingsAsync();
+                        scanRoot = settings.OutputPath;
+                    }
+                    catch (Exception ex) when (ex is not OperationCanceledException && ex is not OutOfMemoryException && ex is not StackOverflowException)
+                    {
+                        _logger.LogWarning(ex, "Failed to read settings for scan job {JobId}", job.Id);
                     }
                 }
 
@@ -124,17 +158,17 @@ namespace Listenarr.Infrastructure.Library.Scanning
                         "Audiobook BasePath is unavailable for scan job {JobId}: {Path}. Leaving tracked files unchanged.",
                         job.Id,
                         LogRedaction.SanitizeFilePath(scanRoot));
-                    try { await _hubContext.Clients.All.SendAsync("ScanJobUpdate", new { jobId = job.Id.ToString(), audiobookId = job.AudiobookId, status = "Failed", error = "BasePath unavailable", failedAt = DateTime.UtcNow }); }
-                    catch (Exception caughtEx_4) when (caughtEx_4 is not OperationCanceledException && caughtEx_4 is not OutOfMemoryException && caughtEx_4 is not StackOverflowException)
-                    {
-                        System.Diagnostics.Debug.WriteLine("Suppressed non-fatal exception in catch block.");
-                    }
-                    await RecordMoveScanFailureAsync(
+                    var failureDecision = await RecordMoveScanFailureAsync(
                         historyRepository,
                         job,
                         audiobook,
                         "BasePath unavailable",
                         stoppingToken);
+                    registerPostCompletionEffects(token => BroadcastFailedScanAsync(
+                        job,
+                        failureDecision.Status,
+                        failureDecision.Error,
+                        token));
                     _metrics.Increment("worker.scan.job.failed");
                     return;
                 }
@@ -152,25 +186,50 @@ namespace Listenarr.Infrastructure.Library.Scanning
                     return;
                 }
 
-                var semanticsResolution = await _semanticsResolver.ResolveAsync(
-                    scanRoot,
-                    cancellationToken: stoppingToken);
-                if (semanticsResolution.State != PathIdentityState.Valid)
+                FileSystemPathSemantics semantics;
+                try
+                {
+                    if (job.PathIdentity.HasValue
+                        && !string.IsNullOrWhiteSpace(job.Path)
+                        && FileSystemPathIdentity.AreEquivalent(
+                            scanRoot,
+                            job.Path,
+                            job.PathIdentity.Value.Semantics))
+                    {
+                        semantics = (await ValidateScanIdentityAsync(
+                            scanRoot,
+                            job.PathIdentity.Value,
+                            stoppingToken)).Semantics;
+                    }
+                    else
+                    {
+                        var semanticsResolution = await _semanticsResolver.ResolveAsync(
+                            scanRoot,
+                            cancellationToken: stoppingToken);
+                        if (semanticsResolution.State != PathIdentityState.Valid)
+                        {
+                            throw new InvalidOperationException(
+                                semanticsResolution.Reason ?? "Filesystem identity unavailable");
+                        }
+
+                        semantics = semanticsResolution.Semantics;
+                    }
+                }
+                catch (InvalidOperationException exception)
                 {
                     _logger.LogWarning(
                         "Scan job {JobId} blocked because filesystem identity is unavailable: {Reason}",
                         job.Id,
-                        semanticsResolution.Reason);
+                        exception.Message);
                     await RecordMoveScanFailureAsync(
                         historyRepository,
                         job,
                         audiobook,
-                        semanticsResolution.Reason ?? "Filesystem identity unavailable",
+                        exception.Message,
                         stoppingToken);
                     _metrics.Increment("worker.scan.job.skipped");
                     return;
                 }
-                var semantics = semanticsResolution.Semantics;
 
                 var foundFiles = ScanFileDiscovery.FindMatchingAudioFiles(
                     scanRoot,
@@ -182,10 +241,11 @@ namespace Listenarr.Infrastructure.Library.Scanning
                 var basePath = ScanPathPlanner.CalculateBasePath(foundFiles, semantics);
                 if (!string.IsNullOrEmpty(basePath))
                 {
-                    var basePathChanged = !FileSystemPathIdentity.AreEquivalent(
-                        audiobook.BasePath ?? string.Empty,
-                        basePath,
-                        semantics);
+                    var basePathChanged = string.IsNullOrWhiteSpace(audiobook.BasePath)
+                        || !FileSystemPathIdentity.AreEquivalent(
+                            audiobook.BasePath,
+                            basePath,
+                            semantics);
                     audiobook.BasePath = basePath;
                     _logger.LogInformation("Set base path for audiobook '{Title}' (ID: {AudiobookId}): {BasePath}", LogRedaction.SanitizeText(audiobook.Title), audiobook.Id, LogRedaction.SanitizeFilePath(basePath));
 
@@ -206,7 +266,6 @@ namespace Listenarr.Infrastructure.Library.Scanning
                         using var afScope = _scopeFactory.CreateScope();
                         var audioFileService = afScope.ServiceProvider.GetRequiredService<IAudiobookFileService>();
 
-                        // Store absolute path - metadata extraction needs full path
                         var created = await audioFileService.EnsureAudiobookFileAsync(audiobook, filePath, "scan");
                         if (created) createdFiles++;
                     }
@@ -216,28 +275,23 @@ namespace Listenarr.Infrastructure.Library.Scanning
                     }
                 }
 
-                // Remove AudiobookFile DB rows for files that no longer exist on disk
                 try
                 {
                     var existingFiles = await fileRepository.GetByAudiobookIdAsync(audiobook.Id);
 
-                    // Create set of found files (absolute paths)
                     var foundSet = new HashSet<string>(foundFiles, semantics.Comparer);
 
-                    // Check which existing files still exist
                     var toRemove = new List<AudiobookFile>();
                     foreach (var existingFile in existingFiles
                         .Where(existingFile => !string.IsNullOrEmpty(existingFile.Path))
                         .Where(existingFile => FileUtils.IsAudioFile(existingFile.Path!)))
                     {
-                        // Normalize path: if relative, make it absolute using basePath
                         var fullPath = existingFile.Path!;
                         if (!Path.IsPathRooted(fullPath) && !string.IsNullOrEmpty(basePath))
                         {
                             fullPath = Path.GetFullPath(Path.Join(basePath, fullPath));
                         }
 
-                        // Check if file still exists on disk
                         if (!foundSet.Contains(fullPath))
                         {
                             toRemove.Add(existingFile);
@@ -255,7 +309,6 @@ namespace Listenarr.Infrastructure.Library.Scanning
                                 await fileRepository.DeleteAsync(rem.Id);
                                 _logger.LogInformation("Removing missing AudiobookFile DB row Id={Id} Path={Path}", rem.Id, LogRedaction.SanitizeFilePath(rem.Path));
 
-                                // Add history entry for removed file
                                 var historyEntry = new History
                                 {
                                     AudiobookId = audiobook.Id,
@@ -280,15 +333,12 @@ namespace Listenarr.Infrastructure.Library.Scanning
                             }
                         }
 
-                        // Broadcast a friendly message about removed files so UI can show a notice
-                        try
-                        {
-                            await _hubContext.Clients.All.SendAsync("FilesRemoved", new { audiobookId = audiobook.Id, removed = removedFilesDto });
-                        }
-                        catch (Exception ex) when (ex is not OperationCanceledException && ex is not OutOfMemoryException && ex is not StackOverflowException)
-                        {
-                            _logger.LogDebug(ex, "Failed to broadcast FilesRemoved event for audiobook {AudiobookId}", audiobook.Id);
-                        }
+                        // Broadcast only after the coordinated filesystem/database work releases
+                        // the per-audiobook lock.
+                        registerPostCompletionEffects(token => BroadcastFilesRemovedAsync(
+                            audiobook.Id,
+                            removedFilesDto,
+                            token));
                     }
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException && ex is not OutOfMemoryException && ex is not StackOverflowException)
@@ -296,22 +346,18 @@ namespace Listenarr.Infrastructure.Library.Scanning
                     _logger.LogWarning(ex, "Failed to reconcile audiobook files after scan job {JobId}", job.Id);
                 }
 
-                // Handle legacy filePath field migration
                 try
                 {
                     var needsUpdate = false;
                     if (!string.IsNullOrEmpty(audiobook.FilePath))
                     {
-                        // Check if the legacy filePath exists
                         if (System.IO.File.Exists(audiobook.FilePath))
                         {
-                            // File exists - check if we already have an AudiobookFile record for it
                             var alreadyExists = await fileRepository.ExistsAtPathAsync(audiobook.Id, audiobook.FilePath);
                             var existingFileRecord = alreadyExists ? new AudiobookFile() : null;
 
                             if (existingFileRecord == null)
                             {
-                                // Create AudiobookFile record for the legacy filePath
                                 try
                                 {
                                     using var afScope = _scopeFactory.CreateScope();
@@ -331,13 +377,11 @@ namespace Listenarr.Infrastructure.Library.Scanning
                         }
                         else
                         {
-                            // File doesn't exist - clear the legacy filePath and related fields
                             audiobook.FilePath = null;
                             audiobook.FileSize = null;
                             needsUpdate = true;
                             _logger.LogInformation("Cleared missing legacy filePath for audiobook {AudiobookId}: {Path}", audiobook.Id, LogRedaction.SanitizeFilePath(audiobook.FilePath));
 
-                            // Add history entry for cleared filePath
                             var historyEntry = new History
                             {
                                 AudiobookId = audiobook.Id,
@@ -366,8 +410,6 @@ namespace Listenarr.Infrastructure.Library.Scanning
                     _logger.LogWarning(ex, "Failed to handle legacy filePath migration for audiobook {AudiobookId}", audiobook.Id);
                 }
 
-                await NotifyAvailableAsync(audiobook, createdFiles);
-
                 var updated = await audiobookRepository.GetByIdAsync(audiobook.Id);
                 if (updated == null)
                 {
@@ -386,13 +428,7 @@ namespace Listenarr.Infrastructure.Library.Scanning
                     return;
                 }
 
-                // Build an authoritative Audiobook DTO and broadcast it
-                var audiobookDto = AudiobookDtoFactory.BuildFromEntity(updated);
-                await _hubContext.Clients.All.SendAsync("AudiobookUpdate", audiobookDto);
-                await _hubContext.Clients.All.SendAsync("ScanJobUpdate", new { jobId = job.Id.ToString(), audiobookId = job.AudiobookId, status = "Completed", found = foundFiles.Count, created = createdFiles, completedAt = DateTime.UtcNow });
-                _logger.LogInformation("Broadcasted AudiobookUpdate for AudiobookId {AudiobookId} after scan job {JobId}", audiobook.Id, job.Id);
-
-                var terminalStatusHandled = await RecordScanCompletionAsync(
+                var terminalDecision = await RecordScanCompletionAsync(
                     historyRepository,
                     job,
                     audiobook,
@@ -400,51 +436,60 @@ namespace Listenarr.Infrastructure.Library.Scanning
                     createdFiles,
                     scanRoot,
                     stoppingToken);
-                if (!terminalStatusHandled)
+                ApplyTerminalStatus(job, terminalDecision);
+                if (!string.Equals(terminalDecision.Status, "Completed", StringComparison.OrdinalIgnoreCase))
                 {
-                    try { _queue.UpdateJobStatus(job.Id, "Completed"); }
-                    catch (Exception caughtEx_8) when (caughtEx_8 is not OperationCanceledException && caughtEx_8 is not OutOfMemoryException && caughtEx_8 is not StackOverflowException)
-                    {
-                        System.Diagnostics.Debug.WriteLine("Suppressed non-fatal exception in catch block.");
-                    }
+                    _metrics.Increment("worker.scan.job.skipped");
+                    return;
                 }
+
+                registerPostCompletionEffects(token => RunSuccessfulPostCompletionEffectsAsync(
+                    job,
+                    audiobook,
+                    foundFiles.Count,
+                    createdFiles,
+                    token));
+
                 _metrics.Increment("worker.scan.job.completed");
             }
             catch (Exception ex) when (ex is not OperationCanceledException && ex is not OutOfMemoryException && ex is not StackOverflowException)
             {
                 _logger.LogError(ex, "Error processing scan job {JobId}", job.Id);
-                var terminalStatusHandled = false;
+                ScanTerminalDecision? terminalDecision = null;
                 try
                 {
                     using var historyScope = _scopeFactory.CreateScope();
                     var historyRepository = historyScope.ServiceProvider.GetRequiredService<IHistoryRepository>();
                     var audiobookRepository = historyScope.ServiceProvider.GetRequiredService<IAudiobookRepository>();
                     var audiobook = await audiobookRepository.GetByIdAsync(job.AudiobookId);
-                    terminalStatusHandled = await RecordScanFailureHistoryAsync(
+                    terminalDecision = await RecordScanFailureHistoryAsync(
                         historyRepository,
                         job,
                         audiobook,
                         ex.Message,
                         stoppingToken);
+                    ApplyTerminalStatus(job, terminalDecision);
                 }
                 catch (Exception historyException) when (historyException is not (OperationCanceledException or OutOfMemoryException or StackOverflowException))
                 {
                     _logger.LogDebug(historyException, "Unable to record failed scan history for job {JobId}", job.Id);
                 }
 
-                if (!terminalStatusHandled)
+                if (terminalDecision == null)
                 {
                     try { _queue.UpdateJobStatus(job.Id, "Failed", ex.Message); }
-                    catch (Exception caughtEx_9) when (caughtEx_9 is not OperationCanceledException && caughtEx_9 is not OutOfMemoryException && caughtEx_9 is not StackOverflowException)
+                    catch (Exception caughtEx_9) when (WorkerExceptionClassifier.IsNonFatal(caughtEx_9))
                     {
-                        System.Diagnostics.Debug.WriteLine("Suppressed non-fatal exception in catch block.");
+                        _logger.LogDebug(caughtEx_9, "Unable to update failed scan job {JobId}", job.Id);
                     }
                 }
-                try { await _hubContext.Clients.All.SendAsync("ScanJobUpdate", new { jobId = job.Id.ToString(), audiobookId = job.AudiobookId, status = "Failed", error = ex.Message, failedAt = DateTime.UtcNow }); }
-                catch (Exception caughtEx_10) when (caughtEx_10 is not OperationCanceledException && caughtEx_10 is not OutOfMemoryException && caughtEx_10 is not StackOverflowException)
-                {
-                    System.Diagnostics.Debug.WriteLine("Suppressed non-fatal exception in catch block.");
-                }
+                var broadcastStatus = terminalDecision?.Status ?? "Failed";
+                var broadcastError = terminalDecision?.Error ?? ex.Message;
+                registerPostCompletionEffects(token => BroadcastFailedScanAsync(
+                    job,
+                    broadcastStatus,
+                    broadcastError,
+                    token));
                 _metrics.Increment("worker.scan.job.failed");
             }
         }

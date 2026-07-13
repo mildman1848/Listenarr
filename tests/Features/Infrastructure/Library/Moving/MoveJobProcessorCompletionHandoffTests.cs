@@ -84,7 +84,7 @@ public partial class MoveJobProcessorTests
     }
 
     [Fact]
-    public async Task ProcessJobAsync_LeaseReplacedBeforeScanEnqueue_PreservesOutboxWithoutEnqueue()
+    public async Task ProcessJobAsync_PostCommitScanDispatchFailure_PreservesDurableHandoff()
     {
         var source = FileService.GetTempDirectory("move-processor-scan-lease-src");
         await FileService.GetFileAsync(source, "book.m4b", "audio");
@@ -97,54 +97,52 @@ public partial class MoveJobProcessorTests
             BasePath = source
         });
         var (queue, job) = await CreateQueuedMoveJobAsync(audiobook, target, source);
-        var factory = _provider.GetRequiredService<IDbContextFactory<ListenArrDbContext>>();
         var contentMoveService = new AudiobookContentMoveService(
             _provider.GetRequiredService<ILogger<AudiobookContentMoveService>>(),
-            factory,
+            _provider.GetRequiredService<IDbContextFactory<ListenArrDbContext>>(),
             TimeProvider.System,
-            new ReplaceLeaseBeforeScanEnqueue(factory));
+            new FailCompletionHandoffOnce(CompletionHandoffFaultPoint.BeforeScanEnqueue));
         var scanQueue = new Mock<IScanQueueService>(MockBehavior.Strict);
         var processor = ActivatorUtilities.CreateInstance<MoveJobProcessor>(
             _provider,
             contentMoveService,
             scanQueue.Object);
 
-        await Assert.ThrowsAsync<MoveLeaseLostException>(() =>
-            processor.ProcessJobAsync(job, CancellationToken.None));
+        await processor.ProcessJobAsync(job, CancellationToken.None);
 
         var correlated = await _historyRepository.GetByCorrelationIdAsync($"move:{job.Id:N}");
         Assert.Single(correlated, entry => entry.EventType == "Moved");
-        Assert.Single(correlated, entry => entry.EventType == HistoryEvents.ScanQueued);
         scanQueue.VerifyNoOtherCalls();
         var persisted = await queue.GetJobAsync(job.Id);
         Assert.NotNull(persisted);
-        Assert.Equal("replacement-scan-worker", persisted!.LeaseOwner);
-        Assert.Equal(2, persisted.LeaseGeneration);
+        Assert.Equal(MoveJobStatus.Completed, persisted!.Status);
+        Assert.Null(persisted.LeaseOwner);
+        await using var db = await _provider
+            .GetRequiredService<IDbContextFactory<ListenArrDbContext>>()
+            .CreateDbContextAsync();
+        var handoff = await db.MoveScanHandoffs.AsNoTracking()
+            .SingleAsync(candidate => candidate.MoveJobId == job.Id);
+        Assert.Equal(MoveScanHandoffStatus.Pending, handoff.Status);
     }
 
     [Fact]
     public async Task ProcessJobAsync_DurableScanFailure_DoesNotReplayHandoff()
     {
         var state = await CreateMarkerlessFinalizedCopyStateAsync();
-        var correlationId = $"move:{state.Job.Id:N}";
-        await _historyRepository.AddAsync(new History
+        await using (var db = await _provider
+            .GetRequiredService<IDbContextFactory<ListenArrDbContext>>()
+            .CreateDbContextAsync())
         {
-            AudiobookId = state.Job.AudiobookId,
-            EventType = HistoryEvents.ScanQueued,
-            Outcome = HistoryOutcome.Requested,
-            Source = "Move",
-            CorrelationId = correlationId,
-            Timestamp = DateTime.UtcNow
-        });
-        await _historyRepository.AddAsync(new History
-        {
-            AudiobookId = state.Job.AudiobookId,
-            EventType = HistoryEvents.ScanFailed,
-            Outcome = HistoryOutcome.Failed,
-            Source = "LibraryScan",
-            CorrelationId = correlationId,
-            Timestamp = DateTime.UtcNow
-        });
+            db.MoveScanHandoffs.Add(new MoveScanHandoff
+            {
+                MoveJobId = state.Job.Id,
+                AudiobookId = state.Job.AudiobookId,
+                TargetPath = state.Job.RequestedPath!,
+                Status = MoveScanHandoffStatus.Failed,
+                LastError = "Prior durable scan failure"
+            });
+            await db.SaveChangesAsync();
+        }
         var scanQueue = new Mock<IScanQueueService>(MockBehavior.Strict);
         var processor = ActivatorUtilities.CreateInstance<MoveJobProcessor>(
             _provider,
@@ -184,9 +182,14 @@ public partial class MoveJobProcessorTests
         Assert.Equal(MoveJobStatus.Completed, (await queue.GetJobAsync(job.Id))?.Status);
         var correlatedHistory = await _historyRepository.GetByCorrelationIdAsync($"move:{job.Id:N}");
         Assert.Single(correlatedHistory, entry => entry.EventType == "Moved");
-        Assert.Single(correlatedHistory, entry =>
-            entry.EventType == HistoryEvents.ScanQueued
-            && entry.Outcome == HistoryOutcome.Requested);
+        await using (var db = await _provider
+            .GetRequiredService<IDbContextFactory<ListenArrDbContext>>()
+            .CreateDbContextAsync())
+        {
+            var handoff = await db.MoveScanHandoffs.AsNoTracking()
+                .SingleAsync(candidate => candidate.MoveJobId == job.Id);
+            Assert.Equal(MoveScanHandoffStatus.Pending, handoff.Status);
+        }
 
         var scanQueue = Assert.IsType<ScanQueueService>(
             _provider.GetRequiredService<IScanQueueService>());
@@ -195,6 +198,7 @@ public partial class MoveJobProcessorTests
             .RecoverAsync(CancellationToken.None);
         Assert.True(scanQueue.Reader.TryRead(out var recoveredScan));
         Assert.Equal($"move:{job.Id:N}", recoveredScan.CorrelationId);
+        Assert.NotNull(recoveredScan.MoveScanHandoffId);
     }
 
     private sealed class ReplaceLeaseBeforeCompletionHistory(

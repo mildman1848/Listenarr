@@ -48,7 +48,7 @@ namespace Listenarr.Tests.Features.Infrastructure.ActivityHistory.Persistence
         }
 
         [Fact]
-        public async Task DeleteAllAsync_PreservesOnlyPendingMoveScanHandoffs()
+        public async Task DeleteAllAsync_RemovesAllHistoryIncludingFormerMoveScanRequests()
         {
             _db.History.AddRange(
                 new History
@@ -63,13 +63,11 @@ namespace Listenarr.Tests.Features.Infrastructure.ActivityHistory.Persistence
 
             await _repository.DeleteAllAsync();
 
-            var remaining = await _db.History.AsNoTracking().ToListAsync();
-            var handoff = Assert.Single(remaining);
-            Assert.Equal("move:pending", handoff.CorrelationId);
+            Assert.Empty(await _db.History.AsNoTracking().ToListAsync());
         }
 
         [Fact]
-        public async Task DeleteAsync_PendingMoveScanHandoff_IsProtected()
+        public async Task DeleteAsync_FormerMoveScanRequest_IsOrdinaryHistory()
         {
             var handoff = new History
             {
@@ -81,12 +79,12 @@ namespace Listenarr.Tests.Features.Infrastructure.ActivityHistory.Persistence
             _db.History.Add(handoff);
             await _db.SaveChangesAsync();
 
-            Assert.False(await _repository.DeleteAsync(handoff.Id));
-            Assert.True(await _db.History.AnyAsync(history => history.Id == handoff.Id));
+            Assert.True(await _repository.DeleteAsync(handoff.Id));
+            Assert.False(await _db.History.AnyAsync(history => history.Id == handoff.Id));
         }
 
         [Fact]
-        public async Task DeleteAsync_TerminalScan_RemovesCompletedMoveHandoffToo()
+        public async Task DeleteAsync_TerminalScan_DoesNotDeleteOtherAuditEvents()
         {
             var handoff = new History
             {
@@ -106,8 +104,8 @@ namespace Listenarr.Tests.Features.Infrastructure.ActivityHistory.Persistence
             await _db.SaveChangesAsync();
 
             Assert.True(await _repository.DeleteAsync(terminal.Id));
-            Assert.False(await _db.History.AnyAsync(history =>
-                history.CorrelationId == "move:terminal"));
+            Assert.True(await _db.History.AnyAsync(history => history.Id == handoff.Id));
+            Assert.False(await _db.History.AnyAsync(history => history.Id == terminal.Id));
         }
 
         private static History Entry(string correlationId, string eventType, HistoryOutcome outcome, DateTime timestamp) =>

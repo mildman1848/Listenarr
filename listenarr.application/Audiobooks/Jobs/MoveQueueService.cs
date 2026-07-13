@@ -27,6 +27,9 @@ namespace Listenarr.Application.Audiobooks.Jobs
     {
         private readonly Channel<MoveJob> _channel = Channel.CreateUnbounded<MoveJob>();
         private bool _identityKeysReconciled;
+        private readonly SemaphoreSlim _identityReconciliationGate = new(1, 1);
+        private readonly object _publicationGateSync = new();
+        private readonly Dictionary<Guid, PublicationGateEntry> _publicationGates = [];
         private readonly ILogger<MoveQueueService> _logger;
         private readonly IMoveQueuePersistence _persistence;
         private readonly IHubBroadcaster _hubBroadcaster;
@@ -56,44 +59,73 @@ namespace Listenarr.Application.Audiobooks.Jobs
         public ChannelReader<MoveJob> Reader => _channel.Reader;
 
         public async Task<Guid> EnqueueMoveAsync(
-            int audiobookId,
-            string requestedPath,
-            string? sourcePath = null,
-            bool deleteEmptySource = true,
-            string? sourceCleanupBoundary = null)
+            MoveEnqueueCommand command,
+            CancellationToken cancellationToken = default)
         {
-            var deduplicationKey = await BuildDeduplicationKeyAsync(audiobookId, requestedPath);
+            ArgumentNullException.ThrowIfNull(command);
+            await EnsureIdentityKeysReconciledAsync(cancellationToken);
+
+            var source = FileSystemPathIdentity.Canonicalize(
+                command.SourcePath,
+                command.SourceIdentity.Syntax);
+            var target = FileSystemPathIdentity.Canonicalize(
+                command.TargetPath,
+                command.TargetIdentity.Syntax);
+            command.SourceIdentity.ValidateForPath(source);
+            command.TargetIdentity.ValidateForPath(target);
+            var deduplicationKey = BuildDeduplicationKey(
+                command.AudiobookId,
+                target,
+                command.TargetIdentity);
+
             MoveJob? jobToSchedule = null;
-            var jobId = await _mutationCoordinator.ExecuteExclusiveAsync(async cancellationToken =>
+            var jobId = await _mutationCoordinator.ExecuteExclusiveAsync(async token =>
             {
-                await ThrowIfRelocationBoundaryProtectedAsync(requestedPath, sourcePath, cancellationToken);
-                var existingDb = await _persistence.GetActiveByKeyAsync(deduplicationKey, cancellationToken);
+                await ThrowIfRelocationBoundaryProtectedAsync(
+                    source,
+                    command.SourceIdentity,
+                    target,
+                    command.TargetIdentity,
+                    token);
+                var existingDb = await _persistence.GetActiveByKeyAsync(
+                    deduplicationKey,
+                    token);
                 if (existingDb != null)
                 {
                     jobToSchedule = existingDb;
-                    _logger.LogInformation("Found active move job {JobId} for audiobook {AudiobookId} to {Path}; deduping and returning existing job id", existingDb.Id, audiobookId, LogRedaction.SanitizeFilePath(requestedPath));
+                    _logger.LogInformation(
+                        "Found active move job {JobId} for audiobook {AudiobookId} to {Path}; deduping and returning existing job id",
+                        existingDb.Id,
+                        command.AudiobookId,
+                        LogRedaction.SanitizeFilePath(target));
                     return existingDb.Id;
                 }
 
                 var job = new MoveJob
                 {
-                    AudiobookId = audiobookId,
-                    RequestedPath = requestedPath,
+                    AudiobookId = command.AudiobookId,
+                    RequestedPath = target,
                     ActiveDeduplicationKey = deduplicationKey,
+                    IdentityKeyVersion = 3,
                     EnqueuedAt = _timeProvider.GetUtcNow().UtcDateTime,
                     Status = MoveJobStatus.Queued,
-                    SourcePath = sourcePath,
-                    SourceCleanupBoundary = sourceCleanupBoundary,
-                    DeleteEmptySource = deleteEmptySource
+                    SourcePath = source,
+                    SourceCleanupBoundary = command.SourceCleanupBoundary,
+                    DeleteEmptySource = command.DeleteEmptySource,
+                    RelocationId = command.RelocationId
                 };
+                job.SetSourceIdentity(command.SourceIdentity);
+                job.SetTargetIdentity(command.TargetIdentity);
 
                 try
                 {
-                    await _persistence.AddAsync(job, cancellationToken);
+                    await _persistence.AddAsync(job, token);
                 }
                 catch (UniqueConstraintViolationException)
                 {
-                    existingDb = await _persistence.GetActiveByKeyAsync(deduplicationKey, cancellationToken);
+                    existingDb = await _persistence.GetActiveByKeyAsync(
+                        deduplicationKey,
+                        token);
                     if (existingDb != null)
                     {
                         jobToSchedule = existingDb;
@@ -103,27 +135,55 @@ namespace Listenarr.Application.Audiobooks.Jobs
                     throw;
                 }
 
-                _logger.LogInformation("Enqueueing move job {JobId} for audiobook {AudiobookId} to {Path}", job.Id, audiobookId, LogRedaction.SanitizeFilePath(requestedPath));
+                _logger.LogInformation(
+                    "Enqueueing move job {JobId} for audiobook {AudiobookId} to {Path}",
+                    job.Id,
+                    command.AudiobookId,
+                    LogRedaction.SanitizeFilePath(target));
                 jobToSchedule = job;
                 return job.Id;
-            });
+            }, cancellationToken);
 
             if (jobToSchedule != null)
             {
-                await ScheduleAsync(jobToSchedule);
+                await ScheduleAsync(jobToSchedule, cancellationToken);
+                await NotifyPersistedJobStateAsync(
+                    jobToSchedule.Id,
+                    jobToSchedule.Status,
+                    jobToSchedule.Error,
+                    cancellationToken);
             }
 
             return jobId;
         }
 
+        public async Task<Guid> EnqueueMoveAsync(
+            int audiobookId,
+            string requestedPath,
+            string? sourcePath = null,
+            bool deleteEmptySource = true,
+            string? sourceCleanupBoundary = null)
+        {
+            // Compatibility callers predate durable source snapshots. Treat an omitted source
+            // as a no-op source identity instead of allowing the worker to infer mutable state.
+            var absoluteTarget = FileSystemPathIdentity.ResolveNativeAbsolutePath(requestedPath);
+            var absoluteSource = FileSystemPathIdentity.ResolveNativeAbsolutePath(
+                sourcePath ?? requestedPath);
+            var sourceIdentity = await ResolveIdentitySnapshotAsync(absoluteSource);
+            var targetIdentity = await ResolveIdentitySnapshotAsync(absoluteTarget);
+            return await EnqueueMoveAsync(new MoveEnqueueCommand(
+                audiobookId,
+                absoluteSource,
+                sourceIdentity,
+                absoluteTarget,
+                targetIdentity,
+                deleteEmptySource,
+                sourceCleanupBoundary));
+        }
+
         public async Task RecoverActiveJobsAsync(CancellationToken cancellationToken = default)
         {
-            if (!_identityKeysReconciled)
-            {
-                await _persistence.ReconcileIdentityKeysAsync(cancellationToken);
-                _identityKeysReconciled = true;
-            }
-
+            await EnsureIdentityKeysReconciledAsync(cancellationToken);
             var activeJobs = await _persistence.GetActiveAsync(cancellationToken);
             await _relocationService.ReconcileActiveAsync(cancellationToken);
             var nowUtc = _timeProvider.GetUtcNow().UtcDateTime;
@@ -161,7 +221,7 @@ namespace Listenarr.Application.Audiobooks.Jobs
                 cancellationToken);
         }
 
-        public Task<bool> HeartbeatJobAsync(
+        public Task<MoveHeartbeatOutcome> HeartbeatJobAsync(
             Guid jobId,
             string leaseOwner,
             int leaseGeneration,
@@ -233,32 +293,68 @@ namespace Listenarr.Application.Audiobooks.Jobs
                 throw;
             }
 
-            LogStatusChange(id, status, error);
+            await NotifyPersistedJobStateAsync(id, status, error, cancellationToken);
+        }
 
+        public async Task NotifyPersistedJobStateAsync(
+            Guid id,
+            MoveJobStatus status,
+            string? error = null,
+            CancellationToken cancellationToken = default)
+        {
             try
             {
                 await _relocationService.OnMoveJobStateChangedAsync(id, cancellationToken);
             }
-            catch (Exception ex) when (ex is not OperationCanceledException && ex is not OutOfMemoryException && ex is not StackOverflowException)
+            catch (Exception ex) when (WorkerExceptionClassifier.IsNonFatal(ex))
             {
                 _logger.LogWarning(ex, "Failed to reconcile relocation for move job {JobId}", id);
             }
 
+            var publicationGate = AcquirePublicationGate(id);
+            var enteredPublicationGate = false;
             try
             {
-                await _hubBroadcaster.BroadcastAsync("MoveJobUpdate", new
+                await publicationGate.Gate.WaitAsync(cancellationToken);
+                enteredPublicationGate = true;
+                MoveJob? dbJob = null;
+                try
                 {
-                    jobId = id.ToString(),
-                    audiobookId = dbJob?.AudiobookId,
-                    status = status.ToString(),
-                    error,
-                    target = dbJob?.RequestedPath,
-                    updatedAt
-                }, cancellationToken);
+                    dbJob = await _persistence.GetByIdAsync(id, cancellationToken);
+                }
+                catch (Exception ex) when (WorkerExceptionClassifier.IsNonFatal(ex))
+                {
+                    _logger.LogWarning(ex, "Failed to reload persisted move job {JobId} for notification", id);
+                }
+
+                var currentStatus = dbJob?.Status ?? status;
+                var currentError = dbJob?.Error ?? error;
+                LogStatusChange(id, currentStatus, currentError);
+                try
+                {
+                    await _hubBroadcaster.BroadcastAsync("MoveJobUpdate", new
+                    {
+                        jobId = id.ToString(),
+                        audiobookId = dbJob?.AudiobookId,
+                        status = currentStatus.ToString(),
+                        error = currentError,
+                        target = dbJob?.RequestedPath,
+                        updatedAt = dbJob?.UpdatedAt ?? _timeProvider.GetUtcNow().UtcDateTime
+                    }, cancellationToken);
+                }
+                catch (Exception ex) when (WorkerExceptionClassifier.IsNonFatal(ex))
+                {
+                    _logger.LogWarning(ex, "Failed to broadcast MoveJobUpdate for job {JobId}", id);
+                }
             }
-            catch (Exception ex) when (ex is not OperationCanceledException && ex is not OutOfMemoryException && ex is not StackOverflowException)
+            finally
             {
-                _logger.LogWarning(ex, "Failed to broadcast MoveJobUpdate for job {JobId}", id);
+                if (enteredPublicationGate)
+                {
+                    publicationGate.Gate.Release();
+                }
+
+                ReleasePublicationGate(id, publicationGate);
             }
         }
 
@@ -282,6 +378,63 @@ namespace Listenarr.Application.Audiobooks.Jobs
             }
         }
 
+        private PublicationGateEntry AcquirePublicationGate(Guid id)
+        {
+            lock (_publicationGateSync)
+            {
+                if (!_publicationGates.TryGetValue(id, out var entry))
+                {
+                    entry = new PublicationGateEntry();
+                    _publicationGates.Add(id, entry);
+                }
+
+                entry.References++;
+                return entry;
+            }
+        }
+
+        private void ReleasePublicationGate(Guid id, PublicationGateEntry entry)
+        {
+            lock (_publicationGateSync)
+            {
+                entry.References--;
+                if (entry.References == 0
+                    && _publicationGates.TryGetValue(id, out var current)
+                    && ReferenceEquals(current, entry))
+                {
+                    _publicationGates.Remove(id);
+                    entry.Gate.Dispose();
+                }
+            }
+        }
+
+        internal int PublicationGateCount
+        {
+            get
+            {
+                lock (_publicationGateSync)
+                {
+                    return _publicationGates.Count;
+                }
+            }
+        }
+
+        internal int GetPublicationGateReferenceCount(Guid id)
+        {
+            lock (_publicationGateSync)
+            {
+                return _publicationGates.TryGetValue(id, out var entry)
+                    ? entry.References
+                    : 0;
+            }
+        }
+
+        private sealed class PublicationGateEntry
+        {
+            public SemaphoreSlim Gate { get; } = new(1, 1);
+            public int References { get; set; }
+        }
+
         private void LogStatusChange(Guid id, MoveJobStatus status, string? error)
         {
             if (status == MoveJobStatus.Failed && !string.IsNullOrWhiteSpace(error))
@@ -294,157 +447,5 @@ namespace Listenarr.Application.Audiobooks.Jobs
             }
         }
 
-        public async Task<Guid?> RequeueMoveAsync(Guid jobId)
-        {
-            MoveJob? jobToSchedule = null;
-            var result = await _mutationCoordinator.ExecuteExclusiveAsync<Guid?>(async cancellationToken =>
-            {
-                MoveJob? job;
-                try
-                {
-                    job = await _persistence.GetByIdAsync(jobId, cancellationToken);
-                }
-                catch (Exception ex) when (ex is not OperationCanceledException && ex is not OutOfMemoryException && ex is not StackOverflowException)
-                {
-                    _logger.LogWarning(ex, "Failed to read move job from DB while requeueing {JobId}", jobId);
-                    return null;
-                }
-
-                if (job == null)
-                {
-                    _logger.LogWarning("Attempted to requeue unknown move job {JobId}", jobId);
-                    return null;
-                }
-
-                if (!CanRequeueJobStatus(job.Status))
-                {
-                    _logger.LogInformation("Move job {JobId} has status {Status} and cannot be requeued", jobId, job.Status);
-                    return null;
-                }
-
-                await ThrowIfRelocationBoundaryProtectedAsync(job.RequestedPath, job.SourcePath, cancellationToken);
-
-                if (job.Status == MoveJobStatus.Queued)
-                {
-                    jobToSchedule = job;
-                    return job.Id;
-                }
-
-                var deduplicationKey = await BuildDeduplicationKeyAsync(job.AudiobookId, job.RequestedPath);
-                var activeJob = await _persistence.GetActiveByKeyAsync(deduplicationKey, cancellationToken);
-                if (activeJob != null && activeJob.Id != job.Id)
-                {
-                    jobToSchedule = activeJob;
-                    return activeJob.Id;
-                }
-
-                job.Status = MoveJobStatus.Queued;
-                job.Phase = MoveJobPhase.None;
-                job.Error = null;
-                job.FailureKind = MoveFailureKind.None;
-                job.AttemptCount = 0;
-                job.NextAttemptAt = null;
-                job.LeaseOwner = null;
-                job.LeaseExpiresAt = null;
-                job.UpdatedAt = _timeProvider.GetUtcNow().UtcDateTime;
-                job.ActiveDeduplicationKey = deduplicationKey;
-                await _persistence.RequeueAsync(job, cancellationToken);
-                jobToSchedule = job;
-                _logger.LogInformation("Requeued move job {JobId} for audiobook {AudiobookId}", jobId, job.AudiobookId);
-                return jobId;
-            });
-
-            if (jobToSchedule != null)
-            {
-                await ScheduleAsync(jobToSchedule);
-            }
-
-            return result;
-        }
-
-        private async Task ScheduleAsync(MoveJob job, CancellationToken cancellationToken = default)
-        {
-            await _channel.Writer.WriteAsync(job, cancellationToken);
-        }
-
-        private static bool CanRequeueJobStatus(MoveJobStatus status)
-        {
-            return status is MoveJobStatus.Failed or
-                MoveJobStatus.NeedsAttention or
-                MoveJobStatus.Completed or
-                MoveJobStatus.Queued;
-        }
-
-        private async Task<string> BuildDeduplicationKeyAsync(int audiobookId, string? requestedPath)
-        {
-            var absolutePath = FileSystemPathIdentity.ResolveNativeAbsolutePath(requestedPath ?? string.Empty);
-            var resolution = await _semanticsResolver.ResolveAsync(absolutePath);
-            if (resolution.State != PathIdentityState.Valid)
-            {
-                throw new InvalidOperationException(
-                    resolution.Reason ?? "Target filesystem identity is unavailable.");
-            }
-
-            return FileSystemPathIdentity.CreateKey(
-                $"move:{audiobookId}",
-                absolutePath,
-                resolution.Semantics);
-        }
-
-        private async Task ThrowIfRelocationBoundaryProtectedAsync(
-            string? requestedPath,
-            string? sourcePath,
-            CancellationToken cancellationToken = default)
-        {
-            ArgumentNullException.ThrowIfNull(requestedPath);
-            await ThrowIfEndpointProtectedAsync(requestedPath, "target", cancellationToken);
-            if (!string.IsNullOrWhiteSpace(sourcePath))
-            {
-                await ThrowIfEndpointProtectedAsync(sourcePath, "source", cancellationToken);
-            }
-        }
-
-        private async Task ThrowIfEndpointProtectedAsync(
-            string path,
-            string endpoint,
-            CancellationToken cancellationToken)
-        {
-            var absolutePath = FileSystemPathIdentity.ResolveNativeAbsolutePath(path);
-            var resolution = await _semanticsResolver.ResolveAsync(
-                absolutePath,
-                cancellationToken: cancellationToken);
-            if (resolution.State != PathIdentityState.Valid)
-            {
-                throw new InvalidOperationException(
-                    resolution.Reason ?? $"Move {endpoint} filesystem identity is unavailable.");
-            }
-
-            if (await _relocationService!.IsBoundaryProtectedAsync(
-                absolutePath,
-                resolution.Semantics,
-                cancellationToken))
-            {
-                throw new MoveRelocationConflictException(
-                    $"Move {endpoint} overlaps an active root folder relocation boundary.");
-            }
-        }
-
-        private async Task<bool> PersistWithRetryAsync(Func<Task<bool>> operation, CancellationToken cancellationToken)
-        {
-            const int maxAttempts = 3;
-            for (var attempt = 1; ; attempt++)
-            {
-                try
-                {
-                    return await operation();
-                }
-                catch (PersistenceException) when (attempt < maxAttempts)
-                {
-                    await Task.Delay(TimeSpan.FromMilliseconds(100 * attempt * attempt), cancellationToken);
-                }
-            }
-        }
     }
-
-    public sealed class MoveRelocationConflictException(string message) : InvalidOperationException(message);
 }

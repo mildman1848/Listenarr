@@ -14,6 +14,50 @@ namespace Listenarr.Infrastructure.Library.Moving
 {
     internal partial class MoveJobProcessor
     {
+        private async Task<PathIdentitySnapshot> GetRequiredIdentityAsync(
+            MoveJob job,
+            string path,
+            bool target,
+            CancellationToken cancellationToken)
+        {
+            var hasIdentity = target
+                ? job.TryGetTargetIdentity(out var identity)
+                : job.TryGetSourceIdentity(out identity);
+            if (!hasIdentity)
+            {
+                throw new MoveNeedsAttentionException(
+                    $"The move job has no authoritative {(target ? "target" : "source")} filesystem identity.");
+            }
+
+            try
+            {
+                identity.ValidateForPath(path);
+            }
+            catch (Exception exception) when (exception is
+                ArgumentException or InvalidOperationException or NotSupportedException or PathTooLongException)
+            {
+                throw new MoveNeedsAttentionException(
+                    $"The persisted {(target ? "target" : "source")} filesystem identity is invalid: {exception.Message}");
+            }
+
+            if (identity.RequestedMode == FileSystemCaseSensitivityMode.Auto)
+            {
+                var current = await semanticsResolver.ResolveAsync(
+                    identity.BoundaryPath,
+                    FileSystemCaseSensitivityMode.Auto,
+                    cancellationToken);
+                if (current.State != PathIdentityState.Valid
+                    || current.Semantics.Syntax != identity.Syntax
+                    || current.Semantics.CaseSensitivity != identity.CaseSensitivity)
+                {
+                    throw new MoveNeedsAttentionException(
+                        $"The {(target ? "target" : "source")} filesystem identity changed after the move was queued.");
+                }
+            }
+
+            return identity;
+        }
+
         private static MoveLeaseToken CreateLeaseToken(MoveJob job)
         {
             if (string.IsNullOrWhiteSpace(job.LeaseOwner) || job.LeaseGeneration <= 0)
@@ -183,7 +227,9 @@ namespace Listenarr.Infrastructure.Library.Moving
                     $"Move finalization will be retried: {exception.Message}",
                     exception,
                     "Move job {JobId} could not finish source-boundary finalization",
-                    cancellationToken);
+                    cancellationToken,
+                    contentMoveService,
+                    request);
                 return false;
             }
         }
@@ -215,7 +261,9 @@ namespace Listenarr.Infrastructure.Library.Moving
                     $"Owned move artifact cleanup will be retried: {exception.Message}",
                     exception,
                     "Move job {JobId} could not remove its owned recovery artifacts",
-                    cancellationToken);
+                    cancellationToken,
+                    contentMoveService,
+                    request);
                 return false;
             }
         }
@@ -225,10 +273,9 @@ namespace Listenarr.Infrastructure.Library.Moving
             Audiobook audiobook,
             string source,
             string target,
-            IAudiobookRepository audiobookRepository,
-            IServiceProvider serviceProvider,
             AudiobookContentMoveService contentMoveService,
             AudiobookContentMoveRequest moveRequest,
+            Action<MovePostCommitContext> registerPostCommit,
             CancellationToken cancellationToken)
         {
             try
@@ -238,10 +285,9 @@ namespace Listenarr.Infrastructure.Library.Moving
                     audiobook,
                     source,
                     target,
-                    audiobookRepository,
-                    serviceProvider,
                     contentMoveService,
                     moveRequest,
+                    registerPostCommit,
                     cancellationToken);
                 return true;
             }
@@ -257,7 +303,9 @@ namespace Listenarr.Infrastructure.Library.Moving
                     $"Move completion handoff will be retried: {exception.Message}",
                     exception,
                     "Move job {JobId} could not persist its required completion handoffs",
-                    cancellationToken);
+                    cancellationToken,
+                    contentMoveService,
+                    moveRequest);
                 return false;
             }
         }
@@ -267,7 +315,9 @@ namespace Listenarr.Infrastructure.Library.Moving
             string error,
             Exception exception,
             string logMessage,
-            CancellationToken cancellationToken)
+            CancellationToken cancellationToken,
+            AudiobookContentMoveService? contentMoveService = null,
+            AudiobookContentMoveRequest? moveRequest = null)
         {
             var result = await moveQueueService.ScheduleRetryAsync(
                 job.Id,
@@ -277,6 +327,15 @@ namespace Listenarr.Infrastructure.Library.Moving
                 cancellationToken);
             if (result.Status == MoveJobStatus.NeedsAttention)
             {
+                if (contentMoveService != null && moveRequest != null)
+                {
+                    await TryCleanupTerminalTargetScaffoldingAsync(
+                        job,
+                        contentMoveService,
+                        moveRequest,
+                        cancellationToken);
+                }
+
                 metrics.Increment("worker.move.job.needs_attention");
                 logger.LogWarning(
                     exception,
@@ -291,6 +350,34 @@ namespace Listenarr.Infrastructure.Library.Moving
                 logMessage + " and was scheduled for retry at {NextAttemptAt}",
                 job.Id,
                 result.NextAttemptAt);
+        }
+
+        private async Task<string?> TryCleanupTerminalTargetScaffoldingAsync(
+            MoveJob job,
+            AudiobookContentMoveService contentMoveService,
+            AudiobookContentMoveRequest request,
+            CancellationToken cancellationToken)
+        {
+            try
+            {
+                await contentMoveService.CleanupTerminalTargetScaffoldingAsync(
+                    request,
+                    cancellationToken);
+                return null;
+            }
+            catch (Exception exception) when (exception is
+                MoveLeaseLostException or PersistenceException)
+            {
+                throw;
+            }
+            catch (Exception exception) when (WorkerExceptionClassifier.IsNonFatal(exception))
+            {
+                logger.LogWarning(
+                    exception,
+                    "Move job {JobId} could not completely clean its owned target scaffolding",
+                    job.Id);
+                return exception.Message;
+            }
         }
 
         private static bool IsFilesystemRoot(string path, FileSystemPathSemantics semantics)

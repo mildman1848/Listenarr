@@ -1,0 +1,462 @@
+using Listenarr.Domain.Common;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
+
+namespace Listenarr.Infrastructure.Library.Moving;
+
+internal partial class MoveJobProcessor
+{
+    private async Task ProcessJobCoreAsync(
+        MoveJob job,
+        Action<MovePostCommitContext> registerPostCommit,
+        CancellationToken stoppingToken)
+    {
+        using var logScope = logger.BeginScope(new Dictionary<string, object?> { ["JobId"] = job.Id, ["AudiobookId"] = job.AudiobookId });
+        metrics.Increment("worker.move.job.started");
+        stoppingToken.ThrowIfCancellationRequested();
+        try
+        {
+            logger.LogInformation("Processing move job {JobId} for audiobook {AudiobookId} to {Path}", job.Id, job.AudiobookId, LogRedaction.SanitizeFilePath(job.RequestedPath));
+            await UpdateJobStatusAsync(job, MoveJobStatus.Running, cancellationToken: stoppingToken);
+
+            using var scope = scopeFactory.CreateScope();
+            var audiobookRepository = scope.ServiceProvider.GetRequiredService<IAudiobookRepository>();
+            var rootFolderRepository = scope.ServiceProvider.GetRequiredService<IRootFolderRepository>();
+            var audiobook = await audiobookRepository.GetByIdAsync(job.AudiobookId);
+            if (audiobook == null)
+            {
+                await UpdateJobStatusAsync(job, MoveJobStatus.Failed, "Audiobook not found", stoppingToken);
+                metrics.Increment("worker.move.job.failed");
+                return;
+            }
+
+            var rootFolders = await rootFolderRepository.GetAllAsync();
+            var requested = job.RequestedPath ?? string.Empty;
+            if (string.IsNullOrWhiteSpace(requested))
+            {
+                await UpdateJobStatusAsync(job, MoveJobStatus.Failed, "Target path not provided", stoppingToken);
+                metrics.Increment("worker.move.job.failed");
+                return;
+            }
+            var target = Path.GetFullPath(requested);
+            PathIdentitySnapshot targetIdentity;
+            try
+            {
+                targetIdentity = await GetRequiredIdentityAsync(job, target, target: true, stoppingToken);
+            }
+            catch (MoveNeedsAttentionException exception)
+            {
+                await UpdateJobStatusAsync(job, MoveJobStatus.NeedsAttention, exception.Message, stoppingToken);
+                metrics.Increment("worker.move.job.needs_attention");
+                return;
+            }
+
+            var targetSemantics = targetIdentity.Semantics;
+            var hasPersistedSource = !string.IsNullOrWhiteSpace(job.SourcePath);
+            var source = job.SourcePath;
+            AudiobookContentMoveResult? recoveredMove = null;
+            MoveCleanupBoundaryResolution? cleanupBoundaryResolution = null;
+            FileSystemPathSemantics? recoverySourceSemantics = null;
+            if (!string.IsNullOrWhiteSpace(source))
+            {
+                source = Path.GetFullPath(source);
+                PathIdentitySnapshot recoverySourceIdentity;
+                try
+                {
+                    recoverySourceIdentity = await GetRequiredIdentityAsync(job, source, target: false, stoppingToken);
+                }
+                catch (MoveNeedsAttentionException exception)
+                {
+                    await UpdateJobStatusAsync(job, MoveJobStatus.NeedsAttention, exception.Message, stoppingToken);
+                    metrics.Increment("worker.move.job.needs_attention");
+                    return;
+                }
+
+                recoverySourceSemantics = recoverySourceIdentity.Semantics;
+                cleanupBoundaryResolution = await cleanupBoundaryResolver.ResolveAsync(
+                    source,
+                    target,
+                    rootFolders,
+                    job.SourceCleanupBoundary,
+                    stoppingToken);
+                var recoveryRequest = new AudiobookContentMoveRequest(
+                    source,
+                    target,
+                    job.Id,
+                    job.DeleteEmptySource,
+                    recoverySourceIdentity.Semantics,
+                    targetSemantics,
+                    CreateLeaseToken(job),
+                    cleanupBoundaryResolution.Boundary);
+                try
+                {
+                    var resumedMove = await contentMoveService.GetRecoverableMoveAsync(recoveryRequest, stoppingToken);
+                    if (resumedMove != null)
+                    {
+                        recoveredMove = resumedMove;
+                        logger.LogInformation("Resuming move job {JobId} after its filesystem phase completed", job.Id);
+                    }
+                    else if (!Directory.Exists(source))
+                    {
+                        logger.LogWarning(
+                            "Persisted source path {Source} for job {JobId} does not exist",
+                            LogRedaction.SanitizeFilePath(source),
+                            job.Id);
+                    }
+                }
+                catch (MoveNeedsAttentionException exception)
+                {
+                    await UpdateJobStatusAsync(job, MoveJobStatus.NeedsAttention, exception.Message, stoppingToken);
+                    metrics.Increment("worker.move.job.needs_attention");
+                    logger.LogWarning(exception, "Move job {JobId} has ambiguous or invalid recovery artifacts", job.Id);
+                    return;
+                }
+                catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+                {
+                    await ScheduleTransientRetryAsync(
+                        job,
+                        $"Move recovery verification will be retried: {exception.Message}",
+                        exception,
+                        "Move job {JobId} could not verify its recovery target",
+                        stoppingToken);
+                    return;
+                }
+            }
+
+            if (recoveredMove == null)
+            {
+                var finalizedRecovery = await TryRecoverFinalizedMoveAsync(
+                    job,
+                    audiobook,
+                    source,
+                    target,
+                    recoverySourceSemantics,
+                    targetSemantics,
+                    cleanupBoundaryResolution,
+                    contentMoveService,
+                    stoppingToken);
+                if (finalizedRecovery.Handled)
+                {
+                    return;
+                }
+
+                recoveredMove = finalizedRecovery.MoveResult;
+            }
+
+            if (string.IsNullOrWhiteSpace(source))
+            {
+                await UpdateJobStatusAsync(
+                    job,
+                    MoveJobStatus.NeedsAttention,
+                    "The move job has no persisted source path.",
+                    stoppingToken);
+                metrics.Increment("worker.move.job.needs_attention");
+                return;
+            }
+
+            if (hasPersistedSource
+                && recoveredMove == null
+                && !Directory.Exists(source)
+                && !string.IsNullOrWhiteSpace(audiobook.BasePath)
+                && Directory.Exists(audiobook.BasePath))
+            {
+                await UpdateJobStatusAsync(
+                    job,
+                    MoveJobStatus.NeedsAttention,
+                    "Persisted source path does not exist and cannot be recovered",
+                    stoppingToken);
+                metrics.Increment("worker.move.job.needs_attention");
+                return;
+            }
+
+            if (recoveredMove == null && !Directory.Exists(source))
+            {
+                await UpdateJobStatusAsync(job, MoveJobStatus.Failed, "Source path invalid or does not exist", stoppingToken);
+                metrics.Increment("worker.move.job.failed");
+                return;
+            }
+
+            source = recoveredMove?.Source ?? Path.GetFullPath(source);
+            PathIdentitySnapshot sourceIdentity;
+            try
+            {
+                sourceIdentity = await GetRequiredIdentityAsync(job, source, target: false, stoppingToken);
+            }
+            catch (MoveNeedsAttentionException exception)
+            {
+                await UpdateJobStatusAsync(job, MoveJobStatus.NeedsAttention, exception.Message, stoppingToken);
+                metrics.Increment("worker.move.job.needs_attention");
+                return;
+            }
+
+            var sourceSemantics = sourceIdentity.Semantics;
+            cleanupBoundaryResolution ??= await cleanupBoundaryResolver.ResolveAsync(
+                source,
+                target,
+                rootFolders,
+                job.SourceCleanupBoundary,
+                stoppingToken);
+            LogCleanupBoundary(job, cleanupBoundaryResolution);
+
+            if (IsFilesystemRoot(source, sourceSemantics)
+                || IsFilesystemRoot(target, targetSemantics))
+            {
+                await UpdateJobStatusAsync(job, MoveJobStatus.Failed, "Refused to move a filesystem root", stoppingToken);
+                metrics.Increment("worker.move.job.failed");
+                logger.LogWarning(
+                    "Blocked move job {JobId}: source or target is a filesystem root. Source={Source}, Target={Target}",
+                    job.Id,
+                    LogRedaction.SanitizeFilePath(source),
+                    LogRedaction.SanitizeFilePath(target));
+                return;
+            }
+
+            if (recoveredMove == null
+                && FileSystemPathIdentity.AreEquivalent(
+                    source.TrimEnd(Path.DirectorySeparatorChar),
+                    target.TrimEnd(Path.DirectorySeparatorChar),
+                    sourceSemantics))
+            {
+                await UpdateJobStatusAsync(job, MoveJobStatus.Completed, cancellationToken: stoppingToken);
+                metrics.Increment("worker.move.job.skipped");
+                return;
+            }
+
+            await ExecuteFilesystemMoveAsync(
+                job,
+                audiobook,
+                source,
+                target,
+                sourceSemantics,
+                targetSemantics,
+                cleanupBoundaryResolution,
+                recoveredMove,
+                scope,
+                registerPostCommit,
+                stoppingToken);
+        }
+        catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (OperationCanceledException ex)
+        {
+            logger.LogWarning(ex, "Move job {JobId} canceled/timed out", job.Id);
+        }
+        catch (Exception ex) when (ex is PersistenceException or MoveLeaseLostException)
+        {
+            logger.LogWarning(ex, "Move job {JobId} stopped because durable coordination failed", job.Id);
+            throw;
+        }
+        catch (Exception ex) when (WorkerExceptionClassifier.IsNonFatal(ex))
+        {
+            logger.LogError(ex, "Unexpected error processing move job {JobId}", job.Id);
+            await UpdateJobStatusAsync(job, MoveJobStatus.Failed, ex.Message, stoppingToken);
+            metrics.Increment("worker.move.job.failed");
+        }
+    }
+
+    private void LogCleanupBoundary(MoveJob job, MoveCleanupBoundaryResolution resolution)
+    {
+        if (!job.DeleteEmptySource)
+        {
+            return;
+        }
+
+        if (resolution.IsAvailable)
+        {
+            logger.LogInformation(
+                "Using {BoundaryKind} source cleanup boundary {Boundary} for move job {JobId}",
+                resolution.Kind,
+                LogRedaction.SanitizeFilePath(resolution.Boundary),
+                job.Id);
+        }
+        else
+        {
+            logger.LogWarning(
+                "Move job {JobId} has no safe source cleanup boundary: {Reason}",
+                job.Id,
+                resolution.Reason ?? "boundary unavailable");
+        }
+    }
+
+    private async Task ExecuteFilesystemMoveAsync(
+        MoveJob job,
+        Audiobook audiobook,
+        string source,
+        string target,
+        FileSystemPathSemantics sourceSemantics,
+        FileSystemPathSemantics targetSemantics,
+        MoveCleanupBoundaryResolution cleanupBoundaryResolution,
+        AudiobookContentMoveResult? recoveredMove,
+        IServiceScope scope,
+        Action<MovePostCommitContext> registerPostCommit,
+        CancellationToken stoppingToken)
+    {
+        AudiobookContentMoveRequest? moveRequest = null;
+        try
+        {
+            moveRequest = new AudiobookContentMoveRequest(
+                source,
+                target,
+                job.Id,
+                job.DeleteEmptySource,
+                sourceSemantics,
+                targetSemantics,
+                CreateLeaseToken(job),
+                cleanupBoundaryResolution.Boundary);
+            var moveResult = recoveredMove ?? await contentMoveService.MoveContentsAsync(moveRequest, stoppingToken);
+            moveResult = await contentMoveService.ResumeSourceCleanupAsync(moveRequest, moveResult, stoppingToken);
+            source = moveResult.Source;
+            target = moveResult.Target;
+
+            using (var rewriteScope = scopeFactory.CreateScope())
+            {
+                var rewriteRepository = rewriteScope.ServiceProvider.GetRequiredService<IAudiobookRepository>();
+                await MovedAudiobookPathRewriter.RewriteAsync(
+                    audiobook.Id,
+                    source,
+                    target,
+                    moveRequest.SourceSemantics,
+                    moveRequest.TargetSemantics,
+                    rewriteRepository,
+                    logger,
+                    stoppingToken);
+            }
+
+            using var currentAudiobookScope = scopeFactory.CreateScope();
+            var currentAudiobookRepository = currentAudiobookScope.ServiceProvider.GetRequiredService<IAudiobookRepository>();
+            audiobook = await currentAudiobookRepository.GetByIdAsync(audiobook.Id)
+                ?? throw new MoveNeedsAttentionException(
+                    "The audiobook disappeared after its moved path references were persisted.");
+            if (!await TryFinalizeMoveAsync(job, contentMoveService, moveRequest, moveResult, stoppingToken)
+                || !await TryCleanupCompletedMoveArtifactsAsync(job, contentMoveService, moveRequest, moveResult, stoppingToken))
+            {
+                return;
+            }
+
+            await contentMoveService.MarkCompletionRecordingAsync(moveRequest, stoppingToken);
+            if (!await TryRecordMoveCompletionAsync(
+                    job,
+                    audiobook,
+                    source,
+                    target,
+                    contentMoveService,
+                    moveRequest,
+                    registerPostCommit,
+                    stoppingToken))
+            {
+                return;
+            }
+
+            metrics.Increment("worker.move.job.completed");
+            logger.LogInformation(
+                "Move job {JobId} completed: {Source} -> {Target}",
+                job.Id,
+                LogRedaction.SanitizeFilePath(source),
+                LogRedaction.SanitizeFilePath(target));
+        }
+        catch (Exception ex) when (ex is PersistenceException or MoveLeaseLostException)
+        {
+            throw;
+        }
+        catch (MoveNeedsAttentionException ex)
+        {
+            var cleanupError = moveRequest == null
+                ? null
+                : await TryCleanupTerminalTargetScaffoldingAsync(job, contentMoveService, moveRequest, stoppingToken);
+            var error = cleanupError == null
+                ? ex.Message
+                : $"{ex.Message} Target scaffold cleanup also requires attention: {cleanupError}";
+            await UpdateJobStatusAsync(job, MoveJobStatus.NeedsAttention, error, stoppingToken);
+            metrics.Increment("worker.move.job.needs_attention");
+            logger.LogWarning(ex, "Move job {JobId} requires operator attention", job.Id);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            await ScheduleTransientRetryAsync(
+                job,
+                $"Move filesystem work will be retried: {ex.Message}",
+                ex,
+                "Move job {JobId} encountered a transient filesystem failure",
+                stoppingToken,
+                contentMoveService,
+                moveRequest);
+        }
+        catch (Exception ex) when (WorkerExceptionClassifier.IsNonFatal(ex))
+        {
+            await RecordTerminalMoveFailureAsync(
+                job,
+                audiobook,
+                contentMoveService,
+                moveRequest,
+                scope,
+                ex,
+                stoppingToken);
+        }
+    }
+
+    private async Task RecordTerminalMoveFailureAsync(
+        MoveJob job,
+        Audiobook audiobook,
+        AudiobookContentMoveService moveService,
+        AudiobookContentMoveRequest? request,
+        IServiceScope scope,
+        Exception exception,
+        CancellationToken cancellationToken)
+    {
+        var cleanupError = request == null
+            ? null
+            : await TryCleanupTerminalTargetScaffoldingAsync(job, moveService, request, cancellationToken);
+        var terminalError = cleanupError == null
+            ? exception.Message
+            : $"{exception.Message} Target scaffold cleanup also failed: {cleanupError}";
+
+        await moveQueueService.IncrementAttemptAsync(
+            job.Id,
+            job.LeaseOwner!,
+            job.LeaseGeneration,
+            cancellationToken);
+        try
+        {
+            var historyEntry = new History
+            {
+                AudiobookId = audiobook.Id,
+                AudiobookTitle = audiobook.Title,
+                EventType = "MoveFailed",
+                Message = $"Move failed: {terminalError}",
+                Source = "Move",
+                Timestamp = timeProvider.GetUtcNow().UtcDateTime,
+                NotificationSent = false,
+                Data = System.Text.Json.JsonSerializer.Serialize(new { JobId = job.Id, Error = terminalError })
+            };
+            var historyRepository = scope.ServiceProvider.GetRequiredService<IHistoryRepository>();
+            await historyRepository.AddAsync(historyEntry);
+            await TryPublishFailureToastAsync(job, audiobook, terminalError);
+        }
+        catch (Exception historyException) when (WorkerExceptionClassifier.IsNonFatal(historyException))
+        {
+            logger.LogWarning(historyException, "Failed to add history entry for failed move job {JobId}", job.Id);
+        }
+
+        await UpdateJobStatusAsync(job, MoveJobStatus.Failed, terminalError, cancellationToken);
+        metrics.Increment("worker.move.job.failed");
+        logger.LogError(exception, "Move job {JobId} failed", job.Id);
+    }
+
+    private async Task TryPublishFailureToastAsync(MoveJob job, Audiobook audiobook, string error)
+    {
+        try
+        {
+            var message = !string.IsNullOrEmpty(audiobook.Title)
+                ? $"Failed to move {audiobook.Title}: {error}"
+                : $"Move failed: {error}";
+            await toastService.PublishToastAsync("error", "Move Failed", message, timeoutMs: 15000);
+            logger.LogDebug("Sent toast notification for failed move job {JobId}", job.Id);
+        }
+        catch (Exception exception) when (WorkerExceptionClassifier.IsNonFatal(exception))
+        {
+            logger.LogDebug(exception, "Failed to send toast notification for failed move job {JobId}", job.Id);
+        }
+    }
+}

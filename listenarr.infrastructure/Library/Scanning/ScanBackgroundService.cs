@@ -100,6 +100,19 @@ namespace Listenarr.Infrastructure.Library.Scanning
         {
             try
             {
+                if (queue.TryGetJob(job.Id, out var current)
+                    && current != null
+                    && (string.Equals(current.Status, "Completed", StringComparison.OrdinalIgnoreCase)
+                        || string.Equals(current.Status, "Failed", StringComparison.OrdinalIgnoreCase)
+                        || string.Equals(current.Status, "Superseded", StringComparison.OrdinalIgnoreCase)))
+                {
+                    logger.LogDebug(
+                        "Preserved authoritative terminal status {Status} for scan job {JobId} after a later processor exception",
+                        current.Status,
+                        job.Id);
+                    return;
+                }
+
                 queue.UpdateJobStatus(job.Id, "Failed", processingException.Message);
             }
             catch (Exception statusException) when (WorkerExceptionClassifier.IsNonFatal(statusException))

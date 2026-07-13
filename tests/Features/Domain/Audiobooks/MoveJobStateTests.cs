@@ -9,7 +9,7 @@ public sealed class MoveJobStateTests
 
         Assert.Equal(MoveJobStatus.Queued, job.Status);
         Assert.Equal(MoveJobPhase.None, job.Phase);
-        Assert.Equal(2, job.IdentityKeyVersion);
+        Assert.Equal(3, job.IdentityKeyVersion);
         Assert.Empty(job.Entries);
     }
 

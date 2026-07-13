@@ -9,7 +9,6 @@
  */
 
 using System.Data.Common;
-using Listenarr.Domain.Common;
 using Microsoft.EntityFrameworkCore;
 
 namespace Listenarr.Infrastructure.Persistence.Repositories;
@@ -68,98 +67,6 @@ public sealed partial class EfMoveQueuePersistence(
         catch (DbException ex)
         {
             throw new PersistenceException("Failed to query active move job persistence.", ex);
-        }
-    }
-
-    public async Task ReconcileIdentityKeysAsync(CancellationToken cancellationToken = default)
-    {
-        try
-        {
-            await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
-            await using var transaction = db.Database.IsRelational()
-                ? await db.Database.BeginTransactionAsync(cancellationToken)
-                : null;
-            var activeJobs = await db.MoveJobs
-                .Where(job => job.Status == MoveJobStatus.Queued
-                    || job.Status == MoveJobStatus.Running
-                    || job.Status == MoveJobStatus.RetryScheduled)
-                .ToListAsync(cancellationToken);
-
-            foreach (var job in activeJobs)
-            {
-                job.ActiveDeduplicationKey = null;
-            }
-
-            await db.SaveChangesAsync(cancellationToken);
-
-            var resolvedJobs = new List<(MoveJob Job, string Key)>();
-            foreach (var job in activeJobs.Where(job => !string.IsNullOrWhiteSpace(job.RequestedPath)))
-            {
-                string absolutePath;
-                FileSystemSemanticsResolution resolution;
-                try
-                {
-                    absolutePath = FileSystemPathIdentity.ResolveNativeAbsolutePath(job.RequestedPath!);
-                    resolution = await semanticsResolver.ResolveAsync(
-                        absolutePath,
-                        cancellationToken: cancellationToken);
-                }
-                catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException or InvalidOperationException)
-                {
-                    job.Status = MoveJobStatus.NeedsAttention;
-                    job.FailureKind = MoveFailureKind.Verification;
-                    job.Error = $"Target path could not be reconciled: {ex.Message}";
-                    continue;
-                }
-
-                if (resolution.State != PathIdentityState.Valid)
-                {
-                    job.Status = MoveJobStatus.NeedsAttention;
-                    job.FailureKind = MoveFailureKind.Verification;
-                    job.Error = resolution.Reason ?? "Target filesystem identity is unavailable.";
-                    continue;
-                }
-
-                resolvedJobs.Add((
-                    job,
-                    FileSystemPathIdentity.CreateKey($"move:{job.AudiobookId}", absolutePath, resolution.Semantics)));
-            }
-
-            var keyedJobs = resolvedJobs.GroupBy(item => item.Key, StringComparer.Ordinal);
-
-            foreach (var group in keyedJobs)
-            {
-                var canonical = group
-                    .OrderByDescending(item => item.Job.Phase)
-                    .ThenByDescending(item => item.Job.Status == MoveJobStatus.Running)
-                    .ThenByDescending(item => item.Job.UpdatedAt ?? item.Job.EnqueuedAt)
-                    .First();
-                canonical.Job.ActiveDeduplicationKey = group.Key;
-                canonical.Job.IdentityKeyVersion = 2;
-
-                foreach (var duplicate in group.Where(item => item.Job.Id != canonical.Job.Id))
-                {
-                    duplicate.Job.Status = MoveJobStatus.Superseded;
-                    duplicate.Job.IdentityKeyVersion = 2;
-                    duplicate.Job.Error = $"Superseded by move job {canonical.Job.Id} during identity-key reconciliation.";
-                    duplicate.Job.LeaseOwner = null;
-                    duplicate.Job.LeaseExpiresAt = null;
-                }
-            }
-
-            foreach (var unavailable in activeJobs.Where(job => string.IsNullOrWhiteSpace(job.RequestedPath)))
-            {
-                unavailable.Status = MoveJobStatus.NeedsAttention;
-                unavailable.FailureKind = MoveFailureKind.Verification;
-                unavailable.Error = "The legacy move job has no target path and cannot be reconciled safely.";
-            }
-
-            await db.SaveChangesAsync(cancellationToken);
-            if (transaction != null) await transaction.CommitAsync(cancellationToken);
-        }
-        catch (Exception ex) when (ex is DbException or DbUpdateException)
-        {
-            throw new PersistenceException("Failed to reconcile move job identity keys.", ex);
         }
     }
 
@@ -423,7 +330,7 @@ public sealed partial class EfMoveQueuePersistence(
         }
     }
 
-    public async Task<bool> HeartbeatAsync(
+    public async Task<MoveHeartbeatOutcome> HeartbeatAsync(
         Guid id,
         string leaseOwner,
         int leaseGeneration,
@@ -445,10 +352,14 @@ public sealed partial class EfMoveQueuePersistence(
                         && candidate.LeaseExpiresAt != null
                         && candidate.LeaseExpiresAt > nowUtc,
                     cancellationToken);
-                if (trackedJob == null) return false;
-                trackedJob.LeaseExpiresAt = leaseExpiresAt.UtcDateTime;
-                await db.SaveChangesAsync(cancellationToken);
-                return true;
+                if (trackedJob != null)
+                {
+                    trackedJob.LeaseExpiresAt = leaseExpiresAt.UtcDateTime;
+                    await db.SaveChangesAsync(cancellationToken);
+                    return MoveHeartbeatOutcome.Renewed;
+                }
+
+                return await ResolveHeartbeatMissAsync(db, id, cancellationToken);
             }
 
             var affected = await db.MoveJobs
@@ -463,11 +374,28 @@ public sealed partial class EfMoveQueuePersistence(
                         job => job.LeaseExpiresAt,
                         leaseExpiresAt.UtcDateTime),
                     cancellationToken);
-            return affected == 1;
+            return affected == 1
+                ? MoveHeartbeatOutcome.Renewed
+                : await ResolveHeartbeatMissAsync(db, id, cancellationToken);
         }
         catch (Exception ex) when (ex is DbException or DbUpdateException)
         {
             throw new PersistenceException("Failed to heartbeat move job persistence.", ex);
         }
+    }
+
+    private static async Task<MoveHeartbeatOutcome> ResolveHeartbeatMissAsync(
+        ListenArrDbContext db,
+        Guid id,
+        CancellationToken cancellationToken)
+    {
+        var currentStatus = await db.MoveJobs
+            .AsNoTracking()
+            .Where(candidate => candidate.Id == id)
+            .Select(candidate => (MoveJobStatus?)candidate.Status)
+            .SingleOrDefaultAsync(cancellationToken);
+        return currentStatus.HasValue && !currentStatus.Value.IsActive()
+            ? MoveHeartbeatOutcome.Terminal
+            : MoveHeartbeatOutcome.Lost;
     }
 }

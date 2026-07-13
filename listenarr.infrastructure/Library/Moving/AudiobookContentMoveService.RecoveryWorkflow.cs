@@ -67,7 +67,7 @@ internal sealed partial class AudiobookContentMoveService
                 "Move recovery target is a symbolic link or reparse point.");
         }
 
-        var manifest = LoadManifest(request.JobId);
+        var manifest = await LoadManifestAsync(request.JobId, cancellationToken);
         var recoveryStage = recoveryMarker.Stage;
         if (string.Equals(recoveryStage, AtomicRenameCompletedStage, StringComparison.Ordinal))
         {
@@ -186,7 +186,7 @@ internal sealed partial class AudiobookContentMoveService
             return result;
         }
 
-        var manifest = LoadManifest(request.JobId);
+        var manifest = await LoadManifestAsync(request.JobId, cancellationToken);
         if (manifest.Count == 0)
         {
             throw new MoveNeedsAttentionException(

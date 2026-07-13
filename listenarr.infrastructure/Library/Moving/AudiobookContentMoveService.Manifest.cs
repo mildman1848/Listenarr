@@ -34,13 +34,15 @@ internal sealed partial class AudiobookContentMoveService
         CancellationToken cancellationToken,
         string? ownedRecoveryMarkerPath = null)
     {
+        var scaffolding = await GetCreatedDirectoriesAsync(jobId, cancellationToken);
         var validatedEntries = ValidateSourceTreeForMove(
             source,
             target,
             targetInsideSource,
             sourceSemantics,
             cancellationToken,
-            ownedRecoveryMarkerPath);
+            ownedRecoveryMarkerPath,
+            scaffolding.Select(directory => directory.Path).ToList());
         return await BuildManifestAsync(jobId, validatedEntries, cancellationToken);
     }
 

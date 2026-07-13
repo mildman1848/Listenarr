@@ -130,28 +130,16 @@ namespace Listenarr.Tests.Features.Infrastructure.Library.Moving
                 BasePath = source
             });
             var (durableQueue, job) = await CreateQueuedMoveJobAsync(audiobook, target, source);
-            var queue = new Mock<IMoveQueueService>();
-            queue.Setup(service => service.UpdateJobStatusAsync(
-                    job.Id,
-                    LeaseOwner,
-                    job.LeaseGeneration,
-                    MoveJobStatus.Completed,
-                    null,
+            var handoffStore = new Mock<IMoveScanHandoffStore>();
+            handoffStore.Setup(store => store.CommitMoveCompletionAsync(
+                    It.IsAny<MoveCompletionCommit>(),
                     It.IsAny<CancellationToken>()))
                 .ThrowsAsync(new PersistenceException(
-                    "Status write failed.",
+                    "Completion transaction failed.",
                     new InvalidOperationException("Database unavailable.")));
-            queue.Setup(service => service.UpdateJobStatusAsync(
-                    job.Id,
-                    LeaseOwner,
-                    job.LeaseGeneration,
-                    It.Is<MoveJobStatus>(status => status != MoveJobStatus.Completed),
-                    It.IsAny<string?>(),
-                    It.IsAny<CancellationToken>()))
-                .Returns(Task.CompletedTask);
             var processor = ActivatorUtilities.CreateInstance<MoveJobProcessor>(
                 _provider,
-                queue.Object);
+                handoffStore.Object);
 
             await Assert.ThrowsAsync<PersistenceException>(() => processor.ProcessJobAsync(
                 job,
@@ -164,13 +152,6 @@ namespace Listenarr.Tests.Features.Infrastructure.Library.Moving
             metrics.Verify(
                 service => service.Increment("worker.move.job.completed", It.IsAny<double>()),
                 Times.Never);
-            queue.Verify(service => service.UpdateJobStatusAsync(
-                job.Id,
-                LeaseOwner,
-                job.LeaseGeneration,
-                MoveJobStatus.Failed,
-                It.IsAny<string?>(),
-                It.IsAny<CancellationToken>()), Times.Never);
             Assert.Empty(Directory.EnumerateFiles(
                 target,
                 $".listenarr-move-{job.Id:N}.pending",
@@ -178,9 +159,8 @@ namespace Listenarr.Tests.Features.Infrastructure.Library.Moving
             var persistedJob = await durableQueue.GetJobAsync(job.Id);
             Assert.Equal(MoveJobPhase.RecordingCompletion, persistedJob?.Phase);
             Assert.Empty(await _historyRepository.GetByEventTypeAsync("MoveFailed"));
-            Assert.Single(
-                await _historyRepository.GetByCorrelationIdAsync($"move:{job.Id:N}"),
-                entry => entry.EventType == "Moved");
+            Assert.Empty(
+                await _historyRepository.GetByCorrelationIdAsync($"move:{job.Id:N}"));
 
             var retryProcessor = _provider.GetRequiredService<IMoveJobProcessor>();
             await retryProcessor.ProcessJobAsync(persistedJob!, CancellationToken.None);
@@ -598,7 +578,7 @@ namespace Listenarr.Tests.Features.Infrastructure.Library.Moving
         }
 
         [Fact]
-        public async Task ProcessJobAsync_LegacyJobWithoutSourcePath_UsesCurrentBasePath()
+        public async Task ProcessJobAsync_LegacyJobWithoutSourcePath_RequiresAttentionWithoutMovingCurrentBasePath()
         {
             var source = FileService.GetTempDirectory("move-processor-legacy-src");
             await FileService.GetFileAsync(source, "book.m4b", "audio");
@@ -609,19 +589,25 @@ namespace Listenarr.Tests.Features.Infrastructure.Library.Moving
                 BasePath = source
             });
             var queue = _provider.GetRequiredService<IMoveQueueService>();
-            var jobId = await queue.EnqueueMoveAsync(audiobook.Id, target, sourcePath: null);
+            var jobId = await queue.EnqueueMoveAsync(audiobook.Id, target, source);
             var job = await queue.GetJobAsync(jobId);
             Assert.NotNull(job);
-            await PrepareJobForProcessingAsync(queue, job!);
+            job!.SourcePath = null;
+            job.SourcePathSyntax = null;
+            job.SourceCaseSensitivity = null;
+            job.SourceCaseSensitivityMode = null;
+            job.SourceIdentityBoundary = null;
+            await PrepareJobForProcessingAsync(queue, job);
 
             var processor = _provider.GetRequiredService<IMoveJobProcessor>();
-            await processor.ProcessJobAsync(job!, CancellationToken.None);
+            await processor.ProcessJobAsync(job, CancellationToken.None);
 
             var updatedJob = await queue.GetJobAsync(jobId);
             Assert.NotNull(updatedJob);
-            Assert.Equal(MoveJobStatus.Completed, updatedJob!.Status);
-            Assert.Equal(Path.GetFullPath(source), updatedJob.SourcePath);
-            Assert.True(File.Exists(Path.Join(target, "book.m4b")));
+            Assert.Equal(MoveJobStatus.NeedsAttention, updatedJob!.Status);
+            Assert.Contains("persisted source path", updatedJob.Error, StringComparison.OrdinalIgnoreCase);
+            Assert.True(File.Exists(Path.Join(source, "book.m4b")));
+            Assert.False(Directory.Exists(target));
         }
 
         private sealed class ThrowUnexpectedAfterPublish : IMoveFaultInjector

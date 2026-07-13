@@ -1,0 +1,296 @@
+using System.Data.Common;
+using Listenarr.Domain.Common;
+using Microsoft.EntityFrameworkCore;
+
+namespace Listenarr.Infrastructure.Persistence.Repositories;
+
+public sealed partial class EfMoveQueuePersistence
+{
+    private const int MaximumEvidenceEntries = 10_000;
+    private const int MaximumEvidenceDepth = 128;
+    private const long MaximumOwnershipMarkerBytes = 64 * 1024;
+
+    public async Task ReconcileIdentityKeysAsync(CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
+            await using var transaction = db.Database.IsRelational()
+                ? await db.Database.BeginTransactionAsync(cancellationToken)
+                : null;
+            var activeJobs = await db.MoveJobs
+                .Include(job => job.Relocation)
+                .Where(job => job.Status == MoveJobStatus.Queued
+                    || job.Status == MoveJobStatus.Running
+                    || job.Status == MoveJobStatus.RetryScheduled)
+                .ToListAsync(cancellationToken);
+
+            // Release the unique active-key index while every legacy key is rebuilt under
+            // the authoritative version-3 path identities in this transaction.
+            foreach (var job in activeJobs)
+            {
+                job.ActiveDeduplicationKey = null;
+            }
+
+            await db.SaveChangesAsync(cancellationToken);
+
+            var resolvedJobs = new List<(MoveJob Job, string Key, PathIdentitySnapshot TargetIdentity)>();
+            foreach (var job in activeJobs)
+            {
+                if (string.IsNullOrWhiteSpace(job.SourcePath)
+                    || string.IsNullOrWhiteSpace(job.RequestedPath))
+                {
+                    MarkIdentityConflict(
+                        job,
+                        "The legacy move job has no complete source and target paths and cannot be reconciled safely.");
+                    continue;
+                }
+
+                try
+                {
+                    if (job.TryGetSourceIdentity(out var persistedSourceIdentity))
+                    {
+                        job.SourcePath = FileSystemPathIdentity.Canonicalize(
+                            job.SourcePath,
+                            persistedSourceIdentity.Syntax);
+                    }
+                    else
+                    {
+                        job.SourcePath = FileSystemPathIdentity.ResolveNativeAbsolutePath(
+                            job.SourcePath);
+                    }
+
+                    if (job.TryGetTargetIdentity(out var persistedTargetIdentity))
+                    {
+                        job.RequestedPath = FileSystemPathIdentity.Canonicalize(
+                            job.RequestedPath,
+                            persistedTargetIdentity.Syntax);
+                    }
+                    else
+                    {
+                        job.RequestedPath = FileSystemPathIdentity.ResolveNativeAbsolutePath(
+                            job.RequestedPath);
+                    }
+
+                    var sourceIdentity = await ResolveJobIdentityAsync(
+                        job,
+                        job.SourcePath,
+                        target: false,
+                        cancellationToken);
+                    var targetIdentity = await ResolveJobIdentityAsync(
+                        job,
+                        job.RequestedPath,
+                        target: true,
+                        cancellationToken);
+                    job.SetSourceIdentity(sourceIdentity);
+                    job.SetTargetIdentity(targetIdentity);
+                    job.IdentityKeyVersion = 3;
+                    resolvedJobs.Add((
+                        job,
+                        FileSystemPathIdentity.CreateKey(
+                            $"move:{job.AudiobookId}",
+                            job.RequestedPath,
+                            targetIdentity.Semantics,
+                            version: 3),
+                        targetIdentity));
+                }
+                catch (Exception exception) when (exception is
+                    ArgumentException or InvalidOperationException or NotSupportedException or PathTooLongException)
+                {
+                    MarkIdentityConflict(
+                        job,
+                        $"Move path identity could not be reconciled: {exception.Message}");
+                }
+            }
+
+            var activeJobIds = activeJobs.Select(job => job.Id).ToList();
+            var jobIdsWithManifest = await db.MoveJobEntries
+                .Where(entry => activeJobIds.Contains(entry.MoveJobId))
+                .Select(entry => entry.MoveJobId)
+                .Distinct()
+                .ToListAsync(cancellationToken);
+            var jobIdsWithScaffolding = await db.MoveJobCreatedDirectories
+                .Where(directory => activeJobIds.Contains(directory.MoveJobId))
+                .Select(directory => directory.MoveJobId)
+                .Distinct()
+                .ToListAsync(cancellationToken);
+            var manifestEvidence = jobIdsWithManifest.ToHashSet();
+            var scaffoldEvidence = jobIdsWithScaffolding.ToHashSet();
+
+            foreach (var group in resolvedJobs.GroupBy(item => item.Key, StringComparer.Ordinal))
+            {
+                var candidates = group.ToList();
+                var markerEvidence = ReadTargetOwnershipEvidence(candidates);
+                if (markerEvidence.State == OwnershipEvidenceState.Ambiguous
+                    || (markerEvidence.OwnerJobId.HasValue
+                        && candidates.All(candidate => candidate.Job.Id != markerEvidence.OwnerJobId.Value)))
+                {
+                    foreach (var candidate in candidates)
+                    {
+                        MarkIdentityConflict(
+                            candidate.Job,
+                            markerEvidence.Error
+                                ?? "The destination contains ambiguous or foreign ownership evidence.");
+                    }
+                    continue;
+                }
+
+                var evidenceBearing = new List<(MoveJob Job, string Key, PathIdentitySnapshot TargetIdentity)>();
+                var evidenceAmbiguous = false;
+                foreach (var candidate in candidates)
+                {
+                    var evidence = CollectJobSpecificRecoveryEvidence(
+                        candidate.Job,
+                        manifestEvidence,
+                        scaffoldEvidence);
+                    if (evidence == JobEvidenceState.Ambiguous)
+                    {
+                        evidenceAmbiguous = true;
+                        break;
+                    }
+
+                    if (evidence == JobEvidenceState.Owned
+                        || markerEvidence.OwnerJobId == candidate.Job.Id)
+                    {
+                        evidenceBearing.Add(candidate);
+                    }
+                }
+
+                if (evidenceAmbiguous)
+                {
+                    foreach (var candidate in candidates)
+                    {
+                        MarkIdentityConflict(
+                            candidate.Job,
+                            "Move recovery evidence could not be inspected safely.");
+                    }
+                    continue;
+                }
+
+                if (evidenceBearing.Count > 1)
+                {
+                    var conflictingIds = string.Join(", ", evidenceBearing.Select(item => item.Job.Id));
+                    foreach (var candidate in candidates)
+                    {
+                        MarkIdentityConflict(
+                            candidate.Job,
+                            $"Multiple active move jobs own recovery evidence for the same destination: {conflictingIds}.");
+                    }
+                    continue;
+                }
+
+                var canonical = evidenceBearing.Count == 1
+                    ? evidenceBearing[0]
+                    : candidates
+                        .OrderByDescending(item => item.Job.Phase)
+                        .ThenByDescending(item => item.Job.Status == MoveJobStatus.Running)
+                        .ThenByDescending(item => item.Job.UpdatedAt ?? item.Job.EnqueuedAt)
+                        .First();
+                canonical.Job.ActiveDeduplicationKey = group.Key;
+                canonical.Job.IdentityKeyVersion = 3;
+
+                foreach (var duplicate in candidates.Where(item => item.Job.Id != canonical.Job.Id))
+                {
+                    if (evidenceBearing.Any(item => item.Job.Id == duplicate.Job.Id))
+                    {
+                        MarkIdentityConflict(
+                            canonical.Job,
+                            $"Move job {duplicate.Job.Id} also owns recovery evidence for this destination.");
+                        MarkIdentityConflict(
+                            duplicate.Job,
+                            $"Move job {canonical.Job.Id} also owns recovery evidence for this destination.");
+                        continue;
+                    }
+
+                    duplicate.Job.Status = MoveJobStatus.Superseded;
+                    duplicate.Job.Error = $"Superseded by move job {canonical.Job.Id} during identity-key reconciliation.";
+                    duplicate.Job.IdentityKeyVersion = 3;
+                    duplicate.Job.ActiveDeduplicationKey = null;
+                    duplicate.Job.LeaseOwner = null;
+                    duplicate.Job.LeaseExpiresAt = null;
+                }
+            }
+
+            await db.SaveChangesAsync(cancellationToken);
+            if (transaction != null)
+            {
+                await transaction.CommitAsync(cancellationToken);
+            }
+        }
+        catch (Exception exception) when (exception is DbException or DbUpdateException)
+        {
+            throw new PersistenceException("Failed to reconcile move job identity keys.", exception);
+        }
+    }
+
+    private async Task<PathIdentitySnapshot> ResolveJobIdentityAsync(
+        MoveJob job,
+        string path,
+        bool target,
+        CancellationToken cancellationToken)
+    {
+        var hasPersistedIdentity = target
+            ? job.TryGetTargetIdentity(out var persistedIdentity)
+            : job.TryGetSourceIdentity(out persistedIdentity);
+        if (hasPersistedIdentity)
+        {
+            persistedIdentity.ValidateForPath(path);
+            if (persistedIdentity.RequestedMode == FileSystemCaseSensitivityMode.Auto)
+            {
+                var current = await semanticsResolver.ResolveAsync(
+                    persistedIdentity.BoundaryPath,
+                    FileSystemCaseSensitivityMode.Auto,
+                    cancellationToken);
+                if (current.State != PathIdentityState.Valid
+                    || current.Semantics.Syntax != persistedIdentity.Syntax
+                    || current.Semantics.CaseSensitivity != persistedIdentity.CaseSensitivity)
+                {
+                    throw new InvalidOperationException(
+                        $"The persisted {(target ? "target" : "source")} filesystem identity changed.");
+                }
+            }
+
+            return persistedIdentity;
+        }
+
+        var mode = target
+            ? job.TargetCaseSensitivityMode
+                ?? job.Relocation?.TargetCaseSensitivityMode
+                ?? FileSystemCaseSensitivityMode.Auto
+            : job.SourceCaseSensitivityMode
+                ?? job.Relocation?.SourceCaseSensitivityMode
+                ?? FileSystemCaseSensitivityMode.Auto;
+        var resolution = await semanticsResolver.ResolveAsync(path, mode, cancellationToken);
+        if (resolution.State != PathIdentityState.Valid)
+        {
+            throw new InvalidOperationException(
+                resolution.Reason
+                    ?? $"The {(target ? "target" : "source")} filesystem identity is unavailable.");
+        }
+
+        var configuredBoundary = target
+            ? job.Relocation?.TargetPath
+            : job.Relocation?.SourcePath;
+        var boundary = !string.IsNullOrWhiteSpace(configuredBoundary)
+            && FileSystemPathIdentity.IsSameOrInside(path, configuredBoundary, resolution.Semantics)
+                ? configuredBoundary
+                : resolution.BoundaryPath;
+        return PathIdentitySnapshot.FromResolution(
+            resolution.Semantics,
+            mode,
+            boundary,
+            path);
+    }
+
+    private static void MarkIdentityConflict(MoveJob job, string error)
+    {
+        job.Status = MoveJobStatus.NeedsAttention;
+        job.IdentityKeyVersion = 3;
+        job.ActiveDeduplicationKey = null;
+        job.FailureKind = MoveFailureKind.Verification;
+        job.Error = error;
+        job.LeaseOwner = null;
+        job.LeaseExpiresAt = null;
+    }
+
+}

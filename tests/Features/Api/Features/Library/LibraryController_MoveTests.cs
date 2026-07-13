@@ -64,11 +64,8 @@ namespace Listenarr.Tests.Features.Api.Features.Library
             var mockMoveQueue = new Mock<IMoveQueueService>();
             var expectedId = Guid.NewGuid();
             mockMoveQueue.Setup(m => m.EnqueueMoveAsync(
-                    It.IsAny<int>(),
-                    It.IsAny<string>(),
-                    It.IsAny<string>(),
-                    It.IsAny<bool>(),
-                    It.IsAny<string?>()))
+                    It.IsAny<MoveEnqueueCommand>(),
+                    It.IsAny<CancellationToken>()))
                 .ReturnsAsync(expectedId);
 
             Init(services => services.WithSingleton(mockMoveQueue.Object));
@@ -99,26 +96,25 @@ namespace Listenarr.Tests.Features.Api.Features.Library
             Assert.Equal(202, acceptedObj.StatusCode);
             Assert.NotNull(acceptedObj.Value);
             mockMoveQueue.Verify(m => m.EnqueueMoveAsync(
-                ab.Id,
-                FileUtils.NormalizeStoredPath(target),
-                ab.BasePath,
-                false,
-                null), Times.Once);
+                It.Is<MoveEnqueueCommand>(command =>
+                    command.AudiobookId == ab.Id
+                    && command.TargetPath == FileUtils.NormalizeStoredPath(target)
+                    && command.SourcePath == ab.BasePath
+                    && !command.DeleteEmptySource
+                    && command.SourceCleanupBoundary == null),
+                It.IsAny<CancellationToken>()), Times.Once);
         }
 
         [Fact]
         [Trait("Method", "EnqueueMove")]
         [Trait("Scenario", "CreatesCustomPhysicalDestinationOutsideConfiguredRoots")]
-        public async Task MoveAudiobook_MoveFilesTrue_AllowsCustomDestinationOutsideConfiguredRootsAndCreatesParent()
+        public async Task MoveAudiobook_MoveFilesTrue_AllowsCustomDestinationOutsideConfiguredRootsWithoutCreatingParent()
         {
             var mockMoveQueue = new Mock<IMoveQueueService>();
             var expectedId = Guid.NewGuid();
             mockMoveQueue.Setup(m => m.EnqueueMoveAsync(
-                    It.IsAny<int>(),
-                    It.IsAny<string>(),
-                    It.IsAny<string>(),
-                    It.IsAny<bool>(),
-                    It.IsAny<string?>()))
+                    It.IsAny<MoveEnqueueCommand>(),
+                    It.IsAny<CancellationToken>()))
                 .ReturnsAsync(expectedId);
 
             Init(services => services.WithSingleton(mockMoveQueue.Object));
@@ -148,13 +144,15 @@ namespace Listenarr.Tests.Features.Api.Features.Library
 
             var accepted = Assert.IsType<AcceptedResult>(result);
             Assert.Equal(202, accepted.StatusCode);
-            Assert.True(Directory.Exists(targetParent));
+            Assert.False(Directory.Exists(targetParent));
             mockMoveQueue.Verify(m => m.EnqueueMoveAsync(
-                audiobook.Id,
-                FileUtils.NormalizeStoredPath(target),
-                sourcePath,
-                true,
-                Path.GetDirectoryName(sourcePath)), Times.Once);
+                It.Is<MoveEnqueueCommand>(command =>
+                    command.AudiobookId == audiobook.Id
+                    && command.TargetPath == FileUtils.NormalizeStoredPath(target)
+                    && command.SourcePath == sourcePath
+                    && command.DeleteEmptySource
+                    && command.SourceCleanupBoundary == Path.GetDirectoryName(sourcePath)),
+                It.IsAny<CancellationToken>()), Times.Once);
         }
 
         [Fact]
@@ -162,11 +160,8 @@ namespace Listenarr.Tests.Features.Api.Features.Library
         {
             var moveQueue = new Mock<IMoveQueueService>();
             moveQueue.Setup(service => service.EnqueueMoveAsync(
-                    It.IsAny<int>(),
-                    It.IsAny<string>(),
-                    It.IsAny<string>(),
-                    It.IsAny<bool>(),
-                    It.IsAny<string?>()))
+                    It.IsAny<MoveEnqueueCommand>(),
+                    It.IsAny<CancellationToken>()))
                 .ReturnsAsync(Guid.NewGuid());
             Init(services => services.WithSingleton(moveQueue.Object));
             var configuredOutputPath = FileService.GetTempDirectory("listenarr-move-output");
@@ -196,11 +191,13 @@ namespace Listenarr.Tests.Features.Api.Features.Library
 
             Assert.IsType<AcceptedResult>(result);
             moveQueue.Verify(service => service.EnqueueMoveAsync(
-                audiobook.Id,
-                FileUtils.NormalizeStoredPath(target),
-                source,
-                true,
-                series), Times.Once);
+                It.Is<MoveEnqueueCommand>(command =>
+                    command.AudiobookId == audiobook.Id
+                    && command.TargetPath == FileUtils.NormalizeStoredPath(target)
+                    && command.SourcePath == source
+                    && command.DeleteEmptySource
+                    && command.SourceCleanupBoundary == series),
+                It.IsAny<CancellationToken>()), Times.Once);
         }
 
         [Fact]
@@ -208,11 +205,8 @@ namespace Listenarr.Tests.Features.Api.Features.Library
         {
             var moveQueue = new Mock<IMoveQueueService>();
             moveQueue.Setup(service => service.EnqueueMoveAsync(
-                    It.IsAny<int>(),
-                    It.IsAny<string>(),
-                    It.IsAny<string?>(),
-                    It.IsAny<bool>(),
-                    It.IsAny<string?>()))
+                    It.IsAny<MoveEnqueueCommand>(),
+                    It.IsAny<CancellationToken>()))
                 .ThrowsAsync(new MoveRelocationConflictException(
                     "Move target overlaps an active root folder relocation boundary."));
             Init(services => services.WithSingleton(moveQueue.Object));
@@ -800,11 +794,8 @@ namespace Listenarr.Tests.Features.Api.Features.Library
             var mockMoveQueue = new Mock<IMoveQueueService>();
             var expectedId = Guid.NewGuid();
             mockMoveQueue.Setup(m => m.EnqueueMoveAsync(
-                    It.IsAny<int>(),
-                    It.IsAny<string>(),
-                    It.IsAny<string>(),
-                    It.IsAny<bool>(),
-                    It.IsAny<string?>()))
+                    It.IsAny<MoveEnqueueCommand>(),
+                    It.IsAny<CancellationToken>()))
                 .ReturnsAsync(expectedId);
 
             Init(services => services.WithSingleton(mockMoveQueue.Object));
@@ -830,11 +821,13 @@ namespace Listenarr.Tests.Features.Api.Features.Library
             var acceptedObj = Assert.IsAssignableFrom<ObjectResult>(result);
             Assert.Equal(202, acceptedObj.StatusCode);
             mockMoveQueue.Verify(m => m.EnqueueMoveAsync(
-                audiobook.Id,
-                FileUtils.NormalizeStoredPath(targetPath),
-                sourcePath,
-                true,
-                outputPath), Times.Once);
+                It.Is<MoveEnqueueCommand>(command =>
+                    command.AudiobookId == audiobook.Id
+                    && command.TargetPath == FileUtils.NormalizeStoredPath(targetPath)
+                    && command.SourcePath == sourcePath
+                    && command.DeleteEmptySource
+                    && command.SourceCleanupBoundary == outputPath),
+                It.IsAny<CancellationToken>()), Times.Once);
         }
 
         [Fact]
@@ -872,11 +865,8 @@ namespace Listenarr.Tests.Features.Api.Features.Library
             var badObj = Assert.IsAssignableFrom<BadRequestObjectResult>(result);
             Assert.Contains("identical", badObj.Value?.ToString() ?? string.Empty, StringComparison.OrdinalIgnoreCase);
             mockMoveQueue.Verify(m => m.EnqueueMoveAsync(
-                It.IsAny<int>(),
-                It.IsAny<string>(),
-                It.IsAny<string>(),
-                It.IsAny<bool>(),
-                It.IsAny<string?>()), Times.Never);
+                It.IsAny<MoveEnqueueCommand>(),
+                It.IsAny<CancellationToken>()), Times.Never);
         }
 
         [Fact]
@@ -887,11 +877,8 @@ namespace Listenarr.Tests.Features.Api.Features.Library
             var mockMoveQueue = new Mock<IMoveQueueService>();
             var expectedId = Guid.NewGuid();
             mockMoveQueue.Setup(m => m.EnqueueMoveAsync(
-                    It.IsAny<int>(),
-                    It.IsAny<string>(),
-                    It.IsAny<string>(),
-                    It.IsAny<bool>(),
-                    It.IsAny<string?>()))
+                    It.IsAny<MoveEnqueueCommand>(),
+                    It.IsAny<CancellationToken>()))
                 .ReturnsAsync(expectedId);
             Init(services => services.WithSingleton(mockMoveQueue.Object));
             var rootPath = FileService.GetTempDirectory("listenarr-move-sensitive-root");
@@ -921,11 +908,58 @@ namespace Listenarr.Tests.Features.Api.Features.Library
 
             Assert.IsType<AcceptedResult>(result);
             mockMoveQueue.Verify(m => m.EnqueueMoveAsync(
+                It.Is<MoveEnqueueCommand>(command =>
+                    command.AudiobookId == audiobook.Id
+                    && command.TargetPath == FileUtils.NormalizeStoredPath(targetPath)
+                    && command.SourcePath == sourcePath
+                    && command.DeleteEmptySource
+                    && command.SourceCleanupBoundary == rootPath
+                    && command.SourceIdentity.CaseSensitivity == FileSystemCaseSensitivity.Sensitive
+                    && command.TargetIdentity.CaseSensitivity == FileSystemCaseSensitivity.Sensitive),
+                It.IsAny<CancellationToken>()), Times.Once);
+        }
+
+        [Fact]
+        public async Task MoveAudiobook_NestedExplicitRoot_OverridesBroaderOutputPathSemantics()
+        {
+            var mockMoveQueue = new Mock<IMoveQueueService>();
+            mockMoveQueue.Setup(service => service.EnqueueMoveAsync(
+                    It.IsAny<MoveEnqueueCommand>(),
+                    It.IsAny<CancellationToken>()))
+                .ReturnsAsync(Guid.NewGuid());
+            Init(services => services.WithSingleton(mockMoveQueue.Object));
+            var outputPath = FileService.GetTempDirectory("listenarr-move-nested-output");
+            var sensitiveRoot = Path.Join(outputPath, "Sensitive Library");
+            Directory.CreateDirectory(sensitiveRoot);
+            await _applicationSettingsRepository.SaveAsync(new ApplicationSettingsBuilder()
+                .WithOutputPath(outputPath)
+                .Build());
+            await _rootFolderRepository.AddAsync(new RootFolderBuilder()
+                .WithName("Nested Sensitive Root")
+                .WithPath(sensitiveRoot)
+                .WithCaseSensitivityMode(FileSystemCaseSensitivityMode.Sensitive)
+                .Build());
+
+            var sourcePath = Path.Join(sensitiveRoot, "CaseOnlyBook");
+            Directory.CreateDirectory(sourcePath);
+            var targetPath = Path.Join(sensitiveRoot, "caseonlybook");
+            var audiobook = await _audiobookRepository.AddAsync(new AudiobookBuilder()
+                .WithTitle("Nested sensitive move")
+                .WithBasePath(sourcePath)
+                .Build());
+
+            var result = await _provider.GetRequiredService<LibraryController>().EnqueueMove(
                 audiobook.Id,
-                FileUtils.NormalizeStoredPath(targetPath),
-                sourcePath,
-                true,
-                rootPath), Times.Once);
+                new LibraryController.MoveRequest { DestinationPath = targetPath });
+
+            Assert.IsType<AcceptedResult>(result);
+            mockMoveQueue.Verify(service => service.EnqueueMoveAsync(
+                It.Is<MoveEnqueueCommand>(command =>
+                    command.SourceIdentity.BoundaryPath == sensitiveRoot
+                    && command.TargetIdentity.BoundaryPath == sensitiveRoot
+                    && command.SourceIdentity.CaseSensitivity == FileSystemCaseSensitivity.Sensitive
+                    && command.TargetIdentity.CaseSensitivity == FileSystemCaseSensitivity.Sensitive),
+                It.IsAny<CancellationToken>()), Times.Once);
         }
 
         [Fact]

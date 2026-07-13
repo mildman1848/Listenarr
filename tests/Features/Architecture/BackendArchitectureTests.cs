@@ -9,6 +9,7 @@
  */
 using System.Text.RegularExpressions;
 using System.Xml.Linq;
+using Listenarr.Tests.Common;
 
 namespace Listenarr.Tests.Features.Architecture;
 
@@ -643,19 +644,5 @@ public sealed class BackendArchitectureTests
 
     private static string Normalize(string path) => path.Replace('\\', '/');
 
-    private static string FindRepositoryRoot()
-    {
-        var directory = new DirectoryInfo(AppContext.BaseDirectory);
-        while (directory != null)
-        {
-            if (File.Exists(Path.Join(directory.FullName, "listenarr.slnx")))
-            {
-                return directory.FullName;
-            }
-
-            directory = directory.Parent;
-        }
-
-        throw new DirectoryNotFoundException($"Unable to locate repository root from {AppContext.BaseDirectory}");
-    }
+    private static string FindRepositoryRoot() => TestUtils.FindRepositoryRoot();
 }

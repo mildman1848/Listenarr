@@ -20,7 +20,7 @@ using Microsoft.Extensions.Logging;
 
 namespace Listenarr.Application.Downloads.Import
 {
-    public class DownloadImportService(
+    public partial class DownloadImportService(
         IFileNamingService fileNamingService,
         IMetadataService metadataService,
         IFileMover fileMover,
@@ -30,13 +30,14 @@ namespace Listenarr.Application.Downloads.Import
         ImportDestinationPlanner destinationPlanner,
         IFileSystemSemanticsResolver semanticsResolver,
         ArchiveImportExtractor archiveImportExtractor,
-        ILogger<DownloadImportService> logger) : IDownloadImportService
+        ILogger<DownloadImportService> logger,
+        IAudiobookOperationCoordinator? audiobookOperationCoordinator = null) : IDownloadImportService
     {
-        public async Task<List<ImportResult>> ImportDownloadFilesAsync(
+        private async Task<List<ImportResult>> ImportDownloadFilesCoreAsync(
             Audiobook audiobook,
             List<string> files,
-            CancellationToken ct = default,
-            DownloadImportOptions? options = null)
+            CancellationToken ct,
+            DownloadImportOptions? options)
         {
             if (string.IsNullOrEmpty(audiobook.BasePath))
             {

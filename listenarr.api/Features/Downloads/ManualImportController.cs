@@ -68,6 +68,7 @@ public class ManualImportController : ControllerBase
             metadataService,
             fileMover,
             fileSystem,
+            semanticsResolver,
             Microsoft.Extensions.Logging.Abstractions.NullLogger<ManualImportCompanionImporter>.Instance);
     }
 
@@ -194,7 +195,7 @@ public class ManualImportController : ControllerBase
                     sourceDirectory,
                     selectedAudioProfiles,
                     destinationTracker,
-                    sourceSemantics.Comparer,
+                    sourceSemantics,
                     appSettings.ImportBlacklistExtensions);
                 _logger.LogInformation("Manual import companion-file pass completed with {Count} imported companion file(s)", companionImportCount);
             }

@@ -50,6 +50,72 @@ public partial class MoveJobProcessorTests
             Path.GetFullPath(updated.FilePath!));
     }
 
+    [Fact]
+    public async Task ProcessJobAsync_ReleasesAudiobookLockBeforeOptionalCompletionEffects()
+    {
+        var source = FileService.GetTempDirectory("move-processor-post-effects-src");
+        var sourceFile = await FileService.GetFileAsync(source, "book.m4b", "audio");
+        var target = Path.Join(
+            FileService.GetTempPath(),
+            $"move-processor-post-effects-dst-{Guid.NewGuid():N}");
+        var audiobook = await _audiobookRepository.AddAsync(new Audiobook
+        {
+            Title = "Post effects test",
+            BasePath = source,
+            FilePath = sourceFile
+        });
+        var (_, job) = await CreateQueuedMoveJobAsync(audiobook, target, source);
+        var blockingToast = new BlockingToastService();
+        var processor = ActivatorUtilities.CreateInstance<MoveJobProcessor>(
+            _provider,
+            blockingToast);
+
+        var processing = processor.ProcessJobAsync(job, CancellationToken.None);
+        await blockingToast.Entered.Task.WaitAsync(TimeSpan.FromSeconds(10));
+
+        var coordinator = _provider.GetRequiredService<IAudiobookOperationCoordinator>();
+        var concurrentEntered = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var concurrentOperation = coordinator.ExecuteExclusiveAsync(
+            audiobook.Id,
+            _ =>
+            {
+                concurrentEntered.TrySetResult();
+                return Task.CompletedTask;
+            },
+            CancellationToken.None);
+
+        await concurrentEntered.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        blockingToast.Release.TrySetResult();
+        await Task.WhenAll(processing, concurrentOperation);
+    }
+
+    private sealed class BlockingToastService : IToastService
+    {
+        public TaskCompletionSource Entered { get; } = new(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public TaskCompletionSource Release { get; } = new(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public async Task PublishToastAsync(
+            string level,
+            string title,
+            string message,
+            int? timeoutMs = null)
+        {
+            Entered.TrySetResult();
+            await Release.Task;
+        }
+
+        public Task PublishNotificationAsync(
+            string title,
+            string message,
+            string? icon = null,
+            int? timeoutMs = null) =>
+            Task.CompletedTask;
+    }
+
     private sealed class SaveConcurrentMetadataAfterPublish(
         IServiceScopeFactory scopeFactory,
         int audiobookId) : IMoveFaultInjector

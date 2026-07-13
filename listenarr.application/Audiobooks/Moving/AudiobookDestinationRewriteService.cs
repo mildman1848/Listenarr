@@ -23,6 +23,7 @@ public sealed class AudiobookDestinationRewriteService : IAudiobookDestinationRe
     private readonly IFileSystemSemanticsResolver _semanticsResolver;
     private readonly IRootFolderRelocationService _relocationService;
     private readonly IFilesystemMutationCoordinator _mutationCoordinator;
+    private readonly IAudiobookOperationCoordinator? _audiobookOperationCoordinator;
     private readonly ILogger<AudiobookDestinationRewriteService> _logger;
 
     public AudiobookDestinationRewriteService(
@@ -33,7 +34,8 @@ public sealed class AudiobookDestinationRewriteService : IAudiobookDestinationRe
         IFileSystemSemanticsResolver semanticsResolver,
         ILogger<AudiobookDestinationRewriteService> logger,
         IRootFolderRelocationService relocationService,
-        IFilesystemMutationCoordinator mutationCoordinator)
+        IFilesystemMutationCoordinator mutationCoordinator,
+        IAudiobookOperationCoordinator? audiobookOperationCoordinator = null)
     {
         _repo = repo;
         _configService = configService;
@@ -43,91 +45,111 @@ public sealed class AudiobookDestinationRewriteService : IAudiobookDestinationRe
         _logger = logger;
         _relocationService = relocationService ?? throw new ArgumentNullException(nameof(relocationService));
         _mutationCoordinator = mutationCoordinator ?? throw new ArgumentNullException(nameof(mutationCoordinator));
+        _audiobookOperationCoordinator = audiobookOperationCoordinator;
     }
 
-    public async Task<AudiobookDestinationRewriteResult> RewriteDestinationAsync(
+    public Task<AudiobookDestinationRewriteResult> RewriteDestinationAsync(
         int audiobookId,
         string destinationPath,
         string? expectedSourcePath,
-        CancellationToken cancellationToken = default)
-    {
-        return await _mutationCoordinator.ExecuteExclusiveAsync(async lockedCancellationToken =>
-        {
-            var destination = await ResolveDestinationAsync(destinationPath, lockedCancellationToken);
-            var currentAudiobook = await _repo.GetByIdAsync(audiobookId);
-            if (currentAudiobook == null)
-            {
-                throw new ApplicationNotFoundException("audiobook_not_found", "Audiobook not found");
-            }
-
-            var sourceBasePath = currentAudiobook.BasePath;
-            var sourceSemantics = destination.TargetBoundary.Semantics;
-            if (!string.IsNullOrWhiteSpace(sourceBasePath))
-            {
-                var sourceBoundary = FindAllowedMoveRoot(sourceBasePath, destination.AllowedMoveRoots);
-                if (sourceBoundary != null)
-                {
-                    sourceSemantics = sourceBoundary.Semantics;
-                }
-                else
-                {
-                    // Metadata-only updates must not require source filesystem access.
-                    // If the source is not inside a configured boundary, reuse the validated
-                    // target boundary semantics only for stale-source comparison and best-effort
-                    // reference rewriting. Invalid source references are preserved by the rewriter.
-                    sourceSemantics = destination.TargetBoundary.Semantics;
-                }
-            }
-
-            if (!string.IsNullOrWhiteSpace(expectedSourcePath))
-            {
-                if (string.IsNullOrWhiteSpace(sourceBasePath)
-                    || !StoredSourcePathMatchesExpected(
+        CancellationToken cancellationToken = default) =>
+        _mutationCoordinator.ExecuteExclusiveAsync(
+            lockedCancellationToken => _audiobookOperationCoordinator != null
+                ? _audiobookOperationCoordinator.ExecuteExclusiveAsync(
+                    audiobookId,
+                    token => RewriteDestinationCoreAsync(
+                        audiobookId,
+                        destinationPath,
                         expectedSourcePath,
-                        sourceBasePath,
-                        sourceSemantics))
-                {
-                    throw new ApplicationConflictException(
-                        "source_path_changed",
-                        "The audiobook source path changed. Refresh and try again.");
-                }
-            }
+                        token),
+                    lockedCancellationToken)
+                : RewriteDestinationCoreAsync(
+                    audiobookId,
+                    destinationPath,
+                    expectedSourcePath,
+                    lockedCancellationToken),
+            cancellationToken);
 
-            if (_relocationService != null
-                && (await _relocationService.IsBoundaryProtectedAsync(
-                        destination.Path,
-                        destination.TargetBoundary.Semantics,
-                        lockedCancellationToken)
-                    || (!string.IsNullOrWhiteSpace(sourceBasePath)
-                        && await TryIsBoundaryProtectedAsync(
-                            sourceBasePath,
-                            sourceSemantics,
-                            lockedCancellationToken))))
+    private async Task<AudiobookDestinationRewriteResult> RewriteDestinationCoreAsync(
+        int audiobookId,
+        string destinationPath,
+        string? expectedSourcePath,
+        CancellationToken cancellationToken)
+    {
+        var destination = await ResolveDestinationAsync(destinationPath, cancellationToken);
+        var currentAudiobook = await _repo.GetByIdAsync(audiobookId);
+        if (currentAudiobook == null)
+        {
+            throw new ApplicationNotFoundException("audiobook_not_found", "Audiobook not found");
+        }
+
+        var sourceBasePath = currentAudiobook.BasePath;
+        var sourceSemantics = destination.TargetBoundary.Semantics;
+        if (!string.IsNullOrWhiteSpace(sourceBasePath))
+        {
+            var sourceBoundary = FindAllowedMoveRoot(sourceBasePath, destination.AllowedMoveRoots);
+            if (sourceBoundary != null)
+            {
+                sourceSemantics = sourceBoundary.Semantics;
+            }
+            else
+            {
+                // Metadata-only updates must not require source filesystem access.
+                // If the source is not inside a configured boundary, reuse the validated
+                // target boundary semantics only for stale-source comparison and best-effort
+                // reference rewriting. Invalid source references are preserved by the rewriter.
+                sourceSemantics = destination.TargetBoundary.Semantics;
+            }
+        }
+
+        if (!string.IsNullOrWhiteSpace(expectedSourcePath))
+        {
+            if (string.IsNullOrWhiteSpace(sourceBasePath)
+                || !StoredSourcePathMatchesExpected(
+                    expectedSourcePath,
+                    sourceBasePath,
+                    sourceSemantics))
             {
                 throw new ApplicationConflictException(
-                    "move_relocation_conflict",
-                    "Move source or target overlaps an active root folder relocation boundary.");
+                    "source_path_changed",
+                    "The audiobook source path changed. Refresh and try again.");
             }
+        }
 
-            var rewritten = await _repo.RewritePathReferencesAsync(
-                audiobookId,
-                sourceBasePath,
-                destination.Path,
-                sourceSemantics,
-                destination.TargetBoundary.Semantics,
-                lockedCancellationToken);
-            if (!rewritten)
-            {
-                throw new ApplicationNotFoundException("audiobook_not_found", "Audiobook not found");
-            }
+        if (_relocationService != null
+            && (await _relocationService.IsBoundaryProtectedAsync(
+                    destination.Path,
+                    destination.TargetBoundary.Semantics,
+                    cancellationToken)
+                || (!string.IsNullOrWhiteSpace(sourceBasePath)
+                    && await TryIsBoundaryProtectedAsync(
+                        sourceBasePath,
+                        sourceSemantics,
+                        cancellationToken))))
+        {
+            throw new ApplicationConflictException(
+                "move_relocation_conflict",
+                "Move source or target overlaps an active root folder relocation boundary.");
+        }
 
-            _logger.LogInformation(
-                "Updated BasePath for audiobook {AudiobookId} without moving files: {BasePath}",
-                audiobookId,
-                destination.Path);
+        var rewritten = await _repo.RewritePathReferencesAsync(
+            audiobookId,
+            sourceBasePath,
+            destination.Path,
+            sourceSemantics,
+            destination.TargetBoundary.Semantics,
+            cancellationToken);
+        if (!rewritten)
+        {
+            throw new ApplicationNotFoundException("audiobook_not_found", "Audiobook not found");
+        }
 
-            return new AudiobookDestinationRewriteResult(audiobookId, destination.Path, sourceBasePath);
-        }, cancellationToken);
+        _logger.LogInformation(
+            "Updated BasePath for audiobook {AudiobookId} without moving files: {BasePath}",
+            audiobookId,
+            destination.Path);
+
+        return new AudiobookDestinationRewriteResult(audiobookId, destination.Path, sourceBasePath);
     }
 
     private async Task<ResolvedDestination> ResolveDestinationAsync(

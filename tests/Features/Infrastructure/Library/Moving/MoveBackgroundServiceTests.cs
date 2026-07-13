@@ -131,7 +131,7 @@ public sealed class MoveBackgroundServiceTests
             .Returns(async () =>
             {
                 await Task.Delay(Timeout.InfiniteTimeSpan);
-                return true;
+                return MoveHeartbeatOutcome.Renewed;
             });
         var processor = new Mock<IMoveJobProcessor>();
         processor.Setup(service => service.ProcessJobAsync(job, It.IsAny<CancellationToken>()))
@@ -189,7 +189,7 @@ public sealed class MoveBackgroundServiceTests
                 It.IsAny<string>(),
                 1,
                 It.IsAny<CancellationToken>()))
-            .ReturnsAsync(false);
+            .ReturnsAsync(MoveHeartbeatOutcome.Lost);
         var processor = new Mock<IMoveJobProcessor>();
         processor.Setup(service => service.ProcessJobAsync(job, It.IsAny<CancellationToken>()))
             .Returns(async (MoveJob _, CancellationToken cancellationToken) =>

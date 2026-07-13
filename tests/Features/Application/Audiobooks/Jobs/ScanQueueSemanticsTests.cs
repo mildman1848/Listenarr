@@ -85,48 +85,105 @@ namespace Listenarr.Tests.Features.Application.Audiobooks.Jobs
         }
 
         [Fact]
-        public async Task ScanQueue_RecoveryPredicateAndTerminalStatus_AreSerialized()
+        public async Task ScanQueue_ManualMoveRetryDefersAndReleasesHandoffWhenAnotherScanIsActive()
         {
+            var handoffId = Guid.NewGuid();
+            var moveJobId = Guid.NewGuid();
+            var store = new Mock<IMoveScanHandoffStore>();
+            store.Setup(candidate => candidate.RequeueAsync(
+                    handoffId,
+                    It.IsAny<Guid>(),
+                    It.IsAny<int>(),
+                    It.IsAny<string?>(),
+                    It.IsAny<DateTimeOffset>(),
+                    It.IsAny<CancellationToken>()))
+                .ReturnsAsync(true);
+            store.Setup(candidate => candidate.ReleaseClaimAsync(
+                    handoffId,
+                    It.IsAny<string>(),
+                    It.IsAny<int>(),
+                    It.IsAny<string?>(),
+                    It.IsAny<DateTimeOffset>(),
+                    It.IsAny<CancellationToken>()))
+                .ReturnsAsync(true);
+            store.Setup(candidate => candidate.MarkDispatchedAsync(
+                    handoffId,
+                    It.IsAny<string>(),
+                    It.IsAny<int>(),
+                    It.IsAny<Guid>(),
+                    It.IsAny<DateTimeOffset>(),
+                    It.IsAny<CancellationToken>()))
+                .ReturnsAsync(true);
+            store.Setup(candidate => candidate.TryClaimAsync(
+                    handoffId,
+                    It.IsAny<string>(),
+                    It.IsAny<DateTimeOffset>(),
+                    It.IsAny<DateTimeOffset>(),
+                    It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new MoveScanHandoffClaim(
+                    handoffId,
+                    moveJobId,
+                    1004,
+                    "/library/book",
+                    CreateUnixIdentity(),
+                    2,
+                    "manual-worker",
+                    2));
             var queue = new ScanQueueService(
                 NullLogger<ScanQueueService>.Instance,
-                BuildResolver(FileSystemCaseSensitivity.Sensitive));
+                BuildResolver(FileSystemCaseSensitivity.Sensitive),
+                store.Object,
+                TimeProvider.System);
             var audiobook = new AudiobookBuilder()
                 .WithId(1004)
-                .WithTitle("Serialized Recovery")
+                .WithTitle("Deferred Move Retry")
                 .Build();
-            const string correlationId = "move:serialized-recovery";
-            var original = await queue.EnqueueScanAsync(
+            var original = await queue.EnqueueMoveHandoffScanAsync(
                 audiobook,
-                correlationId: correlationId);
-            var predicateEntered = new TaskCompletionSource(
-                TaskCreationOptions.RunContinuationsAsynchronously);
-            var releasePredicate = new TaskCompletionSource(
-                TaskCreationOptions.RunContinuationsAsynchronously);
-            var recovery = queue.EnqueueRecoveredScanAsync(
-                audiobook,
-                correlationId,
-                async () =>
-                {
-                    predicateEntered.TrySetResult();
-                    await releasePredicate.Task;
-                    return false;
-                });
-            await predicateEntered.Task;
-            var terminalUpdate = Task.Run(() =>
-                queue.UpdateJobStatus(original, "Completed"));
+                new MoveScanHandoffClaim(
+                    handoffId,
+                    moveJobId,
+                    audiobook.Id,
+                    "/library/book",
+                    CreateUnixIdentity(),
+                    1,
+                    "initial-worker",
+                    1));
+            Assert.NotNull(original);
+            Assert.True(queue.Reader.TryRead(out var originalJob));
+            Assert.Equal("/library/book", originalJob.Path);
+            queue.UpdateJobStatus(original!.Value, "Failed", "first attempt failed");
+            var ordinary = await queue.EnqueueScanAsync(audiobook);
+            Assert.NotEqual(original.Value, ordinary);
 
-            releasePredicate.TrySetResult();
-            Assert.Null(await recovery);
-            await terminalUpdate;
-            Assert.True(queue.TryGetJob(original, out var completed));
-            Assert.Equal("Completed", completed!.Status);
-            Assert.True(queue.Reader.TryRead(out var queued));
-            Assert.Equal(original, queued.Id);
-            Assert.False(queue.Reader.TryRead(out _));
+            var retried = await queue.RequeueScanAsync(original.Value);
+
+            Assert.Null(retried);
+            store.Verify(candidate => candidate.RequeueAsync(
+                handoffId,
+                original.Value,
+                1,
+                It.IsAny<string?>(),
+                It.IsAny<DateTimeOffset>(),
+                It.IsAny<CancellationToken>()), Times.Once);
+            store.Verify(candidate => candidate.ReleaseClaimAsync(
+                handoffId,
+                "manual-worker",
+                2,
+                It.IsAny<string?>(),
+                It.IsAny<DateTimeOffset>(),
+                It.IsAny<CancellationToken>()), Times.Once);
+            store.Verify(candidate => candidate.MarkDispatchedAsync(
+                handoffId,
+                It.IsAny<string>(),
+                1,
+                original.Value,
+                It.IsAny<DateTimeOffset>(),
+                It.IsAny<CancellationToken>()), Times.Once);
         }
 
         [Fact]
-        public async Task ScanQueue_TerminalPersistenceBlocksRecoveredEnqueue()
+        public async Task ScanQueue_TerminalPersistenceDoesNotHoldQueueGate()
         {
             var queue = new ScanQueueService(
                 NullLogger<ScanQueueService>.Instance,
@@ -135,13 +192,9 @@ namespace Listenarr.Tests.Features.Application.Audiobooks.Jobs
                 .WithId(1005)
                 .WithTitle("Terminal Persistence")
                 .Build();
-            const string correlationId = "move:terminal-persistence";
-            var original = await queue.EnqueueScanAsync(
-                audiobook,
-                correlationId: correlationId);
+            var original = await queue.EnqueueScanAsync(audiobook);
             Assert.True(queue.Reader.TryRead(out _));
             queue.UpdateJobStatus(original, "Processing");
-            var terminalPersisted = false;
             var persistenceEntered = new TaskCompletionSource(
                 TaskCreationOptions.RunContinuationsAsynchronously);
             var releasePersistence = new TaskCompletionSource(
@@ -152,24 +205,22 @@ namespace Listenarr.Tests.Features.Application.Audiobooks.Jobs
                 {
                     persistenceEntered.TrySetResult();
                     await releasePersistence.Task;
-                    terminalPersisted = true;
                     return ("Completed", (string?)null);
                 });
             await persistenceEntered.Task;
 
-            var recovery = queue.EnqueueRecoveredScanAsync(
-                audiobook,
-                correlationId,
-                () => Task.FromResult(!terminalPersisted));
-            Assert.False(recovery.IsCompleted);
+            var otherAudiobook = new AudiobookBuilder()
+                .WithId(1007)
+                .WithTitle("Independent Scan")
+                .Build();
+            var otherEnqueue = queue.EnqueueScanAsync(otherAudiobook);
+            var otherJobId = await otherEnqueue.WaitAsync(TimeSpan.FromSeconds(2));
+            Assert.NotEqual(original, otherJobId);
 
             releasePersistence.TrySetResult();
             await completion;
-
-            Assert.Null(await recovery);
             Assert.True(queue.TryGetJob(original, out var completed));
             Assert.Equal("Completed", completed!.Status);
-            Assert.False(queue.Reader.TryRead(out _));
         }
 
         [Fact]
@@ -237,6 +288,15 @@ namespace Listenarr.Tests.Features.Application.Audiobooks.Jobs
 
             Assert.Equal(shouldDedupe, firstJob == secondJob);
         }
+
+        private static PathIdentitySnapshot CreateUnixIdentity() =>
+            PathIdentitySnapshot.FromResolution(
+                new FileSystemPathSemantics(
+                    FileSystemPathSyntax.Unix,
+                    FileSystemCaseSensitivity.Sensitive),
+                FileSystemCaseSensitivityMode.Sensitive,
+                "/library",
+                "/library/book");
 
         private static IFileSystemSemanticsResolver BuildResolver(FileSystemCaseSensitivity caseSensitivity)
         {

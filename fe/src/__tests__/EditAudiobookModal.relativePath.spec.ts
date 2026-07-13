@@ -31,6 +31,7 @@ vi.mock('@/services/api', () => ({
   },
 }))
 
+import { apiService } from '@/services/api'
 import EditAudiobookModal from '@/components/domain/audiobook/EditAudiobookModal.vue'
 
 const audiobook = {
@@ -112,6 +113,43 @@ describe('EditAudiobookModal relative path calculation', () => {
     expect((wrapper.vm as unknown).selectedRootId).toBe(1)
     expect((wrapper.vm as unknown).customRootPath).toBeUndefined()
     expect((wrapper.vm as unknown).formData.relativePath).toBe('')
+  })
+
+  it('selects the most specific configured root for nested root folders', async () => {
+    vi.mocked(apiService.getRootFolders).mockResolvedValueOnce([
+      {
+        id: 1,
+        name: 'Broad root',
+        path: 'C:\\root',
+        isDefault: true,
+        resolvedCaseSensitivity: 'Insensitive',
+      },
+      {
+        id: 2,
+        name: 'Nested sensitive root',
+        path: 'C:\\root\\Sensitive',
+        isDefault: false,
+        resolvedCaseSensitivity: 'Sensitive',
+      },
+    ])
+    const wrapper = mount(EditAudiobookModal, {
+      props: {
+        isOpen: true,
+        audiobook: {
+          ...audiobook,
+          basePath: 'C:\\root\\Sensitive\\Book',
+        },
+      },
+      attachTo: document.body,
+      global: {
+        plugins: [(await import('pinia')).createPinia()],
+      },
+    })
+
+    await new Promise((resolve) => setTimeout(resolve, 10))
+
+    expect((wrapper.vm as unknown).selectedRootId).toBe(2)
+    expect((wrapper.vm as unknown).formData.relativePath).toBe('Book')
   })
 
   it('normalizes absolute path to relative when Done is clicked', async () => {

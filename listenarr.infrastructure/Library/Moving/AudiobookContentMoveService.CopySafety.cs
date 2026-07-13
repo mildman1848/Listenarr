@@ -11,6 +11,7 @@ internal sealed partial class AudiobookContentMoveService
         MoveJobEntry manifestEntry,
         bool destinationIsJobOwnedTemp,
         bool destinationHasStructuredOwnership,
+        Func<Task> authorizeMutation,
         CancellationToken cancellationToken)
     {
         if (!File.Exists(partialFile))
@@ -32,6 +33,14 @@ internal sealed partial class AudiobookContentMoveService
                 $"A direct-copy partial file does not match the persisted manifest and was preserved: {Path.GetFileName(partialFile)}");
         }
 
+        await authorizeMutation();
+        ValidateExistingOwnedFile(partialFile, destinationRoot);
+        if (!destinationIsJobOwnedTemp
+            && !await FileMatchesManifestAsync(partialFile, manifestEntry, cancellationToken))
+        {
+            throw new MoveNeedsAttentionException(
+                $"A direct-copy partial file changed before cleanup and was preserved: {Path.GetFileName(partialFile)}");
+        }
         DeleteValidatedOwnedFile(partialFile, destinationRoot);
     }
 

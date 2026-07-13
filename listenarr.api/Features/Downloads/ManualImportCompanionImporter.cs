@@ -18,17 +18,20 @@ public sealed class ManualImportCompanionImporter
     private readonly IMetadataService _metadataService;
     private readonly IFileMover _fileMover;
     private readonly IFileSystem _fileSystem;
+    private readonly IFileSystemSemanticsResolver _semanticsResolver;
     private readonly ILogger<ManualImportCompanionImporter> _logger;
 
     public ManualImportCompanionImporter(
         IMetadataService metadataService,
         IFileMover fileMover,
         IFileSystem fileSystem,
+        IFileSystemSemanticsResolver semanticsResolver,
         ILogger<ManualImportCompanionImporter> logger)
     {
         _metadataService = metadataService;
         _fileMover = fileMover;
         _fileSystem = fileSystem;
+        _semanticsResolver = semanticsResolver;
         _logger = logger;
     }
 
@@ -52,7 +55,7 @@ public sealed class ManualImportCompanionImporter
         string sourceRootPath,
         IReadOnlyCollection<FileUtils.AudioMatchProfile> selectedAudioProfiles,
         ManualImportDestinationTracker destinationTracker,
-        StringComparer sourcePathComparer,
+        FileSystemPathSemantics sourceSemantics,
         IEnumerable<string> importBlacklist)
     {
         var audiobookIds = orderedItems
@@ -81,12 +84,12 @@ public sealed class ManualImportCompanionImporter
             orderedItems
                 .Where(item => !string.IsNullOrWhiteSpace(item.FullPath))
                 .Select(item => Path.GetFullPath(item.FullPath!)),
-            sourcePathComparer);
+            sourceSemantics.Comparer);
 
         var selectedDirectories = selectedSourceFiles
             .Select(Path.GetDirectoryName)
             .Where(d => !string.IsNullOrWhiteSpace(d))
-            .Distinct(sourcePathComparer)
+            .Distinct(sourceSemantics.Comparer)
             .ToList();
 
         var companionFiles = selectedDirectories
@@ -95,8 +98,18 @@ public sealed class ManualImportCompanionImporter
             .Where(file => !FileUtils.IsBlacklistedFile(file, importBlacklist))
             .Select(Path.GetFullPath)
             .Where(file => !selectedSourceFiles.Contains(file))
-            .Distinct(sourcePathComparer)
+            .Distinct(sourceSemantics.Comparer)
             .ToList();
+
+        var destinationResolution = await _semanticsResolver.ResolveAsync(destinationRoot);
+        if (destinationResolution.State != PathIdentityState.Valid)
+        {
+            _logger.LogWarning(
+                "Skipping companion-file import because destination filesystem identity is unavailable for {DestinationRoot}: {Reason}",
+                destinationRoot,
+                destinationResolution.Reason);
+            return 0;
+        }
 
         var importedCount = 0;
         foreach (var companionFile in companionFiles)
@@ -115,13 +128,21 @@ public sealed class ManualImportCompanionImporter
                     }
                 }
 
-                var relativePath = Path.GetRelativePath(sourceRootPath, companionFile);
-                if (relativePath.StartsWith("..", StringComparison.Ordinal))
+                if (!TryResolveCompanionDestination(
+                        sourceRootPath,
+                        destinationRoot,
+                        companionFile,
+                        results,
+                        sourceSemantics,
+                        destinationResolution.Semantics,
+                        out var destinationPath))
                 {
+                    _logger.LogWarning(
+                        "Skipping companion file {FilePath} because no contained destination could be resolved",
+                        companionFile);
                     continue;
                 }
 
-                var destinationPath = ManualImportPathPlanner.CombineWithOptionalBase(destinationRoot, relativePath);
                 var destinationReservation = await destinationTracker.PlanUniqueAsync(destinationPath);
                 destinationPath = destinationReservation.Path;
 
@@ -139,6 +160,72 @@ public sealed class ManualImportCompanionImporter
         }
 
         return importedCount;
+    }
+
+    private static bool TryResolveCompanionDestination(
+        string sourceRootPath,
+        string destinationRoot,
+        string companionFile,
+        IReadOnlyCollection<ManualImportResultDto> results,
+        FileSystemPathSemantics sourceSemantics,
+        FileSystemPathSemantics destinationSemantics,
+        out string destinationPath)
+    {
+        var sourceRoot = FileSystemPathIdentity.ResolveNativeAbsolutePath(sourceRootPath);
+        var companion = FileSystemPathIdentity.ResolveNativeAbsolutePath(companionFile);
+        var destination = FileSystemPathIdentity.ResolveNativeAbsolutePath(destinationRoot);
+        if (FileSystemPathIdentity.TryGetRelativePathWithinBase(
+                sourceRoot,
+                companion,
+                sourceSemantics,
+                out var relativePath)
+            && FileSystemPathIdentity.TryResolveRelativePathWithinBase(
+                destination,
+                relativePath,
+                destinationSemantics,
+                out destinationPath))
+        {
+            return true;
+        }
+
+        var companionDirectory = Path.GetDirectoryName(companion);
+        if (string.IsNullOrWhiteSpace(companionDirectory))
+        {
+            destinationPath = string.Empty;
+            return false;
+        }
+
+        var matchingImport = results.FirstOrDefault(result =>
+        {
+            if (!result.Success
+                || string.IsNullOrWhiteSpace(result.SourcePath)
+                || string.IsNullOrWhiteSpace(result.DestinationPath))
+            {
+                return false;
+            }
+
+            var importedSourceDirectory = Path.GetDirectoryName(
+                FileSystemPathIdentity.ResolveNativeAbsolutePath(result.SourcePath));
+            return importedSourceDirectory != null
+                && sourceSemantics.Comparer.Equals(importedSourceDirectory, companionDirectory);
+        });
+        var importedDestinationDirectory = matchingImport?.DestinationPath == null
+            ? null
+            : Path.GetDirectoryName(
+                FileSystemPathIdentity.ResolveNativeAbsolutePath(
+                    matchingImport.DestinationPath));
+        if (string.IsNullOrWhiteSpace(importedDestinationDirectory)
+            || !FileSystemPathIdentity.TryResolveRelativePathWithinBase(
+                importedDestinationDirectory,
+                Path.GetFileName(companion),
+                destinationSemantics,
+                out destinationPath))
+        {
+            destinationPath = string.Empty;
+            return false;
+        }
+
+        return true;
     }
 
     private async Task<FileUtils.AudioMatchProfile?> BuildAudioMatchProfileAsync(string filePath)

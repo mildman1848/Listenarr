@@ -18,7 +18,9 @@ internal sealed partial class AudiobookContentMoveService
         bool targetInsideSource,
         FileSystemPathSemantics sourceSemantics,
         CancellationToken cancellationToken,
-        string? ownedRecoveryMarkerPath = null)
+        string? ownedRecoveryMarkerPath = null,
+        IReadOnlyCollection<string>? ownedScaffoldPaths = null,
+        IReadOnlyCollection<string>? structuralSpinePaths = null)
     {
         if (!Directory.Exists(source))
         {
@@ -41,6 +43,21 @@ internal sealed partial class AudiobookContentMoveService
                 cancellationToken.ThrowIfCancellationRequested();
                 if (targetInsideSource && IsSameOrInside(entry, target, sourceSemantics))
                 {
+                    continue;
+                }
+
+                var isOwnedScaffold = ownedScaffoldPaths?.Any(path =>
+                    FileSystemPathIdentity.AreEquivalent(path, entry, sourceSemantics)) == true;
+                var isStructuralSpine = structuralSpinePaths?.Any(path =>
+                    FileSystemPathIdentity.AreEquivalent(path, entry, sourceSemantics)) == true;
+                if (isOwnedScaffold || isStructuralSpine)
+                {
+                    if (!Directory.Exists(entry))
+                    {
+                        throw new MoveNeedsAttentionException(
+                            "A target structural directory became a file.");
+                    }
+
                     continue;
                 }
 

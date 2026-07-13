@@ -34,9 +34,23 @@ namespace Listenarr.Application.Audiobooks.Files
         IFileSystem fileSystem,
         IFileSystemSemanticsResolver semanticsResolver,
         IRootFolderService rootFolderService,
-        ILogger<AudiobookFileService> logger) : IAudiobookFileService
+        ILogger<AudiobookFileService> logger,
+        IAudiobookOperationCoordinator? audiobookOperationCoordinator = null) : IAudiobookFileService
     {
-        public async Task<bool> EnsureAudiobookFileAsync(Audiobook audiobook, string filePath, string? source = "scan")
+        public Task<bool> EnsureAudiobookFileAsync(
+            Audiobook audiobook,
+            string filePath,
+            string? source = "scan") =>
+            audiobookOperationCoordinator != null
+                ? audiobookOperationCoordinator.ExecuteExclusiveAsync(
+                    audiobook.Id,
+                    _ => EnsureAudiobookFileCoreAsync(audiobook, filePath, source))
+                : EnsureAudiobookFileCoreAsync(audiobook, filePath, source);
+
+        private async Task<bool> EnsureAudiobookFileCoreAsync(
+            Audiobook audiobook,
+            string filePath,
+            string? source)
         {
             if (!fileSystem.FileExists(filePath))
             {

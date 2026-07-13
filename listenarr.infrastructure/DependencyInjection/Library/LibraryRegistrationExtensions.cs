@@ -7,6 +7,7 @@
  * by the Free Software Foundation, either version 3 of the License, or
  * (at your option) any later version.
  */
+using Listenarr.Infrastructure.Library.Realtime;
 using Listenarr.Infrastructure.Persistence.Repositories;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
@@ -19,6 +20,8 @@ internal static class LibraryRegistrationExtensions
     {
         services.TryAddSingleton(TimeProvider.System);
         services.AddSingleton<IFilesystemMutationCoordinator, FilesystemMutationCoordinator>();
+        services.AddSingleton<IAudiobookOperationCoordinator, AudiobookOperationCoordinator>();
+        services.AddSingleton<IAudiobookUpdatePublisher, AudiobookUpdatePublisher>();
         services.AddSingleton<IRootFolderRelocationService, RootFolderRelocationService>();
         services.AddSingleton<IMoveCleanupBoundaryResolver, MoveCleanupBoundaryResolver>();
         services.AddSingleton<IMoveQueueService, MoveQueueService>();

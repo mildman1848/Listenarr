@@ -318,7 +318,17 @@ public sealed partial class RootFolderRelocationService(
                 candidate.StoredBasePath,
                 sourceResolution!.Semantics,
                 targetResolution.Semantics);
-            db.MoveJobs.Add(new MoveJob
+            var sourceIdentity = PathIdentitySnapshot.FromResolution(
+                sourceResolution.Semantics,
+                root.CaseSensitivityMode,
+                root.Path,
+                candidate.StoredBasePath);
+            var targetIdentity = PathIdentitySnapshot.FromResolution(
+                targetResolution.Semantics,
+                command.TargetCaseSensitivityMode,
+                targetPath,
+                requestedPath);
+            var moveJob = new MoveJob
             {
                 AudiobookId = audiobook.Id,
                 RequestedPath = requestedPath,
@@ -329,12 +339,16 @@ public sealed partial class RootFolderRelocationService(
                 Phase = MoveJobPhase.None,
                 EnqueuedAt = nowUtc,
                 RelocationId = relocation.Id,
-                IdentityKeyVersion = 2,
+                IdentityKeyVersion = 3,
                 ActiveDeduplicationKey = FileSystemPathIdentity.CreateKey(
                     $"move:{audiobook.Id}",
                     requestedPath,
-                    targetResolution.Semantics)
-            });
+                    targetResolution.Semantics,
+                    version: 3)
+            };
+            moveJob.SetSourceIdentity(sourceIdentity);
+            moveJob.SetTargetIdentity(targetIdentity);
+            db.MoveJobs.Add(moveJob);
         }
 
         await db.SaveChangesAsync(cancellationToken);

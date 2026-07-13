@@ -15,20 +15,28 @@
  * You should have received a copy of the GNU Affero General Public License
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
+using Listenarr.Domain.Common;
 
 namespace Listenarr.Application.Audiobooks.Contracts
 {
+    public sealed record ScanEnqueueCommand(
+        Audiobook Audiobook,
+        string? Path = null,
+        PathIdentitySnapshot? PathIdentity = null,
+        string? CorrelationId = null,
+        string? DownloadId = null);
+
     public interface IScanQueueService
     {
+        Task<Guid> EnqueueScanAsync(ScanEnqueueCommand command);
         Task<Guid> EnqueueScanAsync(
             Audiobook audiobook,
             string? path = null,
             string? correlationId = null,
             string? downloadId = null);
-        Task<Guid?> EnqueueRecoveredScanAsync(
+        Task<Guid?> EnqueueMoveHandoffScanAsync(
             Audiobook audiobook,
-            string correlationId,
-            Func<Task<bool>> stillPending);
+            MoveScanHandoffClaim claim);
         Task<Guid?> RequeueScanAsync(Guid jobId);
         Task CommitTerminalJobStatusAsync(
             Guid jobId,

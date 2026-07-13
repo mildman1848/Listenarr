@@ -8,6 +8,7 @@
  * (at your option) any later version.
  */
 
+using System.Text.Json;
 using Listenarr.Infrastructure.Persistence.Repositories;
 using Microsoft.EntityFrameworkCore;
 
@@ -94,6 +95,7 @@ public sealed class EfMoveQueuePersistenceTests : IAsyncLifetime
                 new MoveJob
                 {
                     AudiobookId = 42,
+                    SourcePath = "/downloads/book",
                     RequestedPath = "/library/book",
                     Status = MoveJobStatus.Queued,
                     Phase = MoveJobPhase.Planned,
@@ -103,6 +105,7 @@ public sealed class EfMoveQueuePersistenceTests : IAsyncLifetime
                 new MoveJob
                 {
                     AudiobookId = 42,
+                    SourcePath = "/downloads/book",
                     RequestedPath = "/library/book",
                     Status = MoveJobStatus.Running,
                     Phase = MoveJobPhase.Published,
@@ -120,7 +123,279 @@ public sealed class EfMoveQueuePersistenceTests : IAsyncLifetime
         Assert.Equal(MoveJobStatus.Superseded, jobs[0].Status);
         Assert.Null(jobs[0].ActiveDeduplicationKey);
         Assert.Equal(MoveJobStatus.Running, jobs[1].Status);
-        Assert.StartsWith("v2:move:42:", jobs[1].ActiveDeduplicationKey);
+        Assert.StartsWith("v3:move:42:", jobs[1].ActiveDeduplicationKey);
+    }
+
+    [Fact]
+    public async Task ReconcileIdentityKeysAsync_MultipleEvidenceBearingDuplicates_RequireAttention()
+    {
+        var target = Path.Join(
+            Path.GetTempPath(),
+            "listenarr-tests",
+            $"move-reconcile-conflict-{Guid.NewGuid():N}");
+        await using (var db = await _factory.CreateDbContextAsync())
+        {
+            var first = new MoveJob
+            {
+                AudiobookId = 42,
+                RequestedPath = target,
+                SourcePath = target + "-source-a",
+                Status = MoveJobStatus.Running,
+                Phase = MoveJobPhase.Copying,
+                IdentityKeyVersion = 1,
+                ActiveDeduplicationKey = "legacy:first",
+                LeaseOwner = "worker-a",
+                LeaseGeneration = 1,
+                LeaseExpiresAt = DateTime.UtcNow.AddMinutes(5)
+            };
+            var second = new MoveJob
+            {
+                AudiobookId = 42,
+                RequestedPath = target,
+                SourcePath = target + "-source-b",
+                Status = MoveJobStatus.RetryScheduled,
+                Phase = MoveJobPhase.Copying,
+                IdentityKeyVersion = 1,
+                ActiveDeduplicationKey = "legacy:second"
+            };
+            db.MoveJobs.AddRange(first, second);
+            db.MoveJobEntries.AddRange(
+                new MoveJobEntry
+                {
+                    MoveJobId = first.Id,
+                    RelativePath = "book.m4b",
+                    EntryType = MoveJobEntryType.File,
+                    Length = 1,
+                    Sha256 = new string('a', 64)
+                },
+                new MoveJobEntry
+                {
+                    MoveJobId = second.Id,
+                    RelativePath = "book.m4b",
+                    EntryType = MoveJobEntryType.File,
+                    Length = 1,
+                    Sha256 = new string('b', 64)
+                });
+            await db.SaveChangesAsync();
+        }
+
+        await CreatePersistence().ReconcileIdentityKeysAsync();
+
+        await using var verification = await _factory.CreateDbContextAsync();
+        var jobs = await verification.MoveJobs.AsNoTracking().ToListAsync();
+        Assert.Equal(2, jobs.Count);
+        Assert.All(jobs, job =>
+        {
+            Assert.Equal(MoveJobStatus.NeedsAttention, job.Status);
+            Assert.Equal(MoveFailureKind.Verification, job.FailureKind);
+            Assert.Null(job.ActiveDeduplicationKey);
+            Assert.Null(job.LeaseOwner);
+        });
+    }
+
+    [Fact]
+    public async Task ReconcileIdentityKeysAsync_AuthoritativeMarkerPreservesOwnerAndSupersedesCleanDuplicate()
+    {
+        var target = Path.Join(
+            Path.GetTempPath(),
+            "listenarr-tests",
+            $"move-reconcile-marker-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(target);
+        MoveJob owner;
+        MoveJob duplicate;
+        await using (var db = await _factory.CreateDbContextAsync())
+        {
+            owner = new MoveJob
+            {
+                AudiobookId = 42,
+                RequestedPath = target,
+                SourcePath = target + "-source",
+                Status = MoveJobStatus.Queued,
+                Phase = MoveJobPhase.Planned,
+                IdentityKeyVersion = 1,
+                ActiveDeduplicationKey = "legacy:owner"
+            };
+            duplicate = new MoveJob
+            {
+                AudiobookId = 42,
+                RequestedPath = target,
+                SourcePath = target + "-source",
+                Status = MoveJobStatus.Queued,
+                Phase = MoveJobPhase.Planned,
+                IdentityKeyVersion = 1,
+                ActiveDeduplicationKey = "legacy:duplicate"
+            };
+            db.MoveJobs.AddRange(owner, duplicate);
+            await db.SaveChangesAsync();
+        }
+        await File.WriteAllTextAsync(
+            Path.Join(target, $".listenarr-move-{owner.Id:N}.pending"),
+            "owned evidence");
+
+        await CreatePersistence().ReconcileIdentityKeysAsync();
+
+        await using var verification = await _factory.CreateDbContextAsync();
+        var persistedOwner = await verification.MoveJobs.AsNoTracking()
+            .SingleAsync(job => job.Id == owner.Id);
+        var persistedDuplicate = await verification.MoveJobs.AsNoTracking()
+            .SingleAsync(job => job.Id == duplicate.Id);
+        Assert.Equal(MoveJobStatus.Queued, persistedOwner.Status);
+        Assert.NotNull(persistedOwner.ActiveDeduplicationKey);
+        Assert.Equal(MoveJobStatus.Superseded, persistedDuplicate.Status);
+        Assert.Null(persistedDuplicate.ActiveDeduplicationKey);
+    }
+
+    [Fact]
+    public async Task ReconcileIdentityKeysAsync_MismatchedTargetOwnershipMarkerRequiresAttention()
+    {
+        var target = Path.Join(
+            Path.GetTempPath(),
+            "listenarr-tests",
+            $"move-reconcile-marker-mismatch-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(target);
+        MoveJob owner;
+        MoveJob duplicate;
+        await using (var db = await _factory.CreateDbContextAsync())
+        {
+            owner = new MoveJob
+            {
+                AudiobookId = 42,
+                RequestedPath = target,
+                SourcePath = target + "-source",
+                Status = MoveJobStatus.Queued,
+                Phase = MoveJobPhase.Planned,
+                IdentityKeyVersion = 1,
+                ActiveDeduplicationKey = "legacy:owner"
+            };
+            duplicate = new MoveJob
+            {
+                AudiobookId = 42,
+                RequestedPath = target,
+                SourcePath = owner.SourcePath,
+                Status = MoveJobStatus.Queued,
+                Phase = MoveJobPhase.Planned,
+                IdentityKeyVersion = 1,
+                ActiveDeduplicationKey = "legacy:duplicate"
+            };
+            db.MoveJobs.AddRange(owner, duplicate);
+            await db.SaveChangesAsync();
+        }
+
+        var targetParent = Path.GetDirectoryName(target)!;
+        await File.WriteAllTextAsync(
+            Path.Join(target, ".listenarr-temp-owner.json"),
+            JsonSerializer.Serialize(new
+            {
+                Version = 1,
+                ArtifactType = "temporary-directory",
+                JobId = owner.Id,
+                Source = owner.SourcePath + "-wrong",
+                Target = target,
+                DirectoryPath = Path.Join(
+                    targetParent,
+                    Path.GetFileName(target) + ".tmp-" + owner.Id.ToString("N"))
+            }));
+
+        await CreatePersistence().ReconcileIdentityKeysAsync();
+
+        await using var verification = await _factory.CreateDbContextAsync();
+        var jobs = await verification.MoveJobs.AsNoTracking().ToListAsync();
+        Assert.Equal(2, jobs.Count);
+        Assert.All(jobs, job =>
+        {
+            Assert.Equal(MoveJobStatus.NeedsAttention, job.Status);
+            Assert.Contains("ownership marker", job.Error, StringComparison.OrdinalIgnoreCase);
+            Assert.Null(job.ActiveDeduplicationKey);
+        });
+    }
+
+    [Theory]
+    [InlineData("source-marker-write")]
+    [InlineData("target-partial")]
+    [InlineData("target-ownership-write")]
+    [InlineData("target-cleanup")]
+    public async Task ReconcileIdentityKeysAsync_ResidualFilesystemEvidencePreservesOwner(
+        string evidenceKind)
+    {
+        var root = Path.Join(
+            Path.GetTempPath(),
+            "listenarr-tests",
+            $"move-reconcile-residual-{Guid.NewGuid():N}");
+        var source = Path.Join(root, "source");
+        var target = Path.Join(root, "target");
+        MoveJob owner;
+        MoveJob duplicate;
+        await using (var db = await _factory.CreateDbContextAsync())
+        {
+            owner = new MoveJob
+            {
+                AudiobookId = 42,
+                RequestedPath = target,
+                SourcePath = source,
+                Status = MoveJobStatus.Queued,
+                Phase = MoveJobPhase.Planned,
+                IdentityKeyVersion = 1,
+                ActiveDeduplicationKey = "legacy:owner"
+            };
+            duplicate = new MoveJob
+            {
+                AudiobookId = 42,
+                RequestedPath = target,
+                SourcePath = source,
+                Status = MoveJobStatus.Queued,
+                Phase = MoveJobPhase.Planned,
+                IdentityKeyVersion = 1,
+                ActiveDeduplicationKey = "legacy:duplicate"
+            };
+            db.MoveJobs.AddRange(owner, duplicate);
+            await db.SaveChangesAsync();
+        }
+
+        Directory.CreateDirectory(root);
+        switch (evidenceKind)
+        {
+            case "source-marker-write":
+                Directory.CreateDirectory(source);
+                await File.WriteAllTextAsync(
+                    Path.Join(
+                        source,
+                        $".listenarr-move-{owner.Id:N}.pending.writing-{owner.Id:N}-g1-{Guid.NewGuid():N}"),
+                    "incomplete marker");
+                break;
+            case "target-partial":
+                Directory.CreateDirectory(Path.Join(target, "nested"));
+                await File.WriteAllTextAsync(
+                    Path.Join(target, "nested", $"book.m4b.listenarr-{owner.Id:N}.partial"),
+                    "partial");
+                break;
+            case "target-ownership-write":
+                Directory.CreateDirectory(target);
+                await File.WriteAllTextAsync(
+                    Path.Join(
+                        target,
+                        $".listenarr-temp-owner.json.writing-{owner.Id:N}-g1-{Guid.NewGuid():N}"),
+                    "incomplete ownership marker");
+                break;
+            case "target-cleanup":
+                await File.WriteAllTextAsync(
+                    Path.Join(root, $".listenarr-temp-directory-{owner.Id:N}.cleanup.json"),
+                    "cleanup evidence");
+                break;
+            default:
+                throw new InvalidOperationException($"Unknown evidence kind: {evidenceKind}");
+        }
+
+        await CreatePersistence().ReconcileIdentityKeysAsync();
+
+        await using var verification = await _factory.CreateDbContextAsync();
+        var persistedOwner = await verification.MoveJobs.AsNoTracking()
+            .SingleAsync(job => job.Id == owner.Id);
+        var persistedDuplicate = await verification.MoveJobs.AsNoTracking()
+            .SingleAsync(job => job.Id == duplicate.Id);
+        Assert.Equal(MoveJobStatus.Queued, persistedOwner.Status);
+        Assert.NotNull(persistedOwner.ActiveDeduplicationKey);
+        Assert.Equal(MoveJobStatus.Superseded, persistedDuplicate.Status);
+        Assert.Null(persistedDuplicate.ActiveDeduplicationKey);
     }
 
     [Fact]
@@ -133,6 +408,7 @@ public sealed class EfMoveQueuePersistenceTests : IAsyncLifetime
                 new MoveJob
                 {
                     AudiobookId = 42,
+                    SourcePath = Path.GetFullPath("/downloads/bad-book"),
                     RequestedPath = throwingPath,
                     Status = MoveJobStatus.Queued,
                     Phase = MoveJobPhase.None,
@@ -142,6 +418,7 @@ public sealed class EfMoveQueuePersistenceTests : IAsyncLifetime
                 new MoveJob
                 {
                     AudiobookId = 43,
+                    SourcePath = "/downloads/good-book",
                     RequestedPath = "/library/good-book",
                     Status = MoveJobStatus.Queued,
                     Phase = MoveJobPhase.None,
@@ -164,10 +441,10 @@ public sealed class EfMoveQueuePersistenceTests : IAsyncLifetime
         var good = await verification.MoveJobs.SingleAsync(job => job.AudiobookId == 43);
         Assert.Equal(MoveJobStatus.NeedsAttention, bad.Status);
         Assert.Equal(MoveFailureKind.Verification, bad.FailureKind);
-        Assert.Contains("Target path could not be reconciled", bad.Error, StringComparison.Ordinal);
+        Assert.Contains("Move path identity could not be reconciled", bad.Error, StringComparison.Ordinal);
         Assert.Null(bad.ActiveDeduplicationKey);
         Assert.Equal(MoveJobStatus.Queued, good.Status);
-        Assert.StartsWith("v2:move:43:", good.ActiveDeduplicationKey);
+        Assert.StartsWith("v3:move:43:", good.ActiveDeduplicationKey);
     }
 
     [Fact]
@@ -235,12 +512,14 @@ public sealed class EfMoveQueuePersistenceTests : IAsyncLifetime
             now.AddMinutes(2));
         Assert.Equal(1, generation);
 
-        Assert.True(await persistence.HeartbeatAsync(
-            job.Id,
-            "worker-a",
-            generation.GetValueOrDefault(),
-            now.AddSeconds(1),
-            now.AddMinutes(3)));
+        Assert.Equal(
+            MoveHeartbeatOutcome.Renewed,
+            await persistence.HeartbeatAsync(
+                job.Id,
+                "worker-a",
+                generation.GetValueOrDefault(),
+                now.AddSeconds(1),
+                now.AddMinutes(3)));
         var beforeIncrement = await persistence.GetByIdAsync(job.Id);
         Assert.True(await persistence.TryIncrementAttemptAsync(
             job.Id,
@@ -286,12 +565,14 @@ public sealed class EfMoveQueuePersistenceTests : IAsyncLifetime
             now.AddSeconds(1));
         Assert.Equal(1, generation);
 
-        Assert.False(await persistence.HeartbeatAsync(
-            job.Id,
-            "worker-a",
-            generation.GetValueOrDefault(),
-            now.AddSeconds(2),
-            now.AddMinutes(3)));
+        Assert.Equal(
+            MoveHeartbeatOutcome.Lost,
+            await persistence.HeartbeatAsync(
+                job.Id,
+                "worker-a",
+                generation.GetValueOrDefault(),
+                now.AddSeconds(2),
+                now.AddMinutes(3)));
         Assert.False(await persistence.TryIncrementAttemptAsync(
             job.Id,
             "worker-a",
@@ -327,12 +608,14 @@ public sealed class EfMoveQueuePersistenceTests : IAsyncLifetime
             now,
             now.AddMinutes(2));
 
-        Assert.False(await persistence.HeartbeatAsync(
-            job.Id,
-            "worker-b",
-            generation.GetValueOrDefault(),
-            now,
-            now.AddMinutes(3)));
+        Assert.Equal(
+            MoveHeartbeatOutcome.Lost,
+            await persistence.HeartbeatAsync(
+                job.Id,
+                "worker-b",
+                generation.GetValueOrDefault(),
+                now,
+                now.AddMinutes(3)));
         Assert.False(await persistence.TryIncrementAttemptAsync(
             job.Id,
             "worker-b",
@@ -358,12 +641,14 @@ public sealed class EfMoveQueuePersistenceTests : IAsyncLifetime
         await persistence.AddAsync(job);
         var now = DateTimeOffset.UtcNow;
 
-        Assert.False(await persistence.HeartbeatAsync(
-            job.Id,
-            "worker-a",
-            1,
-            now,
-            now.AddMinutes(3)));
+        Assert.Equal(
+            MoveHeartbeatOutcome.Lost,
+            await persistence.HeartbeatAsync(
+                job.Id,
+                "worker-a",
+                1,
+                now,
+                now.AddMinutes(3)));
         Assert.False(await persistence.TryIncrementAttemptAsync(
             job.Id,
             "worker-a",
@@ -409,12 +694,14 @@ public sealed class EfMoveQueuePersistenceTests : IAsyncLifetime
             now.AddMinutes(2));
         Assert.Equal(2, currentGeneration);
 
-        Assert.False(await persistence.HeartbeatAsync(
-            job.Id,
-            "worker-a",
-            staleGeneration.GetValueOrDefault(),
-            now,
-            now.AddMinutes(3)));
+        Assert.Equal(
+            MoveHeartbeatOutcome.Lost,
+            await persistence.HeartbeatAsync(
+                job.Id,
+                "worker-a",
+                staleGeneration.GetValueOrDefault(),
+                now,
+                now.AddMinutes(3)));
         Assert.False(await persistence.TryIncrementAttemptAsync(
             job.Id,
             "worker-a",

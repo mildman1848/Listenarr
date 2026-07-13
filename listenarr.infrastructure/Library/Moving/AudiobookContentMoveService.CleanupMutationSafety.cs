@@ -161,6 +161,38 @@ internal sealed partial class AudiobookContentMoveService
                 $"Published target bytes changed before source deletion: {manifestEntry.RelativePath}");
         }
 
+        await EnsureMutationAuthorizedAsync(
+            jobId,
+            leaseToken,
+            source,
+            target,
+            sourceSemantics,
+            targetSemantics,
+            cancellationToken);
+        ValidateMoveTargetRoot(target);
+        ownership = await ValidateOwnedQuarantineDirectoryAsync(
+            quarantineRoot,
+            sourceParent,
+            jobId,
+            source,
+            target,
+            sourceSemantics,
+            targetSemantics,
+            leaseToken,
+            cancellationToken);
+        ValidateQuarantineMutationPath(ownership, quarantineFile);
+        ValidateCopyMutationPath(targetFile, target);
+        if (!File.Exists(quarantineFile)
+            || (File.GetAttributes(quarantineFile) & FileAttributes.ReparsePoint) != 0
+            || new FileInfo(quarantineFile).Length != manifestEntry.Length
+            || !File.Exists(targetFile)
+            || (File.GetAttributes(targetFile) & FileAttributes.ReparsePoint) != 0
+            || new FileInfo(targetFile).Length != manifestEntry.Length)
+        {
+            throw new MoveNeedsAttentionException(
+                $"Source or target bytes changed after lease revalidation: {manifestEntry.RelativePath}");
+        }
+
         return ownership;
     }
 

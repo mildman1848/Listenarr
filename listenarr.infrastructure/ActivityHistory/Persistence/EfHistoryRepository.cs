@@ -146,23 +146,6 @@ namespace Listenarr.Infrastructure.ActivityHistory.Persistence
                 : await query.ToListAsync(ct);
         }
 
-        public async Task<List<History>> GetPendingMoveScanHandoffsAsync(CancellationToken ct = default)
-        {
-            return await _db.History
-                .AsNoTracking()
-                .Where(handoff => handoff.EventType == HistoryEvents.ScanQueued
-                    && handoff.Outcome == HistoryOutcome.Requested
-                    && handoff.Source == "Move"
-                    && !_db.History.Any(terminal =>
-                        terminal.CorrelationId == handoff.CorrelationId
-                        && ((terminal.EventType == HistoryEvents.ScanCompleted
-                                && terminal.Outcome == HistoryOutcome.Succeeded)
-                            || (terminal.EventType == HistoryEvents.ScanFailed
-                                && terminal.Outcome == HistoryOutcome.Failed))))
-                .OrderBy(handoff => handoff.Timestamp)
-                .ToListAsync(ct);
-        }
-
         public async Task<List<History>> GetBySourceAsync(string source, int? limit = null, CancellationToken ct = default)
         {
             var query = _db.History
@@ -191,64 +174,35 @@ namespace Listenarr.Infrastructure.ActivityHistory.Persistence
             return entry;
         }
 
-        public async Task<LeasedHistoryWriteResult> GetOrAddLeasedMoveHistoryAsync(
-            History entry,
-            Guid moveJobId,
-            string leaseOwner,
-            int leaseGeneration,
-            DateTimeOffset now,
-            CancellationToken ct = default)
-        {
-            ArgumentException.ThrowIfNullOrWhiteSpace(entry.CorrelationId);
-            ArgumentException.ThrowIfNullOrWhiteSpace(entry.EventType);
-            await using var transaction = _db.Database.IsRelational()
-                ? await _db.Database.BeginTransactionAsync(ct)
-                : null;
-            var nowUtc = now.UtcDateTime;
-            var leaseQuery = _db.MoveJobs.Where(job => job.Id == moveJobId
-                && job.Status == MoveJobStatus.Running
-                && job.LeaseOwner == leaseOwner
-                && job.LeaseGeneration == leaseGeneration
-                && job.LeaseExpiresAt != null
-                && job.LeaseExpiresAt > nowUtc);
-            var leaseOwned = _db.Database.IsRelational()
-                ? await leaseQuery.ExecuteUpdateAsync(
-                    updates => updates.SetProperty(job => job.UpdatedAt, job => job.UpdatedAt),
-                    ct) == 1
-                : await leaseQuery.AsNoTracking().AnyAsync(ct);
-            if (!leaseOwned)
-            {
-                throw new MoveLeaseLostException(moveJobId, leaseGeneration);
-            }
-
-            var existing = await _db.History.AsNoTracking().FirstOrDefaultAsync(
-                candidate => candidate.CorrelationId == entry.CorrelationId
-                    && candidate.EventType == entry.EventType
-                    && candidate.Source == entry.Source,
-                ct);
-            if (existing != null)
-            {
-                if (transaction != null)
-                {
-                    await transaction.CommitAsync(ct);
-                }
-
-                return new LeasedHistoryWriteResult(existing, Created: false);
-            }
-
-            _db.History.Add(entry);
-            await _db.SaveChangesAsync(ct);
-            if (transaction != null)
-            {
-                await transaction.CommitAsync(ct);
-            }
-
-            return new LeasedHistoryWriteResult(entry, Created: true);
-        }
-
         public async Task UpdateAsync(History entry, CancellationToken ct = default)
         {
             _db.History.Update(entry);
+            await _db.SaveChangesAsync(ct);
+        }
+
+        public async Task MarkNotificationSentAsync(int id, CancellationToken ct = default)
+        {
+            if (_db.Database.IsRelational())
+            {
+                await _db.History
+                    .Where(history => history.Id == id)
+                    .ExecuteUpdateAsync(
+                        updates => updates.SetProperty(
+                            history => history.NotificationSent,
+                            true),
+                        ct);
+                return;
+            }
+
+            var history = await _db.History.SingleOrDefaultAsync(
+                candidate => candidate.Id == id,
+                ct);
+            if (history == null)
+            {
+                return;
+            }
+
+            history.NotificationSent = true;
             await _db.SaveChangesAsync(ct);
         }
 
@@ -257,28 +211,6 @@ namespace Listenarr.Infrastructure.ActivityHistory.Persistence
             var entry = await _db.History.FindAsync(new object[] { id }, ct);
             if (entry == null) return false;
 
-            if (IsMoveScanHandoff(entry))
-            {
-                var terminalExists = await HasTerminalScanHistoryAsync(
-                    entry.CorrelationId,
-                    ct);
-                if (!terminalExists)
-                {
-                    return false;
-                }
-            }
-
-            if (IsTerminalScanHistory(entry))
-            {
-                var completedHandoffs = await _db.History
-                    .Where(candidate => candidate.CorrelationId == entry.CorrelationId
-                        && candidate.EventType == HistoryEvents.ScanQueued
-                        && candidate.Outcome == HistoryOutcome.Requested
-                        && candidate.Source == "Move")
-                    .ToListAsync(ct);
-                _db.History.RemoveRange(completedHandoffs);
-            }
-
             _db.History.Remove(entry);
             await _db.SaveChangesAsync(ct);
             return true;
@@ -286,17 +218,7 @@ namespace Listenarr.Infrastructure.ActivityHistory.Persistence
 
         public async Task DeleteAllAsync(CancellationToken ct = default)
         {
-            var deletable = await _db.History
-                .Where(history => !(history.EventType == HistoryEvents.ScanQueued
-                    && history.Outcome == HistoryOutcome.Requested
-                    && history.Source == "Move"
-                    && !_db.History.Any(terminal =>
-                        terminal.CorrelationId == history.CorrelationId
-                        && ((terminal.EventType == HistoryEvents.ScanCompleted
-                                && terminal.Outcome == HistoryOutcome.Succeeded)
-                            || (terminal.EventType == HistoryEvents.ScanFailed
-                                && terminal.Outcome == HistoryOutcome.Failed)))))
-                .ToListAsync(ct);
+            var deletable = await _db.History.ToListAsync(ct);
             _db.History.RemoveRange(deletable);
             await _db.SaveChangesAsync(ct);
         }
@@ -304,43 +226,12 @@ namespace Listenarr.Infrastructure.ActivityHistory.Persistence
         public async Task<int> DeleteOlderThanAsync(DateTime cutoff, CancellationToken ct = default)
         {
             var old = await _db.History
-                .Where(history => history.Timestamp < cutoff
-                    && !(history.EventType == HistoryEvents.ScanQueued
-                        && history.Outcome == HistoryOutcome.Requested
-                        && history.Source == "Move"
-                        && !_db.History.Any(terminal =>
-                            terminal.CorrelationId == history.CorrelationId
-                            && ((terminal.EventType == HistoryEvents.ScanCompleted
-                                    && terminal.Outcome == HistoryOutcome.Succeeded)
-                                || (terminal.EventType == HistoryEvents.ScanFailed
-                                    && terminal.Outcome == HistoryOutcome.Failed)))))
+                .Where(history => history.Timestamp < cutoff)
                 .ToListAsync(ct);
             _db.History.RemoveRange(old);
             await _db.SaveChangesAsync(ct);
             return old.Count;
         }
-
-        private static bool IsMoveScanHandoff(History history) =>
-            history.EventType == HistoryEvents.ScanQueued
-            && history.Outcome == HistoryOutcome.Requested
-            && history.Source == "Move";
-
-        private static bool IsTerminalScanHistory(History history) =>
-            history.EventType == HistoryEvents.ScanCompleted
-                && history.Outcome == HistoryOutcome.Succeeded
-            || history.EventType == HistoryEvents.ScanFailed
-                && history.Outcome == HistoryOutcome.Failed;
-
-        private Task<bool> HasTerminalScanHistoryAsync(
-            string correlationId,
-            CancellationToken cancellationToken) =>
-            _db.History.AnyAsync(history =>
-                history.CorrelationId == correlationId
-                && ((history.EventType == HistoryEvents.ScanCompleted
-                        && history.Outcome == HistoryOutcome.Succeeded)
-                    || (history.EventType == HistoryEvents.ScanFailed
-                        && history.Outcome == HistoryOutcome.Failed)),
-                cancellationToken);
 
     }
 }

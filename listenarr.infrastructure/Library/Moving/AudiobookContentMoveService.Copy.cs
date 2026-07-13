@@ -298,6 +298,11 @@ internal sealed partial class AudiobookContentMoveService
                             manifestEntry,
                             destinationIsJobOwnedTemp,
                             destinationHasStructuredOwnership,
+                            () => EnsureMutationAuthorizedAsync(
+                                request,
+                                sourceRoot,
+                                target,
+                                cancellationToken),
                             cancellationToken);
                         logger.LogInformation(
                             "Skipping copy for move job {JobId}; destination already matches the persisted manifest: {Destination}",
@@ -342,6 +347,19 @@ internal sealed partial class AudiobookContentMoveService
                                 $"The partial copy changed before publication: {Path.GetFileName(partialFile)}");
                         }
 
+                        await EnsureMutationAuthorizedAsync(request, sourceRoot, target, cancellationToken);
+                        ValidateCopyMutationPath(destinationFile, destinationRoot);
+                        ValidateExistingOwnedFile(partialFile, destinationRoot);
+                        if (!await FileMatchesManifestAsync(
+                                partialFile,
+                                manifestEntry,
+                                cancellationToken))
+                        {
+                            throw new MoveNeedsAttentionException(
+                                $"The partial copy changed after lease revalidation: {Path.GetFileName(partialFile)}");
+                        }
+                        await EnsureMutationAuthorizedAsync(request, sourceRoot, target, cancellationToken);
+                        ValidateCopyMutationPath(destinationFile, destinationRoot);
                         ValidateExistingOwnedFile(partialFile, destinationRoot);
                         File.Move(partialFile, destinationFile, overwrite: false);
                         return;
@@ -416,6 +434,19 @@ internal sealed partial class AudiobookContentMoveService
                         $"The partial copy changed before publication: {Path.GetFileName(partialFile)}");
                 }
 
+                await EnsureMutationAuthorizedAsync(request, sourceRoot, target, cancellationToken);
+                ValidateCopyMutationPath(destinationFile, destinationRoot);
+                ValidateExistingOwnedFile(partialFile, destinationRoot);
+                if (!await FileMatchesManifestAsync(
+                        partialFile,
+                        manifestEntry,
+                        cancellationToken))
+                {
+                    throw new MoveNeedsAttentionException(
+                        $"The partial copy changed after lease revalidation: {Path.GetFileName(partialFile)}");
+                }
+                await EnsureMutationAuthorizedAsync(request, sourceRoot, target, cancellationToken);
+                ValidateCopyMutationPath(destinationFile, destinationRoot);
                 ValidateExistingOwnedFile(partialFile, destinationRoot);
                 File.Move(partialFile, destinationFile, overwrite: false);
                 return;

@@ -286,7 +286,7 @@ namespace Listenarr.Tests.Features.Infrastructure.Library.Moving
         }
 
         [Fact]
-        public async Task MoveContentsAsync_TargetDeepInsideSource_RemovesSiblingContentFromTargetAncestors()
+        public async Task MoveContentsAsync_TargetDeepInsideSource_WithSiblingContent_FailsWithoutDeletingAnything()
         {
             var source = FileService.GetTempDirectory("content-move-deep-child-src");
             await FileService.GetFileAsync(source, "book.m4b", "audio");
@@ -296,15 +296,15 @@ namespace Listenarr.Tests.Features.Infrastructure.Library.Moving
             var target = Path.Join(targetAncestor, "target");
 
             var service = _provider.GetRequiredService<AudiobookContentMoveService>();
-            await service.MoveContentsAsync(
-                await CreateLeasedMoveRequestAsync(source, target),
-                CancellationToken.None);
+            var request = await CreateLeasedMoveRequestAsync(source, target);
+            var exception = await Assert.ThrowsAsync<MoveNeedsAttentionException>(() =>
+                service.MoveContentsAsync(request, CancellationToken.None));
 
+            Assert.Contains("unexpected content", exception.Message, StringComparison.OrdinalIgnoreCase);
             Assert.True(Directory.Exists(source));
-            Assert.True(Directory.Exists(target));
-            Assert.False(File.Exists(Path.Join(source, "book.m4b")));
-            Assert.False(File.Exists(Path.Join(targetAncestor, "stale-sibling.txt")));
-            Assert.True(File.Exists(Path.Join(target, "book.m4b")));
+            Assert.False(Directory.Exists(target));
+            Assert.True(File.Exists(Path.Join(source, "book.m4b")));
+            Assert.True(File.Exists(Path.Join(targetAncestor, "stale-sibling.txt")));
         }
 
         [Fact]

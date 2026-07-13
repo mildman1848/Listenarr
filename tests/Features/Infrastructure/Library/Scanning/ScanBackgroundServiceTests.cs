@@ -25,17 +25,22 @@ public sealed class ScanBackgroundServiceTests
             NullLogger<ScanQueueService>.Instance,
             resolver.Object);
         var historyRepository = new Mock<IHistoryRepository>();
-        historyRepository.Setup(repository => repository.GetPendingMoveScanHandoffsAsync(
-                It.IsAny<CancellationToken>()))
-            .ReturnsAsync([]);
         var audiobookRepository = new Mock<IAudiobookRepository>();
         var services = new ServiceCollection()
             .AddSingleton(historyRepository.Object)
             .AddSingleton(audiobookRepository.Object)
             .BuildServiceProvider();
+        var handoffStore = new Mock<IMoveScanHandoffStore>();
+        handoffStore.Setup(store => store.GetClaimableIdsAsync(
+                It.IsAny<DateTimeOffset>(),
+                It.IsAny<int>(),
+                It.IsAny<CancellationToken>()))
+            .ReturnsAsync([]);
         var recovery = new MoveScanHandoffRecoveryService(
             queue,
+            handoffStore.Object,
             services.GetRequiredService<IServiceScopeFactory>(),
+            TimeProvider.System,
             NullLogger<MoveScanHandoffRecoveryService>.Instance);
         var processor = new Mock<IScanJobProcessor>();
         var invocation = 0;
@@ -106,17 +111,22 @@ public sealed class ScanBackgroundServiceTests
                 null))
             .Throws(new InvalidOperationException("status store unavailable"));
         var historyRepository = new Mock<IHistoryRepository>();
-        historyRepository.Setup(repository => repository.GetPendingMoveScanHandoffsAsync(
-                It.IsAny<CancellationToken>()))
-            .ReturnsAsync([]);
         var audiobookRepository = new Mock<IAudiobookRepository>();
         await using var services = new ServiceCollection()
             .AddSingleton(historyRepository.Object)
             .AddSingleton(audiobookRepository.Object)
             .BuildServiceProvider();
+        var handoffStore = new Mock<IMoveScanHandoffStore>();
+        handoffStore.Setup(store => store.GetClaimableIdsAsync(
+                It.IsAny<DateTimeOffset>(),
+                It.IsAny<int>(),
+                It.IsAny<CancellationToken>()))
+            .ReturnsAsync([]);
         var recovery = new MoveScanHandoffRecoveryService(
             queue.Object,
+            handoffStore.Object,
             services.GetRequiredService<IServiceScopeFactory>(),
+            TimeProvider.System,
             NullLogger<MoveScanHandoffRecoveryService>.Instance);
         var processor = new Mock<IScanJobProcessor>();
         var secondProcessed = new TaskCompletionSource(

@@ -82,9 +82,21 @@ public sealed class MoveBackgroundService(
                             leaseLost,
                             ownershipDeadline,
                             heartbeatCancellation.Token);
+                        MovePostCommitContext? postCommit = null;
+                        var phasedProcessor = processor as IMoveJobProcessorPhases;
                         try
                         {
-                            await processor.ProcessJobAsync(job, processingCancellation.Token);
+                            if (phasedProcessor != null)
+                            {
+                                postCommit = await phasedProcessor.ProcessDurableJobAsync(
+                                    job,
+                                    processingCancellation.Token);
+                                ownershipDeadline.CancelAfter(Timeout.InfiniteTimeSpan);
+                            }
+                            else
+                            {
+                                await processor.ProcessJobAsync(job, processingCancellation.Token);
+                            }
                         }
                         catch (OperationCanceledException) when (leaseLost.Task.IsCompletedSuccessfully)
                         {
@@ -92,8 +104,30 @@ public sealed class MoveBackgroundService(
                         }
                         finally
                         {
+                            ownershipDeadline.CancelAfter(Timeout.InfiniteTimeSpan);
                             await heartbeatCancellation.CancelAsync();
                             await ObserveHeartbeatExitAsync(heartbeatTask, stoppingToken);
+                        }
+
+                        if (postCommit != null && phasedProcessor != null)
+                        {
+                            try
+                            {
+                                await phasedProcessor.RunPostCompletionEffectsAsync(
+                                    postCommit,
+                                    stoppingToken);
+                            }
+                            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+                            {
+                                throw;
+                            }
+                            catch (Exception exception) when (exception is not OutOfMemoryException and not StackOverflowException)
+                            {
+                                logger.LogWarning(
+                                    exception,
+                                    "Move job {JobId} completed durably but an optional post-completion effect failed",
+                                    job.Id);
+                            }
                         }
                     }
                     catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
@@ -179,12 +213,18 @@ public sealed class MoveBackgroundService(
         {
             try
             {
-                var renewed = await moveQueueService.HeartbeatJobAsync(
+                var outcome = await moveQueueService.HeartbeatJobAsync(
                     jobId,
                     leaseOwner,
                     leaseGeneration,
                     cancellationToken);
-                if (!renewed)
+                if (outcome == MoveHeartbeatOutcome.Terminal)
+                {
+                    ownershipDeadline.CancelAfter(Timeout.InfiniteTimeSpan);
+                    break;
+                }
+
+                if (outcome == MoveHeartbeatOutcome.Lost)
                 {
                     await CancelForLostOwnershipAsync(
                         jobId,

@@ -16,6 +16,7 @@
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
 using System.ComponentModel.DataAnnotations;
+using Listenarr.Domain.Common;
 
 namespace Listenarr.Domain.Audiobooks
 {
@@ -97,7 +98,7 @@ namespace Listenarr.Domain.Audiobooks
         public int AttemptCount { get; set; } = 0;
         public DateTime? UpdatedAt { get; set; }
         public string? ActiveDeduplicationKey { get; set; }
-        public int IdentityKeyVersion { get; set; } = 2;
+        public int IdentityKeyVersion { get; set; } = 3;
         public string? LeaseOwner { get; set; }
         public DateTime? LeaseExpiresAt { get; set; }
         public int LeaseGeneration { get; set; }
@@ -107,9 +108,93 @@ namespace Listenarr.Domain.Audiobooks
         // Optional source path snapshot provided at enqueue time. Persist this so jobs
         // remain durable and can be inspected / resumed across restarts.
         public string? SourcePath { get; set; }
+        public FileSystemPathSyntax? SourcePathSyntax { get; set; }
+        public FileSystemCaseSensitivity? SourceCaseSensitivity { get; set; }
+        public FileSystemCaseSensitivityMode? SourceCaseSensitivityMode { get; set; }
+        public string? SourceIdentityBoundary { get; set; }
+        public FileSystemPathSyntax? TargetPathSyntax { get; set; }
+        public FileSystemCaseSensitivity? TargetCaseSensitivity { get; set; }
+        public FileSystemCaseSensitivityMode? TargetCaseSensitivityMode { get; set; }
+        public string? TargetIdentityBoundary { get; set; }
         public string? SourceCleanupBoundary { get; set; }
         public bool DeleteEmptySource { get; set; } = true;
         public ICollection<MoveJobEntry> Entries { get; set; } = new List<MoveJobEntry>();
+        public ICollection<MoveJobCreatedDirectory> CreatedDirectories { get; set; } = new List<MoveJobCreatedDirectory>();
+        public MoveScanHandoff? ScanHandoff { get; set; }
+
+        public bool TryGetSourceIdentity(out PathIdentitySnapshot identity)
+        {
+            if (SourcePathSyntax.HasValue
+                && SourceCaseSensitivity.HasValue
+                && SourceCaseSensitivityMode.HasValue
+                && !string.IsNullOrWhiteSpace(SourceIdentityBoundary))
+            {
+                identity = new PathIdentitySnapshot(
+                    SourcePathSyntax.Value,
+                    SourceCaseSensitivity.Value,
+                    SourceCaseSensitivityMode.Value,
+                    SourceIdentityBoundary);
+                return true;
+            }
+
+            identity = default;
+            return false;
+        }
+
+        public bool TryGetTargetIdentity(out PathIdentitySnapshot identity)
+        {
+            if (TargetPathSyntax.HasValue
+                && TargetCaseSensitivity.HasValue
+                && TargetCaseSensitivityMode.HasValue
+                && !string.IsNullOrWhiteSpace(TargetIdentityBoundary))
+            {
+                identity = new PathIdentitySnapshot(
+                    TargetPathSyntax.Value,
+                    TargetCaseSensitivity.Value,
+                    TargetCaseSensitivityMode.Value,
+                    TargetIdentityBoundary);
+                return true;
+            }
+
+            identity = default;
+            return false;
+        }
+
+        public void SetSourceIdentity(PathIdentitySnapshot identity)
+        {
+            SourcePathSyntax = identity.Syntax;
+            SourceCaseSensitivity = identity.CaseSensitivity;
+            SourceCaseSensitivityMode = identity.RequestedMode;
+            SourceIdentityBoundary = identity.BoundaryPath;
+        }
+
+        public void SetTargetIdentity(PathIdentitySnapshot identity)
+        {
+            TargetPathSyntax = identity.Syntax;
+            TargetCaseSensitivity = identity.CaseSensitivity;
+            TargetCaseSensitivityMode = identity.RequestedMode;
+            TargetIdentityBoundary = identity.BoundaryPath;
+        }
+    }
+
+    public static class MoveJobManualRetry
+    {
+        public static void Reset(MoveJob job, string deduplicationKey, DateTime nowUtc)
+        {
+            ArgumentNullException.ThrowIfNull(job);
+            ArgumentException.ThrowIfNullOrWhiteSpace(deduplicationKey);
+
+            job.Status = MoveJobStatus.Queued;
+            job.Phase = MoveJobPhase.None;
+            job.Error = null;
+            job.FailureKind = MoveFailureKind.None;
+            job.AttemptCount = 0;
+            job.NextAttemptAt = null;
+            job.LeaseOwner = null;
+            job.LeaseExpiresAt = null;
+            job.UpdatedAt = nowUtc;
+            job.ActiveDeduplicationKey = deduplicationKey;
+        }
     }
 
     public class MoveJobEntry

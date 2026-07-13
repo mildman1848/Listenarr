@@ -15,9 +15,27 @@
  * You should have received a copy of the GNU Affero General Public License
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
+using Listenarr.Domain.Common;
 
 namespace Listenarr.Application.Audiobooks.Contracts
 {
+    public sealed record MoveEnqueueCommand(
+        int AudiobookId,
+        string SourcePath,
+        PathIdentitySnapshot SourceIdentity,
+        string TargetPath,
+        PathIdentitySnapshot TargetIdentity,
+        bool DeleteEmptySource = true,
+        string? SourceCleanupBoundary = null,
+        Guid? RelocationId = null);
+
+    public enum MoveHeartbeatOutcome
+    {
+        Renewed,
+        Terminal,
+        Lost
+    }
+
     public sealed class MoveLeaseLostException(Guid jobId, int leaseGeneration)
         : InvalidOperationException($"Move job {jobId} no longer owns lease generation {leaseGeneration}.");
 
@@ -29,6 +47,9 @@ namespace Listenarr.Application.Audiobooks.Contracts
     public interface IMoveQueueService
     {
         Task<Guid> EnqueueMoveAsync(
+            MoveEnqueueCommand command,
+            CancellationToken cancellationToken = default);
+        Task<Guid> EnqueueMoveAsync(
             int audiobookId,
             string requestedPath,
             string? sourcePath = null,
@@ -36,7 +57,7 @@ namespace Listenarr.Application.Audiobooks.Contracts
             string? sourceCleanupBoundary = null);
         Task<Guid?> RequeueMoveAsync(Guid jobId);
         Task<int?> TryClaimJobAsync(Guid jobId, string leaseOwner, CancellationToken cancellationToken = default);
-        Task<bool> HeartbeatJobAsync(Guid jobId, string leaseOwner, int leaseGeneration, CancellationToken cancellationToken = default);
+        Task<MoveHeartbeatOutcome> HeartbeatJobAsync(Guid jobId, string leaseOwner, int leaseGeneration, CancellationToken cancellationToken = default);
         Task RecoverActiveJobsAsync(CancellationToken cancellationToken = default);
         Task<IReadOnlyList<MoveJob>> GetActiveJobsAsync(CancellationToken cancellationToken = default);
         Task<MoveQueueHealthSnapshot> GetQueueHealthAsync(CancellationToken cancellationToken = default);
@@ -49,6 +70,7 @@ namespace Listenarr.Application.Audiobooks.Contracts
             string error,
             CancellationToken cancellationToken = default);
         Task UpdateJobStatusAsync(Guid id, string leaseOwner, int leaseGeneration, MoveJobStatus status, string? error = null, CancellationToken cancellationToken = default);
+        Task NotifyPersistedJobStateAsync(Guid id, MoveJobStatus status, string? error = null, CancellationToken cancellationToken = default);
         System.Threading.Channels.ChannelReader<MoveJob> Reader { get; }
     }
 }

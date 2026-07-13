@@ -1,4 +1,3 @@
-using System.Text.Json;
 using Listenarr.Domain.Common;
 
 namespace Listenarr.Infrastructure.Library.Moving;
@@ -94,8 +93,19 @@ internal sealed partial class AudiobookContentMoveService
                     "A future-generation ownership-marker write file was preserved.");
             }
 
-            var recovered = TryReadOwnershipMarkerWriteFile(writePath);
-            if (recovered == null)
+            var recoveredRead = ReadOwnershipMarkerResult(writePath);
+            if (recoveredRead.State == MarkerReadState.TemporarilyUnreadable)
+            {
+                throw new IOException(
+                    "An ownership-marker write file is temporarily unreadable and was preserved.",
+                    recoveredRead.Error);
+            }
+            if (recoveredRead.State == MarkerReadState.Unsupported)
+            {
+                throw new MoveNeedsAttentionException(
+                    "An ownership-marker write file uses an unsupported marker version and was preserved.");
+            }
+            if (recoveredRead.State == MarkerReadState.CorruptOrTruncated)
             {
                 if (writeIdentity.LeaseGeneration >= leaseToken.Generation)
                 {
@@ -105,7 +115,15 @@ internal sealed partial class AudiobookContentMoveService
 
                 await authorizeMutation();
                 ValidateOwnershipMarkerWritePath(writePath, markerDirectory);
-                if (!TryParseMarkerWriteIdentity(writePath, markerPath, out var currentIdentity)
+                var currentRead = ReadOwnershipMarkerResult(writePath);
+                if (currentRead.State == MarkerReadState.TemporarilyUnreadable)
+                {
+                    throw new IOException(
+                        "A predecessor ownership-marker write file became temporarily unreadable and was preserved.",
+                        currentRead.Error);
+                }
+                if (currentRead.State != MarkerReadState.CorruptOrTruncated
+                    || !TryParseMarkerWriteIdentity(writePath, markerPath, out var currentIdentity)
                     || currentIdentity != writeIdentity)
                 {
                     throw new MoveNeedsAttentionException(
@@ -117,6 +135,8 @@ internal sealed partial class AudiobookContentMoveService
                 continue;
             }
 
+            var recovered = recoveredRead.Marker
+                ?? throw new MoveNeedsAttentionException("The ownership-marker write file is missing.");
             ValidateOwnershipMarker(
                 recovered,
                 expected,
@@ -178,40 +198,39 @@ internal sealed partial class AudiobookContentMoveService
             throw new MoveNeedsAttentionException(markerReason);
         }
 
-        if (!File.Exists(markerPath)
-            || (File.GetAttributes(markerPath) & FileAttributes.ReparsePoint) != 0)
+        if (File.Exists(markerPath)
+            && (File.GetAttributes(markerPath) & FileAttributes.ReparsePoint) != 0)
         {
-            throw new MoveNeedsAttentionException("The ownership marker is missing or linked.");
+            throw new MoveNeedsAttentionException("The ownership marker is linked.");
         }
 
-        try
+        var result = ReadOwnershipMarkerResult(markerPath);
+        return result.State switch
         {
-            return JsonSerializer.Deserialize<MoveOwnershipMarker>(File.ReadAllText(markerPath))
-                ?? throw new MoveNeedsAttentionException("The ownership marker is empty.");
-        }
-        catch (MoveNeedsAttentionException)
-        {
-            throw;
-        }
-        catch (Exception exception) when (WorkerExceptionClassifier.IsNonFatal(exception))
-        {
-            throw new MoveNeedsAttentionException(
-                $"The ownership marker could not be read safely: {exception.Message}");
-        }
+            MarkerReadState.Valid => result.Marker!,
+            MarkerReadState.TemporarilyUnreadable => throw new IOException(
+                "The ownership marker is temporarily unreadable.",
+                result.Error),
+            MarkerReadState.Unsupported => throw new MoveNeedsAttentionException(
+                "The ownership marker uses an unsupported marker version and was preserved."),
+            MarkerReadState.CorruptOrTruncated => throw new MoveNeedsAttentionException(
+                "The ownership marker is corrupt or truncated."),
+            _ => throw new MoveNeedsAttentionException("The ownership marker is missing.")
+        };
     }
 
-    private static MoveOwnershipMarker? TryReadOwnershipMarkerWriteFile(string writePath)
+    private static MarkerReadResult<MoveOwnershipMarker> ReadOwnershipMarkerResult(string path)
     {
-        try
+        var result = ReadJsonMarker<MoveOwnershipMarker>(path);
+        if (result.State == MarkerReadState.Valid
+            && result.Marker!.Version != OwnershipMarkerVersion)
         {
-            return JsonSerializer.Deserialize<MoveOwnershipMarker>(
-                File.ReadAllText(writePath));
+            return new MarkerReadResult<MoveOwnershipMarker>(
+                MarkerReadState.Unsupported,
+                result.Marker);
         }
-        catch (Exception exception) when (exception is
-            JsonException or IOException or UnauthorizedAccessException)
-        {
-            return null;
-        }
+
+        return result;
     }
 
     private static void ValidateOwnershipMarker(
@@ -288,8 +307,19 @@ internal sealed partial class AudiobookContentMoveService
                     "A future-generation ownership-marker write file was preserved.");
             }
 
-            var writeMarker = TryReadOwnershipMarkerWriteFile(writePath);
-            if (writeMarker == null)
+            var writeRead = ReadOwnershipMarkerResult(writePath);
+            if (writeRead.State == MarkerReadState.TemporarilyUnreadable)
+            {
+                throw new IOException(
+                    "An ownership-marker write file is temporarily unreadable and was preserved.",
+                    writeRead.Error);
+            }
+            if (writeRead.State == MarkerReadState.Unsupported)
+            {
+                throw new MoveNeedsAttentionException(
+                    "An ownership-marker write file uses an unsupported marker version and was preserved.");
+            }
+            if (writeRead.State == MarkerReadState.CorruptOrTruncated)
             {
                 if (writeIdentity.LeaseGeneration >= leaseToken.Generation)
                 {
@@ -299,10 +329,24 @@ internal sealed partial class AudiobookContentMoveService
 
                 await authorizeMutation();
                 ValidateOwnershipMarkerWritePath(writePath, markerDirectory);
+                var currentRead = ReadOwnershipMarkerResult(writePath);
+                if (currentRead.State == MarkerReadState.TemporarilyUnreadable)
+                {
+                    throw new IOException(
+                        "A predecessor ownership-marker write file became temporarily unreadable and was preserved.",
+                        currentRead.Error);
+                }
+                if (currentRead.State != MarkerReadState.CorruptOrTruncated)
+                {
+                    throw new MoveNeedsAttentionException(
+                        "A predecessor ownership-marker write file changed before deletion.");
+                }
                 File.Delete(writePath);
                 continue;
             }
 
+            var writeMarker = writeRead.Marker
+                ?? throw new MoveNeedsAttentionException("The ownership-marker write file is missing.");
             ValidateOwnershipMarker(
                 writeMarker,
                 expected,
@@ -311,8 +355,16 @@ internal sealed partial class AudiobookContentMoveService
                 directorySemantics);
             await authorizeMutation();
             ValidateOwnershipMarkerWritePath(writePath, markerDirectory);
-            writeMarker = TryReadOwnershipMarkerWriteFile(writePath)
-                ?? throw new MoveNeedsAttentionException(
+            var currentReadAfterAuthorization = ReadOwnershipMarkerResult(writePath);
+            if (currentReadAfterAuthorization.State == MarkerReadState.TemporarilyUnreadable)
+            {
+                throw new IOException(
+                    "An ownership-marker write file became temporarily unreadable and was preserved.",
+                    currentReadAfterAuthorization.Error);
+            }
+            writeMarker = currentReadAfterAuthorization.State == MarkerReadState.Valid
+                ? currentReadAfterAuthorization.Marker!
+                : throw new MoveNeedsAttentionException(
                     "An ownership-marker write file changed before deletion.");
             ValidateOwnershipMarker(
                 writeMarker,

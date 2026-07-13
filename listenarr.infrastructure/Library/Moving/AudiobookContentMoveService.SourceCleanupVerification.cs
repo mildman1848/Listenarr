@@ -34,7 +34,8 @@ internal sealed partial class AudiobookContentMoveService
             .Concat(directories)
             .All(entry =>
                 IsSameOrInside(entry, target, semantics)
-                || IsSameOrInside(target, entry, semantics));
+                || IsSameOrInside(target, entry, semantics)
+                || IsScaffoldMarkerOnTargetSpine(entry, target, semantics));
     }
 
     private static void VerifySourceCleanupState(
@@ -70,7 +71,8 @@ internal sealed partial class AudiobookContentMoveService
                 .Concat(directories)
                 .FirstOrDefault(entry =>
                     !IsSameOrInside(entry, target, request.SourceSemantics)
-                    && !IsSameOrInside(target, entry, request.SourceSemantics));
+                    && !IsSameOrInside(target, entry, request.SourceSemantics)
+                    && !IsOwnedScaffoldMarker(entry, request, target));
             if (unexpectedEntry != null)
             {
                 throw new MoveNeedsAttentionException(
@@ -95,5 +97,56 @@ internal sealed partial class AudiobookContentMoveService
             throw new MoveNeedsAttentionException(
                 "The completed move source directory was recreated after cleanup.");
         }
+    }
+
+    private static bool IsOwnedScaffoldMarker(
+        string entry,
+        AudiobookContentMoveRequest request,
+        string target)
+    {
+        if (!IsScaffoldMarkerOnTargetSpine(entry, target, request.SourceSemantics))
+        {
+            return false;
+        }
+
+        var publishedRoot = Path.GetDirectoryName(entry);
+        if (string.IsNullOrWhiteSpace(publishedRoot))
+        {
+            return false;
+        }
+
+        try
+        {
+            ValidateScaffoldMarker(
+                ReadScaffoldMarker(publishedRoot),
+                request.JobId,
+                target,
+                publishedRoot,
+                request.SourceSemantics);
+            return true;
+        }
+        catch (MoveNeedsAttentionException)
+        {
+            return false;
+        }
+    }
+
+    private static bool IsScaffoldMarkerOnTargetSpine(
+        string entry,
+        string target,
+        FileSystemPathSemantics semantics)
+    {
+        if (!string.Equals(
+                Path.GetFileName(entry),
+                ScaffoldOwnerFileName,
+                StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        var directory = Path.GetDirectoryName(entry);
+        return !string.IsNullOrWhiteSpace(directory)
+            && !FileSystemPathIdentity.AreEquivalent(directory, target, semantics)
+            && FileSystemPathIdentity.IsSameOrInside(target, directory, semantics);
     }
 }
