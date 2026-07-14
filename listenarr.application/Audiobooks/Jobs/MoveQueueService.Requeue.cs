@@ -17,7 +17,7 @@ public partial class MoveQueueService
             {
                 job = await _persistence.GetByIdAsync(jobId, cancellationToken);
             }
-            catch (Exception ex) when (ex is not OperationCanceledException && ex is not OutOfMemoryException && ex is not StackOverflowException)
+            catch (Exception ex) when (WorkerExceptionClassifier.IsNonFatal(ex))
             {
                 _logger.LogWarning(ex, "Failed to read move job from DB while requeueing {JobId}", jobId);
                 return null;
@@ -44,69 +44,97 @@ public partial class MoveQueueService
                 return null;
             }
 
-            if (!job.TryGetSourceIdentity(out var sourceIdentity))
+            var sourcePath = job.SourcePath;
+            PathIdentitySnapshot sourceIdentity;
+            if (!job.TryGetSourceIdentity(out sourceIdentity))
             {
-                job.SourcePath = FileSystemPathIdentity.ResolveNativeAbsolutePath(job.SourcePath);
+                sourcePath = FileSystemPathIdentity.ResolveNativeAbsolutePath(sourcePath);
                 sourceIdentity = await ResolveIdentitySnapshotAsync(
-                    job.SourcePath,
+                    sourcePath,
                     cancellationToken: cancellationToken);
-                job.SetSourceIdentity(sourceIdentity);
             }
             else
             {
-                job.SourcePath = FileSystemPathIdentity.Canonicalize(
-                    job.SourcePath,
+                sourcePath = FileSystemPathIdentity.Canonicalize(
+                    sourcePath,
                     sourceIdentity.Syntax);
             }
 
-            if (!job.TryGetTargetIdentity(out var targetIdentity))
+            var targetPath = job.RequestedPath;
+            PathIdentitySnapshot targetIdentity;
+            if (!job.TryGetTargetIdentity(out targetIdentity))
             {
-                job.RequestedPath = FileSystemPathIdentity.ResolveNativeAbsolutePath(job.RequestedPath);
+                targetPath = FileSystemPathIdentity.ResolveNativeAbsolutePath(targetPath);
                 targetIdentity = await ResolveIdentitySnapshotAsync(
-                    job.RequestedPath,
+                    targetPath,
                     cancellationToken: cancellationToken);
-                job.SetTargetIdentity(targetIdentity);
             }
             else
             {
-                job.RequestedPath = FileSystemPathIdentity.Canonicalize(
-                    job.RequestedPath,
+                targetPath = FileSystemPathIdentity.Canonicalize(
+                    targetPath,
                     targetIdentity.Syntax);
             }
 
-            job.IdentityKeyVersion = 3;
             await ThrowIfRelocationBoundaryProtectedAsync(
-                job.SourcePath,
+                sourcePath,
                 sourceIdentity,
-                job.RequestedPath,
+                targetPath,
                 targetIdentity,
                 cancellationToken);
 
-            if (job.Status == MoveJobStatus.Queued)
+            if (FileSystemPathIdentity.AreEquivalentEndpoints(
+                    sourcePath,
+                    sourceIdentity,
+                    targetPath,
+                    targetIdentity))
             {
-                jobToSchedule = job;
-                return job.Id;
+                _logger.LogInformation(
+                    "Move job {JobId} cannot be manually requeued because its source and target endpoints are identical",
+                    job.Id);
+                return null;
             }
 
             var deduplicationKey = BuildDeduplicationKey(
                 job.AudiobookId,
-                job.RequestedPath,
+                targetPath,
                 targetIdentity);
-            var activeJob = await _persistence.GetActiveByKeyAsync(deduplicationKey, cancellationToken);
-            if (activeJob != null && activeJob.Id != job.Id)
+            var requeue = await _persistence.RequeueAsync(
+                new RequeueMoveCommand(
+                    job.Id,
+                    job.Status,
+                    sourcePath,
+                    sourceIdentity,
+                    targetPath,
+                    targetIdentity,
+                    deduplicationKey,
+                    _timeProvider.GetUtcNow()),
+                cancellationToken);
+            switch (requeue.Outcome)
             {
-                jobToSchedule = activeJob;
-                return activeJob.Id;
+                case MoveRequeueOutcome.Requeued:
+                case MoveRequeueOutcome.AlreadyQueuedWithMatchingIdentity:
+                    jobToSchedule = requeue.Job;
+                    _logger.LogInformation(
+                        "Requeued move job {JobId} for audiobook {AudiobookId}",
+                        jobId,
+                        job.AudiobookId);
+                    return requeue.Job?.Id;
+                case MoveRequeueOutcome.ConflictingActiveJob:
+                    jobToSchedule = requeue.Job;
+                    return requeue.Job?.Id;
+                case MoveRequeueOutcome.StaleState:
+                    _logger.LogInformation(
+                        "Move job {JobId} changed state while it was being requeued",
+                        jobId);
+                    return null;
+                case MoveRequeueOutcome.NotFound:
+                    _logger.LogWarning("Move job {JobId} disappeared while it was being requeued", jobId);
+                    return null;
+                default:
+                    throw new InvalidOperationException(
+                        $"Unsupported move requeue outcome {requeue.Outcome}.");
             }
-
-            MoveJobManualRetry.Reset(
-                job,
-                deduplicationKey,
-                _timeProvider.GetUtcNow().UtcDateTime);
-            await _persistence.RequeueAsync(job, cancellationToken);
-            jobToSchedule = job;
-            _logger.LogInformation("Requeued move job {JobId} for audiobook {AudiobookId}", jobId, job.AudiobookId);
-            return jobId;
         });
 
         if (jobToSchedule != null)

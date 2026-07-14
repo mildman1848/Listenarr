@@ -120,6 +120,68 @@ public sealed class FileSystemPathIdentityTests
     }
 
     [Fact]
+    public void EquivalentEndpoints_EitherInsensitiveIdentityMakesCaseOnlyVariantEquivalent()
+    {
+        var source = "/library/Book";
+        var target = "/library/book/";
+        var sourceIdentity = new PathIdentitySnapshot(
+            FileSystemPathSyntax.Unix,
+            FileSystemCaseSensitivity.Sensitive,
+            FileSystemCaseSensitivityMode.Sensitive,
+            "/library");
+        var targetIdentity = new PathIdentitySnapshot(
+            FileSystemPathSyntax.Unix,
+            FileSystemCaseSensitivity.Insensitive,
+            FileSystemCaseSensitivityMode.Insensitive,
+            "/library");
+
+        Assert.True(FileSystemPathIdentity.AreEquivalentEndpoints(
+            source,
+            sourceIdentity,
+            target,
+            targetIdentity));
+    }
+
+    [Fact]
+    public void EquivalentEndpoints_BothSensitiveIdentitiesPreserveCaseOnlyDifference()
+    {
+        var source = "/library/Book";
+        var target = "/library/book";
+        var identity = new PathIdentitySnapshot(
+            FileSystemPathSyntax.Unix,
+            FileSystemCaseSensitivity.Sensitive,
+            FileSystemCaseSensitivityMode.Sensitive,
+            "/library");
+
+        Assert.False(FileSystemPathIdentity.AreEquivalentEndpoints(
+            source,
+            identity,
+            target,
+            identity));
+    }
+
+    [Fact]
+    public void EquivalentEndpoints_DifferentSyntaxesAreDistinct()
+    {
+        var sourceIdentity = new PathIdentitySnapshot(
+            FileSystemPathSyntax.Windows,
+            FileSystemCaseSensitivity.Insensitive,
+            FileSystemCaseSensitivityMode.Insensitive,
+            @"C:\Library");
+        var targetIdentity = new PathIdentitySnapshot(
+            FileSystemPathSyntax.Unix,
+            FileSystemCaseSensitivity.Insensitive,
+            FileSystemCaseSensitivityMode.Insensitive,
+            "/c/Library");
+
+        Assert.False(FileSystemPathIdentity.AreEquivalentEndpoints(
+            @"C:\Library\Book",
+            sourceIdentity,
+            "/c/Library/Book",
+            targetIdentity));
+    }
+
+    [Fact]
     public void UnknownSensitivity_CannotCreateIdentityKey()
     {
         var semantics = new FileSystemPathSemantics(

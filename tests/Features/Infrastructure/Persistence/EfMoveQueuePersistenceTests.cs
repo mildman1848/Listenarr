@@ -789,7 +789,9 @@ public sealed class EfMoveQueuePersistenceTests : IAsyncLifetime
         {
             "reconcile" => persistence.ReconcileIdentityKeysAsync(),
             "health" => persistence.GetHealthAsync(now),
-            "requeue" => persistence.RequeueAsync(job),
+            "requeue" => persistence.RequeueAsync(CreateRequeueCommand(
+                job,
+                "v3:move:42:s:unavailable-requeue")),
             "claim" => persistence.TryClaimAsync(job.Id, "worker-a", now, now.AddMinutes(2)),
             "heartbeat" => persistence.HeartbeatAsync(
                 job.Id,
@@ -820,17 +822,11 @@ public sealed class EfMoveQueuePersistenceTests : IAsyncLifetime
         job.AttemptCount = 2;
         await persistence.AddAsync(job);
 
-        job.Status = MoveJobStatus.Queued;
-        job.Phase = MoveJobPhase.None;
-        job.Error = null;
-        job.FailureKind = MoveFailureKind.None;
-        job.AttemptCount = 0;
-        job.NextAttemptAt = null;
-        job.LeaseOwner = null;
-        job.LeaseExpiresAt = null;
-        job.ActiveDeduplicationKey = "v2:move:42:s:requeue-reset-new";
-        await persistence.RequeueAsync(job);
+        var result = await persistence.RequeueAsync(CreateRequeueCommand(
+            job,
+            "v3:move:42:s:requeue-reset-new"));
 
+        Assert.Equal(MoveRequeueOutcome.Requeued, result.Outcome);
         var persisted = await persistence.GetByIdAsync(job.Id);
         Assert.NotNull(persisted);
         Assert.Equal(MoveJobStatus.Queued, persisted.Status);
@@ -840,9 +836,235 @@ public sealed class EfMoveQueuePersistenceTests : IAsyncLifetime
         Assert.Null(persisted.NextAttemptAt);
         Assert.Null(persisted.LeaseOwner);
         Assert.Null(persisted.LeaseExpiresAt);
-        Assert.Equal("v2:move:42:s:requeue-reset-new", persisted.ActiveDeduplicationKey);
+        Assert.Equal("v3:move:42:s:requeue-reset-new", persisted.ActiveDeduplicationKey);
         Assert.Equal(3, persisted.LeaseGeneration);
         Assert.Equal(0, persisted.AttemptCount);
+        Assert.Equal(FileSystemPathIdentity.ResolveNativeAbsolutePath("/downloads/book"), persisted.SourcePath);
+        Assert.Equal(FileSystemPathIdentity.ResolveNativeAbsolutePath("/library/book"), persisted.RequestedPath);
+        Assert.Equal(FileSystemPathSemantics.CurrentHostDefault.Syntax, persisted.SourcePathSyntax);
+        Assert.Equal(FileSystemPathSemantics.CurrentHostDefault.Syntax, persisted.TargetPathSyntax);
+        Assert.Equal(FileSystemCaseSensitivity.Sensitive, persisted.SourceCaseSensitivity);
+        Assert.Equal(FileSystemCaseSensitivity.Sensitive, persisted.TargetCaseSensitivity);
+        Assert.Equal(FileSystemCaseSensitivityMode.Sensitive, persisted.SourceCaseSensitivityMode);
+        Assert.Equal(FileSystemCaseSensitivityMode.Sensitive, persisted.TargetCaseSensitivityMode);
+        Assert.Equal(FileSystemPathIdentity.ResolveNativeAbsolutePath("/downloads/book"), persisted.SourceIdentityBoundary);
+        Assert.Equal(FileSystemPathIdentity.ResolveNativeAbsolutePath("/library/book"), persisted.TargetIdentityBoundary);
+        Assert.Equal(3, persisted.IdentityKeyVersion);
+    }
+
+    [Fact]
+    public async Task RequeueAsync_ProcessRestartRecoversCommittedRepairBeforePublication()
+    {
+        var persistence = CreatePersistence();
+        var job = CreateJob("v3:move:42:s:restart-requeue");
+        job.Status = MoveJobStatus.NeedsAttention;
+        job.ActiveDeduplicationKey = null;
+        await persistence.AddAsync(job);
+        var command = CreateRequeueCommand(
+            job,
+            "v3:move:42:s:restart-requeue-new");
+
+        Assert.Equal(
+            MoveRequeueOutcome.Requeued,
+            (await persistence.RequeueAsync(command)).Outcome);
+        var relocationService = new Mock<IRootFolderRelocationService>();
+        relocationService.Setup(service => service.ReconcileActiveAsync(
+                It.IsAny<CancellationToken>()))
+            .Returns(Task.CompletedTask);
+        var restartedQueue = new MoveQueueService(
+            Mock.Of<ILogger<MoveQueueService>>(),
+            persistence,
+            Mock.Of<IHubBroadcaster>(),
+            TimeProvider.System,
+            BuildSemanticsResolver(),
+            relocationService.Object,
+            Mock.Of<IFilesystemMutationCoordinator>());
+
+        await restartedQueue.RecoverActiveJobsAsync();
+
+        Assert.True(restartedQueue.Reader.TryRead(out var recovered));
+        Assert.Equal(job.Id, recovered.Id);
+        Assert.True(recovered.TryGetSourceIdentity(out var recoveredSourceIdentity));
+        Assert.True(recovered.TryGetTargetIdentity(out var recoveredTargetIdentity));
+        Assert.True(FileSystemPathIdentity.AreEquivalent(
+            command.SourcePath,
+            recovered.SourcePath,
+            recoveredSourceIdentity.Semantics));
+        Assert.True(FileSystemPathIdentity.AreEquivalent(
+            command.TargetPath,
+            recovered.RequestedPath,
+            recoveredTargetIdentity.Semantics));
+    }
+
+    [Fact]
+    public async Task RequeueAsync_ConcurrentClaim_DoesNotOverwriteNewerLeaseState()
+    {
+        var persistence = CreatePersistence();
+        var job = CreateJob("v3:move:42:s:stale-requeue");
+        job.Status = MoveJobStatus.Failed;
+        job.ActiveDeduplicationKey = null;
+        await persistence.AddAsync(job);
+        var command = CreateRequeueCommand(
+            job,
+            "v3:move:42:s:stale-requeue-new");
+        Assert.Equal(
+            MoveRequeueOutcome.Requeued,
+            (await persistence.RequeueAsync(command)).Outcome);
+        var now = DateTimeOffset.UtcNow;
+        var claimedGeneration = await persistence.TryClaimAsync(
+            job.Id,
+            "worker-new",
+            now,
+            now.AddMinutes(5));
+        Assert.NotNull(claimedGeneration);
+
+        var result = await persistence.RequeueAsync(command with
+        {
+            ExpectedStatus = MoveJobStatus.Queued
+        });
+
+        Assert.Equal(MoveRequeueOutcome.StaleState, result.Outcome);
+        var persisted = await persistence.GetByIdAsync(job.Id);
+        Assert.Equal(MoveJobStatus.Running, persisted!.Status);
+        Assert.Equal("worker-new", persisted.LeaseOwner);
+        Assert.Equal(claimedGeneration, persisted.LeaseGeneration);
+        Assert.Equal("v3:move:42:s:stale-requeue-new", persisted.ActiveDeduplicationKey);
+    }
+
+    [Fact]
+    public async Task RequeueAsync_DeduplicationCollision_ReturnsConflictingActiveJob()
+    {
+        var persistence = CreatePersistence();
+        var failed = CreateJob("v3:move:42:s:failed-original");
+        failed.Status = MoveJobStatus.Failed;
+        failed.ActiveDeduplicationKey = null;
+        var active = CreateJob("v3:move:42:s:collision");
+        await persistence.AddAsync(failed);
+        await persistence.AddAsync(active);
+
+        var result = await persistence.RequeueAsync(CreateRequeueCommand(
+            failed,
+            "v3:move:42:s:collision"));
+
+        Assert.Equal(MoveRequeueOutcome.ConflictingActiveJob, result.Outcome);
+        Assert.Equal(active.Id, result.Job?.Id);
+        Assert.Equal(MoveJobStatus.Failed, (await persistence.GetByIdAsync(failed.Id))?.Status);
+    }
+
+    [Fact]
+    public async Task RequeueAsync_MatchingQueuedRepair_ReturnsIdempotentOutcome()
+    {
+        var persistence = CreatePersistence();
+        var job = CreateJob("v3:move:42:s:matching-repair");
+        job.Status = MoveJobStatus.Failed;
+        job.ActiveDeduplicationKey = null;
+        await persistence.AddAsync(job);
+        var command = CreateRequeueCommand(job, "v3:move:42:s:matching-repair-new");
+        var first = await persistence.RequeueAsync(command);
+        var second = await persistence.RequeueAsync(command with
+        {
+            ExpectedStatus = MoveJobStatus.Queued
+        });
+
+        Assert.Equal(MoveRequeueOutcome.Requeued, first.Outcome);
+        Assert.Equal(MoveRequeueOutcome.AlreadyQueuedWithMatchingIdentity, second.Outcome);
+        Assert.Equal(job.Id, second.Job?.Id);
+    }
+
+    [Fact]
+    public async Task RequeueAsync_ConcurrentRequests_OnlyOneExpectedStateTransitionWins()
+    {
+        var persistence = CreatePersistence();
+        var job = CreateJob("v3:move:42:s:concurrent-requeue");
+        job.Status = MoveJobStatus.Failed;
+        job.ActiveDeduplicationKey = null;
+        await persistence.AddAsync(job);
+        var command = CreateRequeueCommand(job, "v3:move:42:s:concurrent-requeue-new");
+
+        var results = await Task.WhenAll(
+            persistence.RequeueAsync(command),
+            persistence.RequeueAsync(command));
+
+        Assert.Single(results, result => result.Outcome == MoveRequeueOutcome.Requeued);
+        Assert.Single(results, result => result.Outcome == MoveRequeueOutcome.StaleState);
+        Assert.Equal(MoveJobStatus.Queued, (await persistence.GetByIdAsync(job.Id))?.Status);
+    }
+
+    [Theory]
+    [InlineData(
+        FileSystemPathSyntax.Windows,
+        FileSystemCaseSensitivity.Sensitive,
+        FileSystemCaseSensitivityMode.Sensitive,
+        @"\\server\downloads\Book",
+        @"\\server\library\Book",
+        @"\\server\downloads",
+        @"\\server\library")]
+    [InlineData(
+        FileSystemPathSyntax.Windows,
+        FileSystemCaseSensitivity.Insensitive,
+        FileSystemCaseSensitivityMode.Insensitive,
+        @"C:\Downloads\Book",
+        @"C:\Library\Book",
+        @"C:\Downloads",
+        @"C:\Library")]
+    [InlineData(
+        FileSystemPathSyntax.Unix,
+        FileSystemCaseSensitivity.Sensitive,
+        FileSystemCaseSensitivityMode.Sensitive,
+        "/downloads/Author Name/Book",
+        "/library/Author Name/Book",
+        "/downloads",
+        "/library")]
+    [InlineData(
+        FileSystemPathSyntax.Unix,
+        FileSystemCaseSensitivity.Insensitive,
+        FileSystemCaseSensitivityMode.Insensitive,
+        "/mnt/Downloads/Book",
+        "/mnt/Library/Book",
+        "/mnt/Downloads",
+        "/mnt/Library")]
+    public async Task RequeueAsync_PersistsExplicitEndpointSemantics(
+        FileSystemPathSyntax syntax,
+        FileSystemCaseSensitivity sensitivity,
+        FileSystemCaseSensitivityMode requestedMode,
+        string sourcePath,
+        string targetPath,
+        string sourceBoundary,
+        string targetBoundary)
+    {
+        var persistence = CreatePersistence();
+        var job = CreateJob($"legacy:{Guid.NewGuid():N}");
+        job.Status = MoveJobStatus.NeedsAttention;
+        job.ActiveDeduplicationKey = null;
+        await persistence.AddAsync(job);
+        var sourceIdentity = new PathIdentitySnapshot(
+            syntax,
+            sensitivity,
+            requestedMode,
+            sourceBoundary);
+        var targetIdentity = new PathIdentitySnapshot(
+            syntax,
+            sensitivity,
+            requestedMode,
+            targetBoundary);
+
+        var result = await persistence.RequeueAsync(new RequeueMoveCommand(
+            job.Id,
+            MoveJobStatus.NeedsAttention,
+            sourcePath,
+            sourceIdentity,
+            targetPath,
+            targetIdentity,
+            $"v3:move:42:{Guid.NewGuid():N}",
+            DateTimeOffset.UtcNow));
+
+        Assert.Equal(MoveRequeueOutcome.Requeued, result.Outcome);
+        Assert.Equal(syntax, result.Job?.SourcePathSyntax);
+        Assert.Equal(syntax, result.Job?.TargetPathSyntax);
+        Assert.Equal(sensitivity, result.Job?.SourceCaseSensitivity);
+        Assert.Equal(sensitivity, result.Job?.TargetCaseSensitivity);
+        Assert.Equal(requestedMode, result.Job?.SourceCaseSensitivityMode);
+        Assert.Equal(requestedMode, result.Job?.TargetCaseSensitivityMode);
     }
 
     private EfMoveQueuePersistence CreatePersistence(IFileSystemSemanticsResolver? resolver = null) =>
@@ -878,6 +1100,34 @@ public sealed class EfMoveQueuePersistenceTests : IAsyncLifetime
         Status = MoveJobStatus.Queued,
         ActiveDeduplicationKey = key
     };
+
+    private static RequeueMoveCommand CreateRequeueCommand(
+        MoveJob job,
+        string key)
+    {
+        var sourcePath = FileSystemPathIdentity.ResolveNativeAbsolutePath("/downloads/book");
+        var targetPath = FileSystemPathIdentity.ResolveNativeAbsolutePath("/library/book");
+        var syntax = FileSystemPathSemantics.CurrentHostDefault.Syntax;
+        var sourceIdentity = new PathIdentitySnapshot(
+            syntax,
+            FileSystemCaseSensitivity.Sensitive,
+            FileSystemCaseSensitivityMode.Sensitive,
+            sourcePath);
+        var targetIdentity = new PathIdentitySnapshot(
+            syntax,
+            FileSystemCaseSensitivity.Sensitive,
+            FileSystemCaseSensitivityMode.Sensitive,
+            targetPath);
+        return new RequeueMoveCommand(
+            job.Id,
+            job.Status,
+            sourcePath,
+            sourceIdentity,
+            targetPath,
+            targetIdentity,
+            key,
+            DateTimeOffset.UtcNow);
+    }
 
     private sealed class TestDbContextFactory(DbContextOptions<ListenArrDbContext> options)
         : IDbContextFactory<ListenArrDbContext>

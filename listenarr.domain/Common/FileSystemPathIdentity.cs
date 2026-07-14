@@ -126,6 +126,29 @@ public static partial class FileSystemPathIdentity
             comparison);
     }
 
+    public static bool AreEquivalentEndpoints(
+        string source,
+        PathIdentitySnapshot sourceIdentity,
+        string target,
+        PathIdentitySnapshot targetIdentity)
+    {
+        sourceIdentity.ValidateForPath(source);
+        targetIdentity.ValidateForPath(target);
+        if (sourceIdentity.Syntax != targetIdentity.Syntax)
+        {
+            return false;
+        }
+
+        var comparisonSensitivity = sourceIdentity.CaseSensitivity == FileSystemCaseSensitivity.Insensitive
+            || targetIdentity.CaseSensitivity == FileSystemCaseSensitivity.Insensitive
+                ? FileSystemCaseSensitivity.Insensitive
+                : FileSystemCaseSensitivity.Sensitive;
+        return AreEquivalent(
+            source,
+            target,
+            new FileSystemPathSemantics(sourceIdentity.Syntax, comparisonSensitivity));
+    }
+
     public static FileSystemPathSemantics ResolveComparisonSemantics(
         FileSystemCaseSensitivity existingResolvedSensitivity,
         FileSystemPathSemantics requestedSemantics)

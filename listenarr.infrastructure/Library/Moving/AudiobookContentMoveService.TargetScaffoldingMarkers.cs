@@ -105,21 +105,6 @@ internal sealed partial class AudiobookContentMoveService
         }
     }
 
-    private static void DeleteOwnedScaffoldTree(string root)
-    {
-        ValidateExistingMoveDirectory(root, "owned target scaffold cleanup root");
-        if (!FileSystemSafety.TryEnumerateTreeWithoutLinks(
-                root,
-                out _,
-                out _,
-                out var reason))
-        {
-            throw new MoveNeedsAttentionException(reason);
-        }
-
-        Directory.Delete(root, recursive: true);
-    }
-
     private static int GetPathDepth(string path) =>
         Path.GetFullPath(path)
             .Split(

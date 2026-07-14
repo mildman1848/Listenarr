@@ -114,22 +114,12 @@ public sealed partial class LibraryMoveWorkflow
         string source,
         PathIdentitySnapshot sourceIdentity,
         string target,
-        PathIdentitySnapshot targetIdentity)
-    {
-        if (sourceIdentity.Syntax != targetIdentity.Syntax)
-        {
-            return false;
-        }
-
-        var comparisonSensitivity = sourceIdentity.CaseSensitivity == FileSystemCaseSensitivity.Insensitive
-            || targetIdentity.CaseSensitivity == FileSystemCaseSensitivity.Insensitive
-                ? FileSystemCaseSensitivity.Insensitive
-                : FileSystemCaseSensitivity.Sensitive;
-        return FileSystemPathIdentity.AreEquivalent(
+        PathIdentitySnapshot targetIdentity) =>
+        FileSystemPathIdentity.AreEquivalentEndpoints(
             source,
+            sourceIdentity,
             target,
-            new FileSystemPathSemantics(sourceIdentity.Syntax, comparisonSensitivity));
-    }
+            targetIdentity);
 
     private sealed record MoveRootBoundary(
         string Path,

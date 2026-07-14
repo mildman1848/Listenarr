@@ -73,6 +73,17 @@ namespace Listenarr.Application.Audiobooks.Jobs
                 command.TargetIdentity.Syntax);
             command.SourceIdentity.ValidateForPath(source);
             command.TargetIdentity.ValidateForPath(target);
+            if (FileSystemPathIdentity.AreEquivalentEndpoints(
+                    source,
+                    command.SourceIdentity,
+                    target,
+                    command.TargetIdentity))
+            {
+                throw new ArgumentException(
+                    "Move source and target paths must be distinct.",
+                    nameof(command));
+            }
+
             var deduplicationKey = BuildDeduplicationKey(
                 command.AudiobookId,
                 target,

@@ -8,6 +8,8 @@
  * (at your option) any later version.
  */
 
+using Listenarr.Domain.Common;
+
 namespace Listenarr.Application.Audiobooks.Contracts;
 
 public sealed record MoveQueueHealthSnapshot(
@@ -16,6 +18,29 @@ public sealed record MoveQueueHealthSnapshot(
     int RetryCount,
     int ExpiredLeaseCount,
     int NeedsAttentionCount);
+
+public enum MoveRequeueOutcome
+{
+    Requeued,
+    AlreadyQueuedWithMatchingIdentity,
+    ConflictingActiveJob,
+    StaleState,
+    NotFound
+}
+
+public sealed record RequeueMoveCommand(
+    Guid JobId,
+    MoveJobStatus ExpectedStatus,
+    string SourcePath,
+    PathIdentitySnapshot SourceIdentity,
+    string TargetPath,
+    PathIdentitySnapshot TargetIdentity,
+    string DeduplicationKey,
+    DateTimeOffset UpdatedAt);
+
+public sealed record MoveRequeueResult(
+    MoveRequeueOutcome Outcome,
+    MoveJob? Job = null);
 
 public interface IMoveQueuePersistence
 {
@@ -33,7 +58,9 @@ public interface IMoveQueuePersistence
 
     Task AddAsync(MoveJob job, CancellationToken cancellationToken = default);
 
-    Task RequeueAsync(MoveJob job, CancellationToken cancellationToken = default);
+    Task<MoveRequeueResult> RequeueAsync(
+        RequeueMoveCommand command,
+        CancellationToken cancellationToken = default);
 
     Task<bool> UpdateStatusAsync(
         Guid id,

@@ -72,34 +72,65 @@ internal sealed partial class AudiobookContentMoveService
             ?? throw new MoveNeedsAttentionException(
                 "The target scaffold root has no parent directory.");
         var temporaryRoot = GetTemporaryScaffoldRoot(parent, request.JobId);
-        if (Directory.Exists(temporaryRoot))
+        var quarantine = Path.Join(parent, $".listenarr-scaffold-cleanup-{request.JobId:N}");
+        await CleanupTargetScaffoldArtifactAsync(
+            temporaryRoot,
+            publishedRoot,
+            scaffolding,
+            request,
+            TargetScaffoldTemporaryArtifactType,
+            injectQuarantineDeleteFaults: false,
+            cancellationToken);
+
+        var quarantineTombstonePath = GetCleanupTombstonePath(
+            quarantine,
+            TargetScaffoldQuarantineArtifactType,
+            request.JobId);
+        var hasQuarantineTombstone = HasOwnershipMarkerEvidence(quarantineTombstonePath);
+        var publishedExists = IsSafeExistingScaffoldDirectory(
+            publishedRoot,
+            "published target scaffold");
+        var quarantineExists = IsSafeExistingScaffoldDirectory(
+            quarantine,
+            "target scaffold cleanup quarantine");
+
+        if (publishedExists && quarantineExists)
         {
-            ValidateScaffoldMarker(
-                ReadScaffoldMarker(temporaryRoot),
-                request.JobId,
-                request.Target,
-                publishedRoot,
-                request.TargetSemantics);
-            await EnsureMutationAuthorizedAsync(
-                request,
-                request.Source,
-                request.Target,
-                cancellationToken);
-            DeleteOwnedScaffoldTree(temporaryRoot);
+            throw new MoveNeedsAttentionException(
+                "Both the published target scaffold and its cleanup quarantine exist.");
         }
 
-        if (!Directory.Exists(publishedRoot))
+        if (quarantineExists)
         {
-            foreach (var directory in scaffolding.Where(directory =>
-                directory.State != MoveCreatedDirectoryState.Removed))
+            await ResumeTargetScaffoldQuarantineAsync(
+                request,
+                scaffolding,
+                publishedRoot,
+                quarantine,
+                cancellationToken);
+            return;
+        }
+
+        if (!publishedExists)
+        {
+            if (hasQuarantineTombstone)
             {
-                await UpdateCreatedDirectoryStateAsync(
-                    request.JobId,
-                    request.LeaseToken,
-                    directory.Path,
-                    MoveCreatedDirectoryState.Removed,
+                await CleanupTargetScaffoldArtifactAsync(
+                    quarantine,
+                    publishedRoot,
+                    scaffolding,
+                    request,
+                    TargetScaffoldQuarantineArtifactType,
+                    injectQuarantineDeleteFaults: true,
                     cancellationToken);
             }
+
+            await MarkRemovedScaffoldingAsync(
+                request,
+                scaffolding,
+                publishedRoot,
+                quarantine,
+                cancellationToken);
             return;
         }
 
@@ -108,6 +139,17 @@ internal sealed partial class AudiobookContentMoveService
         {
             if (scaffolding.All(directory => directory.State == MoveCreatedDirectoryState.Retained))
             {
+                if (hasQuarantineTombstone)
+                {
+                    await CleanupTargetScaffoldArtifactAsync(
+                        quarantine,
+                        publishedRoot,
+                        scaffolding,
+                        request,
+                        TargetScaffoldQuarantineArtifactType,
+                        injectQuarantineDeleteFaults: true,
+                        cancellationToken);
+                }
                 return;
             }
 
@@ -127,6 +169,18 @@ internal sealed partial class AudiobookContentMoveService
                 request.Target,
                 request.TargetSemantics))
         {
+            if (hasQuarantineTombstone)
+            {
+                await CleanupTargetScaffoldArtifactAsync(
+                    quarantine,
+                    publishedRoot,
+                    scaffolding,
+                    request,
+                    TargetScaffoldQuarantineArtifactType,
+                    injectQuarantineDeleteFaults: true,
+                    cancellationToken);
+            }
+
             foreach (var directory in scaffolding.Where(directory =>
                 directory.State != MoveCreatedDirectoryState.Retained))
             {
@@ -151,29 +205,167 @@ internal sealed partial class AudiobookContentMoveService
             return;
         }
 
-        var quarantine = Path.Join(parent, $".listenarr-scaffold-cleanup-{request.JobId:N}");
-        if (Directory.Exists(quarantine) || File.Exists(quarantine))
-        {
-            throw new MoveNeedsAttentionException(
-                "A prior target scaffold cleanup artifact already exists.");
-        }
-
+        await MarkScaffoldingCleanupIntentAsync(
+            request,
+            scaffolding,
+            cancellationToken);
+        await EnsureTargetScaffoldCleanupTombstoneAsync(
+            quarantine,
+            publishedRoot,
+            request,
+            TargetScaffoldQuarantineArtifactType,
+            cancellationToken);
+        faultInjector?.OnTargetScaffoldCleanup(
+            request.JobId,
+            TargetScaffoldCleanupFaultPoint.BeforeQuarantineRename);
         await EnsureMutationAuthorizedAsync(
             request,
             request.Source,
             request.Target,
             cancellationToken);
-        Directory.Move(publishedRoot, quarantine);
-        DeleteOwnedScaffoldTree(quarantine);
-        foreach (var directory in scaffolding.Where(directory =>
-            directory.State != MoveCreatedDirectoryState.Removed))
+        IsSafeExistingScaffoldDirectory(
+            publishedRoot,
+            "published target scaffold");
+        ValidateScaffoldMarker(
+            ReadScaffoldMarker(publishedRoot),
+            request.JobId,
+            request.Target,
+            publishedRoot,
+            request.TargetSemantics);
+        if (!IsPublishedScaffoldEmpty(
+                publishedRoot,
+                scaffolding,
+                request.Target,
+                request.TargetSemantics))
         {
+            throw new MoveNeedsAttentionException(
+                "Published target scaffolding changed before cleanup quarantine publication.");
+        }
+        Directory.Move(publishedRoot, quarantine);
+        faultInjector?.OnTargetScaffoldCleanup(
+            request.JobId,
+            TargetScaffoldCleanupFaultPoint.AfterQuarantineRename);
+        await ResumeTargetScaffoldQuarantineAsync(
+            request,
+            scaffolding,
+            publishedRoot,
+            quarantine,
+            cancellationToken);
+    }
+
+    private async Task ResumeTargetScaffoldQuarantineAsync(
+        AudiobookContentMoveRequest request,
+        IReadOnlyCollection<MoveJobCreatedDirectory> scaffolding,
+        string publishedRoot,
+        string quarantine,
+        CancellationToken cancellationToken)
+    {
+        if (TryGetExistingPathAttributes(publishedRoot, out _))
+        {
+            throw new MoveNeedsAttentionException(
+                "The published target scaffold was recreated after cleanup began.");
+        }
+
+        faultInjector?.OnTargetScaffoldCleanup(
+            request.JobId,
+            TargetScaffoldCleanupFaultPoint.BeforeQuarantineValidation);
+        var tombstonePath = GetCleanupTombstonePath(
+            quarantine,
+            TargetScaffoldQuarantineArtifactType,
+            request.JobId);
+        ValidateTargetScaffoldArtifactTree(
+            quarantine,
+            publishedRoot,
+            scaffolding,
+            request,
+            requireScaffoldMarker: !HasOwnershipMarkerEvidence(tombstonePath));
+        await MarkScaffoldingCleanupIntentAsync(
+            request,
+            scaffolding,
+            cancellationToken);
+        await EnsureMutationAuthorizedAsync(
+            request,
+            request.Source,
+            request.Target,
+            cancellationToken);
+        if (TryGetExistingPathAttributes(publishedRoot, out _))
+        {
+            throw new MoveNeedsAttentionException(
+                "The published target scaffold was recreated while cleanup was being validated.");
+        }
+
+        faultInjector?.OnTargetScaffoldCleanup(
+            request.JobId,
+            TargetScaffoldCleanupFaultPoint.BeforeQuarantineDelete);
+        await CleanupTargetScaffoldArtifactAsync(
+            quarantine,
+            publishedRoot,
+            scaffolding,
+            request,
+            TargetScaffoldQuarantineArtifactType,
+            injectQuarantineDeleteFaults: true,
+            cancellationToken);
+        faultInjector?.OnTargetScaffoldCleanup(
+            request.JobId,
+            TargetScaffoldCleanupFaultPoint.AfterQuarantineDelete);
+        await MarkRemovedScaffoldingAsync(
+            request,
+            scaffolding,
+            publishedRoot,
+            quarantine,
+            cancellationToken);
+    }
+
+    private async Task MarkScaffoldingCleanupIntentAsync(
+        AudiobookContentMoveRequest request,
+        IEnumerable<MoveJobCreatedDirectory> scaffolding,
+        CancellationToken cancellationToken)
+    {
+        foreach (var directory in scaffolding.Where(directory =>
+            directory.State is MoveCreatedDirectoryState.Planned
+                or MoveCreatedDirectoryState.Retained))
+        {
+            faultInjector?.OnTargetScaffoldCleanup(
+                request.JobId,
+                TargetScaffoldCleanupFaultPoint.BeforeCleanupIntentStateUpdate);
+            await UpdateCreatedDirectoryStateAsync(
+                request.JobId,
+                request.LeaseToken,
+                directory.Path,
+                MoveCreatedDirectoryState.Created,
+                cancellationToken);
+            directory.State = MoveCreatedDirectoryState.Created;
+        }
+    }
+
+    private async Task MarkRemovedScaffoldingAsync(
+        AudiobookContentMoveRequest request,
+        IEnumerable<MoveJobCreatedDirectory> scaffolding,
+        string publishedRoot,
+        string quarantine,
+        CancellationToken cancellationToken)
+    {
+        foreach (var directory in scaffolding.Where(directory =>
+            directory.State is not (
+                MoveCreatedDirectoryState.Removed or MoveCreatedDirectoryState.Retained)))
+        {
+            faultInjector?.OnTargetScaffoldCleanup(
+                request.JobId,
+                TargetScaffoldCleanupFaultPoint.BeforeRemovedStateUpdate);
+            if (TryGetExistingPathAttributes(publishedRoot, out _)
+                || TryGetExistingPathAttributes(quarantine, out _))
+            {
+                throw new MoveNeedsAttentionException(
+                    "Target scaffold cleanup state cannot be marked removed while an owned artifact still exists or the published path was recreated.");
+            }
+
             await UpdateCreatedDirectoryStateAsync(
                 request.JobId,
                 request.LeaseToken,
                 directory.Path,
                 MoveCreatedDirectoryState.Removed,
                 cancellationToken);
+            directory.State = MoveCreatedDirectoryState.Removed;
         }
     }
 }

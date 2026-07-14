@@ -90,6 +90,30 @@ public sealed partial class RootFolderRelocationService(
                 "The current root folder path is invalid or unavailable; use metadata-only path change to repair it before relocating files.");
         }
 
+        if (sourceResolution != null && command.Mode != RootFolderRelocationMode.MetadataOnly)
+        {
+            var sourceRootIdentity = PathIdentitySnapshot.FromResolution(
+                sourceResolution.Semantics,
+                root.CaseSensitivityMode,
+                sourceResolution.BoundaryPath,
+                root.Path);
+            var targetRootIdentity = PathIdentitySnapshot.FromResolution(
+                targetResolution.Semantics,
+                command.TargetCaseSensitivityMode,
+                targetResolution.BoundaryPath,
+                targetPath);
+            if (FileSystemPathIdentity.AreEquivalentEndpoints(
+                    root.Path,
+                    sourceRootIdentity,
+                    targetPath,
+                    targetRootIdentity))
+            {
+                throw new ArgumentException(
+                    "Root folder relocation source and target paths must be distinct.",
+                    nameof(command));
+            }
+        }
+
         var storedSourcePathSemantics = sourceResolution == null
             ? ResolveStoredSourcePathSemantics(root)
             : new StoredSourcePathSemantics(sourceResolution.Semantics, false);
@@ -328,6 +352,16 @@ public sealed partial class RootFolderRelocationService(
                 command.TargetCaseSensitivityMode,
                 targetPath,
                 requestedPath);
+            if (FileSystemPathIdentity.AreEquivalentEndpoints(
+                    candidate.StoredBasePath,
+                    sourceIdentity,
+                    requestedPath,
+                    targetIdentity))
+            {
+                throw new InvalidOperationException(
+                    "Root folder relocation produced an identical source and target child move.");
+            }
+
             var moveJob = new MoveJob
             {
                 AudiobookId = audiobook.Id,

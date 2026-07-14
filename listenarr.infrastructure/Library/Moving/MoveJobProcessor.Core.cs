@@ -73,6 +73,49 @@ internal partial class MoveJobProcessor
                 }
 
                 recoverySourceSemantics = recoverySourceIdentity.Semantics;
+                if (FileSystemPathIdentity.AreEquivalentEndpoints(
+                        source,
+                        recoverySourceIdentity,
+                        target,
+                        targetIdentity))
+                {
+                    try
+                    {
+                        await contentMoveService.VerifyNoFilesystemMoveStartedAsync(
+                            new AudiobookContentMoveRequest(
+                                source,
+                                target,
+                                job.Id,
+                                job.DeleteEmptySource,
+                                recoverySourceIdentity.Semantics,
+                                targetSemantics,
+                                CreateLeaseToken(job)),
+                            stoppingToken);
+                    }
+                    catch (MoveNeedsAttentionException exception)
+                    {
+                        await UpdateJobStatusAsync(
+                            job,
+                            MoveJobStatus.NeedsAttention,
+                            exception.Message,
+                            stoppingToken);
+                        metrics.Increment("worker.move.job.needs_attention");
+                        logger.LogWarning(
+                            exception,
+                            "Identical-endpoint move job {JobId} has execution evidence and was preserved",
+                            job.Id);
+                        return;
+                    }
+
+                    await UpdateJobStatusAsync(
+                        job,
+                        MoveJobStatus.Superseded,
+                        "Superseded because the persisted source and target endpoints are identical.",
+                        stoppingToken);
+                    metrics.Increment("worker.move.job.skipped");
+                    return;
+                }
+
                 cleanupBoundaryResolution = await cleanupBoundaryResolver.ResolveAsync(
                     source,
                     target,
@@ -208,17 +251,6 @@ internal partial class MoveJobProcessor
                     job.Id,
                     LogRedaction.SanitizeFilePath(source),
                     LogRedaction.SanitizeFilePath(target));
-                return;
-            }
-
-            if (recoveredMove == null
-                && FileSystemPathIdentity.AreEquivalent(
-                    source.TrimEnd(Path.DirectorySeparatorChar),
-                    target.TrimEnd(Path.DirectorySeparatorChar),
-                    sourceSemantics))
-            {
-                await UpdateJobStatusAsync(job, MoveJobStatus.Completed, cancellationToken: stoppingToken);
-                metrics.Increment("worker.move.job.skipped");
                 return;
             }
 

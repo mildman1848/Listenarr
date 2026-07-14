@@ -85,6 +85,42 @@ public sealed class RootFolderRelocationServiceTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task StartRelocation_IdenticalSourceAndTarget_RejectsBeforePersistingChildJobs()
+    {
+        var source = Path.Join(Path.GetTempPath(), $"relocation-identical-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(Path.Join(source, "Author", "Title"));
+        int rootId;
+        await using (var db = await _factory.CreateDbContextAsync())
+        {
+            var root = new RootFolder { Name = "Library", Path = source };
+            db.RootFolders.Add(root);
+            db.Audiobooks.Add(new Audiobook
+            {
+                Title = "Title",
+                BasePath = Path.Join(source, "Author", "Title")
+            });
+            await db.SaveChangesAsync();
+            rootId = root.Id;
+        }
+
+        var exception = await Assert.ThrowsAsync<ArgumentException>(() =>
+            CreateService().StartAsync(
+                rootId,
+                new RootFolderPathChangeCommand(
+                    source,
+                    RootFolderRelocationMode.Relocate,
+                    true,
+                    "Library",
+                    false,
+                    FileSystemCaseSensitivityMode.Auto)));
+
+        Assert.Contains("distinct", exception.Message, StringComparison.OrdinalIgnoreCase);
+        await using var verification = await _factory.CreateDbContextAsync();
+        Assert.Empty(await verification.RootFolderRelocations.ToListAsync());
+        Assert.Empty(await verification.MoveJobs.ToListAsync());
+    }
+
+    [Fact]
     public async Task MetadataOnlyPathChange_RepairsInvalidStoredRootPath()
     {
         var target = Path.Join(Path.GetTempPath(), $"repair-root-{Guid.NewGuid():N}");

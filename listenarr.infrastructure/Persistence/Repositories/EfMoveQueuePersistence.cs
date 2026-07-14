@@ -117,39 +117,6 @@ public sealed partial class EfMoveQueuePersistence(
         await db.SaveChangesAsync(cancellationToken);
     }
 
-    public async Task RequeueAsync(MoveJob job, CancellationToken cancellationToken = default)
-    {
-        try
-        {
-            await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
-            var persistedJob = await db.MoveJobs.SingleOrDefaultAsync(
-                candidate => candidate.Id == job.Id,
-                cancellationToken);
-            if (persistedJob == null)
-            {
-                throw new PersistenceException(
-                    $"Move job {job.Id} no longer exists.",
-                    new InvalidOperationException("Move job not found."));
-            }
-
-            persistedJob.Status = job.Status;
-            persistedJob.Phase = job.Phase;
-            persistedJob.Error = job.Error;
-            persistedJob.FailureKind = job.FailureKind;
-            persistedJob.AttemptCount = job.AttemptCount;
-            persistedJob.NextAttemptAt = job.NextAttemptAt;
-            persistedJob.LeaseOwner = null;
-            persistedJob.LeaseExpiresAt = null;
-            persistedJob.UpdatedAt = job.UpdatedAt;
-            persistedJob.ActiveDeduplicationKey = job.ActiveDeduplicationKey;
-            await db.SaveChangesAsync(cancellationToken);
-        }
-        catch (Exception ex) when (ex is DbException or DbUpdateException)
-        {
-            throw new PersistenceException("Failed to requeue move job persistence.", ex);
-        }
-    }
-
     public async Task<bool> UpdateStatusAsync(
         Guid id,
         string leaseOwner,

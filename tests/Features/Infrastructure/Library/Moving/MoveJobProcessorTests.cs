@@ -421,8 +421,11 @@ namespace Listenarr.Tests.Features.Infrastructure.Library.Moving
         public async Task ProcessJobAsync_CanceledToken_ThrowsBeforeStateChange()
         {
             var src = FileService.GetTempDirectory("move-processor-cancel");
+            var target = Path.Join(
+                FileService.GetTempPath(),
+                $"move-processor-cancel-dst-{Guid.NewGuid():N}");
             var audiobook = await _audiobookRepository.AddAsync(new Audiobook { Title = "Move Processor Cancel", BasePath = src });
-            var (queue, job) = await CreateQueuedMoveJobAsync(audiobook, src, src);
+            var (queue, job) = await CreateQueuedMoveJobAsync(audiobook, target, src);
             using var cts = new CancellationTokenSource();
             await cts.CancelAsync();
 
@@ -435,26 +438,122 @@ namespace Listenarr.Tests.Features.Infrastructure.Library.Moving
         }
 
         [Fact]
-        public async Task ProcessJobAsync_ReplayedNoOpJob_RemainsCompleted()
+        public async Task ProcessJobAsync_LegacyIdenticalEndpoint_IsSupersededWithoutHistoryOrScanHandoff()
         {
-            var src = FileService.GetTempDirectory("move-processor-replay");
-            await FileService.GetFileAsync(src, "book.m4b", "audio");
-            var audiobook = await _audiobookRepository.AddAsync(new Audiobook { Title = "Move Processor Replay", BasePath = src });
-            var (queue, job) = await CreateQueuedMoveJobAsync(audiobook, src, src);
+            var src = FileService.GetTempDirectory("move-processor-identical-legacy");
+            var sourceFile = await FileService.GetFileAsync(src, "book.m4b", "audio");
+            var audiobook = await _audiobookRepository.AddAsync(new Audiobook
+            {
+                Title = "Move Processor Identical Legacy",
+                BasePath = src
+            });
+            var syntax = FileSystemPathSemantics.CurrentHostDefault.Syntax;
+            var identity = new PathIdentitySnapshot(
+                syntax,
+                FileSystemPathSemantics.CurrentHostDefault.CaseSensitivity,
+                FileSystemCaseSensitivityMode.Auto,
+                src);
+            var legacyJob = new MoveJob
+            {
+                Id = Guid.NewGuid(),
+                AudiobookId = audiobook.Id,
+                SourcePath = src,
+                RequestedPath = src,
+                Status = MoveJobStatus.Queued,
+                ActiveDeduplicationKey = $"legacy-identical:{Guid.NewGuid():N}"
+            };
+            legacyJob.SetSourceIdentity(identity);
+            legacyJob.SetTargetIdentity(identity);
+            var factory = _provider.GetRequiredService<IDbContextFactory<ListenArrDbContext>>();
+            await using (var db = await factory.CreateDbContextAsync())
+            {
+                db.MoveJobs.Add(legacyJob);
+                await db.SaveChangesAsync();
+            }
 
-            var processor = _provider.GetRequiredService<IMoveJobProcessor>();
-            await processor.ProcessJobAsync(job, CancellationToken.None);
-            var replayedJobId = await queue.RequeueMoveAsync(job.Id);
-            Assert.NotNull(replayedJobId);
-            var replayedJob = await queue.GetJobAsync(replayedJobId.Value);
-            Assert.NotNull(replayedJob);
-            await PrepareJobForProcessingAsync(queue, replayedJob!);
-            await processor.ProcessJobAsync(replayedJob!, CancellationToken.None);
+            var queue = _provider.GetRequiredService<IMoveQueueService>();
+            var job = await queue.GetJobAsync(legacyJob.Id);
+            Assert.NotNull(job);
+            await PrepareJobForProcessingAsync(queue, job!);
 
-            var updatedJob = await queue.GetJobAsync(job.Id);
+            await _provider.GetRequiredService<IMoveJobProcessor>()
+                .ProcessJobAsync(job!, CancellationToken.None);
+
+            var updatedJob = await queue.GetJobAsync(legacyJob.Id);
             Assert.NotNull(updatedJob);
-            Assert.Equal(MoveJobStatus.Completed, updatedJob!.Status);
-            Assert.True(File.Exists(Path.Join(src, "book.m4b")));
+            Assert.Equal(MoveJobStatus.Superseded, updatedJob!.Status);
+            Assert.Contains("identical", updatedJob.Error, StringComparison.OrdinalIgnoreCase);
+            Assert.Null(updatedJob.ActiveDeduplicationKey);
+            Assert.Null(updatedJob.LeaseOwner);
+            Assert.Null(updatedJob.LeaseExpiresAt);
+            Assert.True(File.Exists(sourceFile));
+            Assert.Empty(await _historyRepository.GetByCorrelationIdAsync($"move:{legacyJob.Id:N}"));
+            await using var verification = await factory.CreateDbContextAsync();
+            Assert.False(await verification.MoveScanHandoffs
+                .AnyAsync(handoff => handoff.MoveJobId == legacyJob.Id));
+        }
+
+        [Fact]
+        public async Task ProcessJobAsync_LegacyIdenticalEndpointWithExecutionState_PreservesForAttention()
+        {
+            var src = FileService.GetTempDirectory("move-processor-identical-evidence");
+            var sourceFile = await FileService.GetFileAsync(src, "book.m4b", "audio");
+            var audiobook = await _audiobookRepository.AddAsync(new Audiobook
+            {
+                Title = "Move Processor Identical Evidence",
+                BasePath = src
+            });
+            var identity = new PathIdentitySnapshot(
+                FileSystemPathSemantics.CurrentHostDefault.Syntax,
+                FileSystemPathSemantics.CurrentHostDefault.CaseSensitivity,
+                FileSystemCaseSensitivityMode.Auto,
+                src);
+            var legacyJob = new MoveJob
+            {
+                Id = Guid.NewGuid(),
+                AudiobookId = audiobook.Id,
+                SourcePath = src,
+                RequestedPath = src,
+                Status = MoveJobStatus.Queued,
+                ActiveDeduplicationKey = $"legacy-identical-evidence:{Guid.NewGuid():N}"
+            };
+            legacyJob.SetSourceIdentity(identity);
+            legacyJob.SetTargetIdentity(identity);
+            var factory = _provider.GetRequiredService<IDbContextFactory<ListenArrDbContext>>();
+            await using (var db = await factory.CreateDbContextAsync())
+            {
+                db.MoveJobs.Add(legacyJob);
+                db.MoveJobEntries.Add(new MoveJobEntry
+                {
+                    MoveJobId = legacyJob.Id,
+                    RelativePath = "book.m4b",
+                    EntryType = MoveJobEntryType.File
+                });
+                await db.SaveChangesAsync();
+            }
+
+            var queue = _provider.GetRequiredService<IMoveQueueService>();
+            var job = await queue.GetJobAsync(legacyJob.Id);
+            Assert.NotNull(job);
+            await PrepareJobForProcessingAsync(queue, job!);
+
+            await _provider.GetRequiredService<IMoveJobProcessor>()
+                .ProcessJobAsync(job!, CancellationToken.None);
+
+            var updatedJob = await queue.GetJobAsync(legacyJob.Id);
+            Assert.NotNull(updatedJob);
+            Assert.Equal(MoveJobStatus.NeedsAttention, updatedJob!.Status);
+            Assert.Contains("durable move execution state", updatedJob.Error, StringComparison.OrdinalIgnoreCase);
+            Assert.Null(updatedJob.ActiveDeduplicationKey);
+            Assert.Null(updatedJob.LeaseOwner);
+            Assert.Null(updatedJob.LeaseExpiresAt);
+            Assert.True(File.Exists(sourceFile));
+            Assert.Empty(await _historyRepository.GetByCorrelationIdAsync($"move:{legacyJob.Id:N}"));
+            await using var verification = await factory.CreateDbContextAsync();
+            Assert.True(await verification.MoveJobEntries
+                .AnyAsync(entry => entry.MoveJobId == legacyJob.Id));
+            Assert.False(await verification.MoveScanHandoffs
+                .AnyAsync(handoff => handoff.MoveJobId == legacyJob.Id));
         }
 
         [Fact]
