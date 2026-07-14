@@ -55,7 +55,7 @@ internal sealed partial class AudiobookContentMoveService
             publishedRoot,
             request,
             artifactType);
-        var hasTombstoneEvidence = HasOwnershipMarkerEvidence(tombstonePath);
+        var hasTombstoneEvidence = HasCleanupTombstoneEvidence(tombstonePath);
         var artifactExists = IsSafeExistingScaffoldDirectory(
             artifactRoot,
             "target scaffold cleanup artifact");
@@ -143,12 +143,12 @@ internal sealed partial class AudiobookContentMoveService
         return true;
     }
 
-    private static bool HasOwnershipMarkerEvidence(string markerPath)
+    private static bool HasCleanupTombstoneEvidence(string markerPath)
     {
         var parent = Path.GetDirectoryName(Path.GetFullPath(markerPath))
             ?? throw new MoveNeedsAttentionException(
-                "The target scaffold cleanup tombstone parent is unavailable.");
-        ValidateExistingMoveDirectory(parent, "target scaffold cleanup tombstone directory");
+                "The cleanup tombstone parent is unavailable.");
+        ValidateExistingMoveDirectory(parent, "cleanup tombstone directory");
         return File.Exists(markerPath)
             || Directory.EnumerateFiles(
                 parent,

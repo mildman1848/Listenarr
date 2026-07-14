@@ -92,18 +92,44 @@ internal sealed partial class AudiobookContentMoveService
             parent,
             Path.GetFileName(endpoint) + ".tmp-" + jobId.ToString("N"));
         var quarantine = Path.Join(parent, $".listenarr-quarantine-{jobId:N}");
+        var targetScaffoldTemporary = Path.Join(
+            parent,
+            $".listenarr-scaffold-{jobId:N}");
+        var targetScaffoldQuarantine = Path.Join(
+            parent,
+            $".listenarr-scaffold-cleanup-{jobId:N}");
         var possibleArtifacts = new[]
         {
             tempDirectory,
             quarantine,
-            Path.Join(parent, $".listenarr-scaffold-{jobId:N}"),
-            Path.Join(parent, $".listenarr-scaffold-cleanup-{jobId:N}"),
+            targetScaffoldTemporary,
+            targetScaffoldQuarantine,
             GetCleanupDirectoryPath(tempDirectory, TemporaryDirectoryArtifactType, jobId),
-            GetCleanupTombstonePath(tempDirectory, TemporaryDirectoryArtifactType, jobId),
-            GetCleanupDirectoryPath(quarantine, QuarantineDirectoryArtifactType, jobId),
-            GetCleanupTombstonePath(quarantine, QuarantineDirectoryArtifactType, jobId)
+            GetCleanupDirectoryPath(quarantine, QuarantineDirectoryArtifactType, jobId)
         };
-        if (possibleArtifacts.Any(path => TryGetExistingPathAttributes(path, out _)))
+        var cleanupTombstones = new[]
+        {
+            GetCleanupTombstonePath(tempDirectory, TemporaryDirectoryArtifactType, jobId),
+            GetCleanupTombstonePath(quarantine, QuarantineDirectoryArtifactType, jobId),
+            GetCleanupTombstonePath(
+                targetScaffoldTemporary,
+                TargetScaffoldTemporaryArtifactType,
+                jobId),
+            GetCleanupTombstonePath(
+                targetScaffoldQuarantine,
+                TargetScaffoldQuarantineArtifactType,
+                jobId)
+        };
+        var hasSiblingArtifact = possibleArtifacts.Any(path =>
+            TryGetExistingPathAttributes(path, out _));
+        var hasCleanupTombstone = false;
+        if (TryGetExistingPathAttributes(parent, out _))
+        {
+            ValidateExistingMoveDirectory(parent, "identical-endpoint artifact directory");
+            hasCleanupTombstone = cleanupTombstones.Any(HasCleanupTombstoneEvidence);
+        }
+
+        if (hasSiblingArtifact || hasCleanupTombstone)
         {
             throw new MoveNeedsAttentionException(
                 "The identical-endpoint job has move-owned sibling artifacts and cannot be superseded automatically.");

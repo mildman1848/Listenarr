@@ -86,7 +86,7 @@ internal sealed partial class AudiobookContentMoveService
             quarantine,
             TargetScaffoldQuarantineArtifactType,
             request.JobId);
-        var hasQuarantineTombstone = HasOwnershipMarkerEvidence(quarantineTombstonePath);
+        var hasQuarantineTombstone = HasCleanupTombstoneEvidence(quarantineTombstonePath);
         var publishedExists = IsSafeExistingScaffoldDirectory(
             publishedRoot,
             "published target scaffold");
@@ -278,7 +278,7 @@ internal sealed partial class AudiobookContentMoveService
             publishedRoot,
             scaffolding,
             request,
-            requireScaffoldMarker: !HasOwnershipMarkerEvidence(tombstonePath));
+            requireScaffoldMarker: !HasCleanupTombstoneEvidence(tombstonePath));
         await MarkScaffoldingCleanupIntentAsync(
             request,
             scaffolding,

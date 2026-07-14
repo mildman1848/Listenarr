@@ -334,7 +334,7 @@ internal sealed partial class AudiobookContentMoveService
                     throw new MoveNeedsAttentionException($"Source file disappeared before cleanup: {entry.RelativePath}");
                 }
 
-                quarantineOwnership = await RevalidateSourceToQuarantineMoveAsync(
+                await RevalidateSourceToQuarantineMoveAsync(
                     source,
                     target,
                     sourceFile,
@@ -385,7 +385,7 @@ internal sealed partial class AudiobookContentMoveService
                 entry.RelativePath,
                 MoveJobEntryCleanupState.Quarantined,
                 cancellationToken);
-            quarantineOwnership = await RevalidateQuarantineDeleteAsync(
+            await RevalidateQuarantineDeleteAsync(
                 source,
                 target,
                 quarantineFile,

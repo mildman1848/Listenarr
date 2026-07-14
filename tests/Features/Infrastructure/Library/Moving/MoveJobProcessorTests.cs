@@ -493,6 +493,88 @@ namespace Listenarr.Tests.Features.Infrastructure.Library.Moving
                 .AnyAsync(handoff => handoff.MoveJobId == legacyJob.Id));
         }
 
+        [Theory]
+        [InlineData("temporary-directory", false)]
+        [InlineData("temporary-directory", true)]
+        [InlineData("quarantine-directory", false)]
+        [InlineData("quarantine-directory", true)]
+        [InlineData("target-scaffold-temporary", false)]
+        [InlineData("target-scaffold-temporary", true)]
+        [InlineData("target-scaffold-quarantine", false)]
+        [InlineData("target-scaffold-quarantine", true)]
+        public async Task ProcessJobAsync_LegacyIdenticalEndpointWithCleanupTombstone_PreservesForAttention(
+            string artifactType,
+            bool interruptedWrite)
+        {
+            var src = FileService.GetTempDirectory("move-processor-identical-tombstone");
+            var sourceFile = await FileService.GetFileAsync(src, "book.m4b", "audio");
+            var audiobook = await _audiobookRepository.AddAsync(new Audiobook
+            {
+                Title = "Move Processor Identical Tombstone",
+                BasePath = src
+            });
+            var identity = new PathIdentitySnapshot(
+                FileSystemPathSemantics.CurrentHostDefault.Syntax,
+                FileSystemPathSemantics.CurrentHostDefault.CaseSensitivity,
+                FileSystemCaseSensitivityMode.Auto,
+                src);
+            var legacyJob = new MoveJob
+            {
+                Id = Guid.NewGuid(),
+                AudiobookId = audiobook.Id,
+                SourcePath = src,
+                RequestedPath = src,
+                Status = MoveJobStatus.Queued,
+                ActiveDeduplicationKey = $"legacy-identical-tombstone:{Guid.NewGuid():N}"
+            };
+            legacyJob.SetSourceIdentity(identity);
+            legacyJob.SetTargetIdentity(identity);
+            var parent = Path.GetDirectoryName(src)!;
+            var tombstonePath = Path.Join(
+                parent,
+                $".listenarr-{artifactType}-{legacyJob.Id:N}.cleanup.json");
+            var evidencePath = interruptedWrite
+                ? tombstonePath + $".writing-{Guid.NewGuid():N}"
+                : tombstonePath;
+            await File.WriteAllTextAsync(evidencePath, "{}");
+
+            try
+            {
+                var factory = _provider.GetRequiredService<IDbContextFactory<ListenArrDbContext>>();
+                await using (var db = await factory.CreateDbContextAsync())
+                {
+                    db.MoveJobs.Add(legacyJob);
+                    await db.SaveChangesAsync();
+                }
+
+                var queue = _provider.GetRequiredService<IMoveQueueService>();
+                var job = await queue.GetJobAsync(legacyJob.Id);
+                Assert.NotNull(job);
+                await PrepareJobForProcessingAsync(queue, job!);
+
+                await _provider.GetRequiredService<IMoveJobProcessor>()
+                    .ProcessJobAsync(job!, CancellationToken.None);
+
+                var updatedJob = await queue.GetJobAsync(legacyJob.Id);
+                Assert.NotNull(updatedJob);
+                Assert.Equal(MoveJobStatus.NeedsAttention, updatedJob!.Status);
+                Assert.Contains("sibling artifacts", updatedJob.Error, StringComparison.OrdinalIgnoreCase);
+                Assert.True(File.Exists(sourceFile));
+                Assert.True(File.Exists(evidencePath));
+                Assert.Empty(await _historyRepository.GetByCorrelationIdAsync($"move:{legacyJob.Id:N}"));
+                await using var verification = await factory.CreateDbContextAsync();
+                Assert.False(await verification.MoveScanHandoffs
+                    .AnyAsync(handoff => handoff.MoveJobId == legacyJob.Id));
+            }
+            finally
+            {
+                if (File.Exists(evidencePath))
+                {
+                    File.Delete(evidencePath);
+                }
+            }
+        }
+
         [Fact]
         public async Task ProcessJobAsync_LegacyIdenticalEndpointWithExecutionState_PreservesForAttention()
         {

@@ -36,6 +36,22 @@ namespace Listenarr.Tests.Features.Infrastructure.Persistence
     [Trait("Name", "SqliteMigrationSchemaTests")]
     public class SqliteMigrationSchemaTests
     {
+        public static TheoryData<string> ChangedMigrationIds => new()
+        {
+            "20251124102000_AddMoveJobSourcePath",
+            "20260702200000_AddProcessExecutionLogs",
+            "20260703024452_AddMoveJobDeleteEmptySource",
+            "20260708223635_AddDurableFilesystemMoves",
+            "20260708224312_AddMoveJobRelocationForeignKey",
+            "20260708224430_ReconcileDurableMoveJobs",
+            "20260708224705_AddMoveJobLeaseGeneration",
+            "20260708224900_AddRootFolderRelocationSkippedItems",
+            "20260708225028_MakeRootFolderRelocationRootNullable",
+            "20260708225144_SetRootFolderRelocationRootDeleteBehavior",
+            "20260710172532_AddMoveJobSourceCleanupBoundary",
+            "20260713181804_HardenMoveExecutionAndScanHandoffs"
+        };
+
         private static (SqliteConnection Connection, ListenArrDbContext Context) CreateMigratedSqliteContext()
         {
             // Shared in-memory database lives as long as the connection is open.
@@ -121,6 +137,37 @@ namespace Listenarr.Tests.Features.Infrastructure.Persistence
                 context.Database.HasPendingModelChanges(),
                 "The configured EF model differs from the accumulated migration snapshots. "
                 + "Regenerate migrations with dotnet ef migrations add instead of hand-authoring them.");
+        }
+
+        [Theory]
+        [MemberData(nameof(ChangedMigrationIds))]
+        [Trait("Scenario", "ChangedMigrationsDowngradeAndReapply")]
+        public async Task ChangedMigration_CanDowngradeOneStepAndReapply(string migrationId)
+        {
+            await using var connection = new SqliteConnection("DataSource=:memory:");
+            await connection.OpenAsync();
+
+            var options = new DbContextOptionsBuilder<ListenArrDbContext>()
+                .UseSqlite(connection, sqlite =>
+                    sqlite.MigrationsAssembly(typeof(ListenArrDbContext).Assembly.GetName().Name))
+                .Options;
+
+            await using var context = new ListenArrDbContext(options);
+            var migrations = context.Database.GetMigrations().ToList();
+            var migrationIndex = migrations.IndexOf(migrationId);
+            Assert.True(
+                migrationIndex > 0,
+                $"Migration '{migrationId}' was not discovered or has no predecessor.");
+
+            var migrator = context.GetService<IMigrator>();
+            await migrator.MigrateAsync(migrationId);
+            Assert.Contains(migrationId, await context.Database.GetAppliedMigrationsAsync());
+
+            await migrator.MigrateAsync(migrations[migrationIndex - 1]);
+            Assert.DoesNotContain(migrationId, await context.Database.GetAppliedMigrationsAsync());
+
+            await migrator.MigrateAsync(migrationId);
+            Assert.Contains(migrationId, await context.Database.GetAppliedMigrationsAsync());
         }
 
         [Fact]
