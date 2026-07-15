@@ -110,6 +110,25 @@ public sealed partial class LibraryMoveWorkflow
                 root.Semantics.Syntax).Length)
             .FirstOrDefault();
 
+    private static bool SourceStateMatches(
+        string currentPath,
+        string expectedPath,
+        FileSystemPathSemantics semantics)
+    {
+        try
+        {
+            return FileSystemPathIdentity.AreEquivalent(
+                currentPath,
+                expectedPath,
+                semantics);
+        }
+        catch (Exception exception) when (exception is
+            ArgumentException or NotSupportedException or PathTooLongException or System.Security.SecurityException)
+        {
+            return false;
+        }
+    }
+
     private static bool AreSameMoveEndpoint(
         string source,
         PathIdentitySnapshot sourceIdentity,

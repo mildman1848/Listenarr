@@ -24,7 +24,7 @@ namespace Listenarr.Api.Features.Downloads;
 [ApiController]
 [Route("api/v{version:apiVersion}/library/manual-import")]
 [Tags("Library")]
-public class ManualImportController : ControllerBase
+public partial class ManualImportController : ControllerBase
 {
     private readonly ILogger<ManualImportController> _logger;
     private readonly IAudiobookRepository _audiobookRepository;
@@ -36,6 +36,7 @@ public class ManualImportController : ControllerBase
     private readonly IFileMover _fileMover;
     private readonly IFileSystem _fileSystem;
     private readonly IFileSystemSemanticsResolver _semanticsResolver;
+    private readonly IAudiobookOperationCoordinator _audiobookOperationCoordinator;
     private readonly ManualImportPathPlanner _pathPlanner;
     private readonly ManualImportCompanionImporter _companionImporter;
 
@@ -50,6 +51,7 @@ public class ManualImportController : ControllerBase
         IFileMover fileMover,
         IFileSystem fileSystem,
         IFileSystemSemanticsResolver semanticsResolver,
+        IAudiobookOperationCoordinator audiobookOperationCoordinator,
         ManualImportPathPlanner? pathPlanner = null,
         ManualImportCompanionImporter? companionImporter = null)
     {
@@ -63,6 +65,7 @@ public class ManualImportController : ControllerBase
         _fileMover = fileMover;
         _fileSystem = fileSystem;
         _semanticsResolver = semanticsResolver;
+        _audiobookOperationCoordinator = audiobookOperationCoordinator ?? throw new ArgumentNullException(nameof(audiobookOperationCoordinator));
         _pathPlanner = pathPlanner ?? new ManualImportPathPlanner(fileNamingService);
         _companionImporter = companionImporter ?? new ManualImportCompanionImporter(
             metadataService,
@@ -177,35 +180,61 @@ public class ManualImportController : ControllerBase
 
             _logger.LogDebug("Manual import batch: {ItemCount} items", orderedItems.Count);
 
-            foreach (var item in orderedItems)
-            {
-                var fileCount = orderedItems.Count(f => f.MatchedAudiobookId == item.MatchedAudiobookId);
-                _logger.LogDebug("Importing item {Index}: {Path} for audiobook {AudiobookId}, fileCount: {FileCount}", orderedItems.IndexOf(item), item.FullPath, item.MatchedAudiobookId, fileCount);
-                var result = await ImportFileAsync(item, request.Action, sourceDirectory, sourceSemantics, destinationTracker, rootFolders, appSettings, fileCount > 1);
-                _logger.LogDebug("Import result {Index}: Success={Success}, Destination={Destination}, Error={Error}", orderedItems.IndexOf(item), result.Success, result.DestinationPath, result.Error);
-                results.Add(result);
-            }
+            await ExecuteWithAudiobookLocksAsync(
+                orderedItems.Select(item => item.MatchedAudiobookId),
+                async () =>
+                {
+                    foreach (var item in orderedItems)
+                    {
+                        var fileCount = orderedItems.Count(candidate =>
+                            candidate.MatchedAudiobookId == item.MatchedAudiobookId);
+                        _logger.LogDebug(
+                            "Importing item {Index}: {Path} for audiobook {AudiobookId}, fileCount: {FileCount}",
+                            orderedItems.IndexOf(item),
+                            item.FullPath,
+                            item.MatchedAudiobookId,
+                            fileCount);
+                        var result = await ImportFileAsync(
+                            item,
+                            request.Action,
+                            sourceDirectory,
+                            sourceSemantics,
+                            destinationTracker,
+                            rootFolders,
+                            appSettings,
+                            fileCount > 1);
+                        _logger.LogDebug(
+                            "Import result {Index}: Success={Success}, Destination={Destination}, Error={Error}",
+                            orderedItems.IndexOf(item),
+                            result.Success,
+                            result.DestinationPath,
+                            result.Error);
+                        results.Add(result);
+                    }
 
-            if (request.IncludeCompanionFiles && request.Action != FileAction.None)
-            {
-                var companionImportCount = await _companionImporter.ImportAsync(
-                    request.Action,
-                    orderedItems,
-                    results,
-                    sourceDirectory,
-                    selectedAudioProfiles,
-                    destinationTracker,
-                    sourceSemantics,
-                    appSettings.ImportBlacklistExtensions);
-                _logger.LogInformation("Manual import companion-file pass completed with {Count} imported companion file(s)", companionImportCount);
-            }
+                    if (request.IncludeCompanionFiles && request.Action != FileAction.None)
+                    {
+                        var companionImportCount = await _companionImporter.ImportAsync(
+                            request.Action,
+                            orderedItems,
+                            results,
+                            sourceDirectory,
+                            selectedAudioProfiles,
+                            destinationTracker,
+                            sourceSemantics,
+                            appSettings.ImportBlacklistExtensions);
+                        _logger.LogInformation(
+                            "Manual import companion-file pass completed with {Count} imported companion file(s)",
+                            companionImportCount);
+                    }
 
-            if (request.CleanupEmptySourceFolders)
-            {
-                _fileSystem.DeleteEmptyDirectories(sourceDirectory);
-            }
+                    if (request.CleanupEmptySourceFolders)
+                    {
+                        _fileSystem.DeleteEmptyDirectories(sourceDirectory);
+                    }
 
-            await EnqueueFocusedScansAsync(results);
+                    await EnqueueFocusedScansAsync(results);
+                });
 
             var successCount = results.Count(r => r.Success);
             _logger.LogInformation("Manual import batch completed: {SuccessCount}/{TotalCount} succeeded, usedDestinations: {DestinationCount}", successCount, results.Count, destinationTracker.Count);
@@ -336,63 +365,6 @@ public class ManualImportController : ControllerBase
         }
     }
 
-    /// <summary>
-    /// Order a scan for each audiobook impacted by the importation and update audiobook base path
-    /// </summary>
-    /// <param name="results">List of imported files</param>
-    private async Task EnqueueFocusedScansAsync(IEnumerable<ManualImportResultDto> results)
-    {
-        if (_scanQueueService == null)
-        {
-            _logger.LogDebug("IScanQueueService not available - skipping focused scan enqueue after manual import");
-            return;
-        }
-
-        var groupedResults = results
-            .Where(r => r.Success && r.Audiobook != null && !string.IsNullOrWhiteSpace(r.DestinationPath))
-            .GroupBy(r => r.Audiobook!.Id);
-
-        foreach (var group in groupedResults)
-        {
-            var scanPath = ManualImportPathPlanner.DetermineScanPath(group
-                .Select(r => r.DestinationPath!)
-                .Where(p => !string.IsNullOrWhiteSpace(p))
-                .ToList());
-
-            if (string.IsNullOrWhiteSpace(scanPath))
-            {
-                _logger.LogDebug("No focused scan path could be determined for audiobook {AudiobookId} after manual import", group.Key);
-                continue;
-            }
-
-            var audiobook = group.First().Audiobook!;
-            await PersistAudiobookBasePathAsync(audiobook, scanPath);
-
-            try
-            {
-                var scanJobId = await _scanQueueService.EnqueueScanAsync(audiobook, scanPath);
-                _logger.LogInformation(
-                    "Enqueued focused scan {ScanJobId} for audiobook {AudiobookId} (path: {Path}) after manual import batch of {FileCount} file(s)",
-                    scanJobId,
-                    group.Key,
-                    scanPath,
-                    group.Count());
-            }
-            catch (ObjectDisposedException ex)
-            {
-                _logger.LogWarning(ex, "Failed to enqueue scan for audiobook {AudiobookId} after manual import", group.Key);
-            }
-            catch (InvalidOperationException ex)
-            {
-                _logger.LogWarning(ex, "Failed to enqueue scan for audiobook {AudiobookId} after manual import", group.Key);
-            }
-            catch (OperationCanceledException ex)
-            {
-                _logger.LogWarning(ex, "Failed to enqueue scan for audiobook {AudiobookId} after manual import", group.Key);
-            }
-        }
-    }
-
     private Task<FileSystemPathSemantics> ResolveDestinationSemanticsAsync(string? basePath)
     {
         if (string.IsNullOrWhiteSpace(basePath))
@@ -440,36 +412,6 @@ public class ManualImportController : ControllerBase
         }
 
         return false;
-    }
-
-    private async Task PersistAudiobookBasePathAsync(Audiobook audiobook, string? basePath)
-    {
-        if (string.IsNullOrWhiteSpace(basePath))
-        {
-            return;
-        }
-
-        try
-        {
-            basePath = FileUtils.NormalizeStoredPath(basePath);
-            if (_fileSystem.FileExists(basePath))
-            {
-                basePath = Path.GetDirectoryName(basePath);
-            }
-            if (!string.IsNullOrWhiteSpace(basePath) && !string.Equals(audiobook.BasePath, basePath, StringComparison.Ordinal))
-            {
-                audiobook.BasePath = basePath;
-                await _audiobookRepository.UpdateAsync(audiobook);
-                _logger.LogInformation(
-                    "Updated audiobook {AudiobookId} BasePath to {BasePath}",
-                    audiobook.Id,
-                    basePath);
-            }
-        }
-        catch (Exception ex) when (ex is not OperationCanceledException && ex is not OutOfMemoryException && ex is not StackOverflowException)
-        {
-            _logger.LogWarning(ex, $"Failed to persist {basePath} for audiobook {audiobook.Id}");
-        }
     }
 
     private static string FormatSize(long bytes)

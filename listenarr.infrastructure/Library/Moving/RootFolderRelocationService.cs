@@ -9,11 +9,14 @@ public sealed partial class RootFolderRelocationService(
     IFileSystemSemanticsResolver semanticsResolver,
     IHubBroadcaster hubBroadcaster,
     TimeProvider timeProvider,
-    IFilesystemMutationCoordinator mutationCoordinator) : IRootFolderRelocationService
+    IFilesystemMutationCoordinator mutationCoordinator,
+    IAudiobookOperationCoordinator audiobookOperationCoordinator) : IRootFolderRelocationService
 {
     private readonly SemaphoreSlim _rootIdentityGate = new(1, 1);
     private readonly IFilesystemMutationCoordinator _mutationCoordinator =
         mutationCoordinator ?? throw new ArgumentNullException(nameof(mutationCoordinator));
+    private readonly IAudiobookOperationCoordinator _audiobookOperationCoordinator =
+        audiobookOperationCoordinator ?? throw new ArgumentNullException(nameof(audiobookOperationCoordinator));
     private bool _rootIdentitiesReconciled;
     public async Task<RootFolderPathChangeResult> StartAsync(
         int rootFolderId,
@@ -21,7 +24,9 @@ public sealed partial class RootFolderRelocationService(
         CancellationToken cancellationToken = default)
     {
         var outcome = await _mutationCoordinator.ExecuteExclusiveAsync(
-            token => StartCoreAsync(rootFolderId, command, token),
+            token => ExecuteWithAllAudiobookLocksAsync(
+                lockedToken => StartCoreAsync(rootFolderId, command, lockedToken),
+                token),
             cancellationToken);
         if (outcome.Broadcast)
         {

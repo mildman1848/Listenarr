@@ -38,12 +38,7 @@ namespace Listenarr.Application.Audiobooks.Contracts.Repositories
             string rootPath,
             FileSystemPathSemantics semantics,
             CancellationToken ct = default);
-        Task<List<(int audiobookId, string original, string target)>> MigrateAudiobookPathsAsync(
-            string oldRootPath,
-            string newRootPath,
-            FileSystemPathSemantics sourceSemantics,
-            FileSystemPathSemantics targetSemantics,
-            CancellationToken ct = default);
+        Task<List<int>> GetAllAudiobookIdsAsync(CancellationToken ct = default);
         Task ReassignAudiobooksAndRemoveAsync(
             int sourceRootId,
             int targetRootId,

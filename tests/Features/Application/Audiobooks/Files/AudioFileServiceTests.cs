@@ -106,6 +106,46 @@ namespace Listenarr.Tests.Features.Application.Audiobooks.Files
         }
 
         [Fact]
+        public async Task EnsureAudiobookFileAsync_StaleCallerCannotRegisterFileUnderPreviousBasePath()
+        {
+            var oldBasePath = FileService.GetTempDirectory("audio-file-stale-old");
+            var oldFilePath = Path.Join(oldBasePath, "existing.m4b");
+            await File.WriteAllTextAsync(oldFilePath, "old");
+            var staleCandidate = Path.Join(oldBasePath, "stale-candidate.m4b");
+            await File.WriteAllTextAsync(staleCandidate, "candidate");
+            var newBasePath = FileService.GetTempDirectory("audio-file-stale-new");
+            var newFilePath = Path.Join(newBasePath, "current.m4b");
+            await File.WriteAllTextAsync(newFilePath, "current");
+            var staleAudiobook = await _audiobookRepository.AddAsync(new Audiobook
+            {
+                Title = "Stale Caller",
+                BasePath = oldBasePath,
+                FilePath = oldFilePath
+            });
+
+            using (var scope = _provider.CreateScope())
+            {
+                var db = scope.ServiceProvider.GetRequiredService<ListenArrDbContext>();
+                var currentAudiobook = await db.Audiobooks.SingleAsync(
+                    audiobook => audiobook.Id == staleAudiobook.Id);
+                currentAudiobook.BasePath = newBasePath;
+                currentAudiobook.FilePath = newFilePath;
+                await db.SaveChangesAsync();
+            }
+
+            var service = _provider.GetRequiredService<IAudiobookFileService>();
+            var created = await service.EnsureAudiobookFileAsync(
+                staleAudiobook,
+                staleCandidate,
+                "stale-caller");
+
+            Assert.False(created);
+            Assert.DoesNotContain(
+                await _audiobookFileRepository.GetByAudiobookIdAsync(staleAudiobook.Id),
+                file => file.Path == staleCandidate);
+        }
+
+        [Fact]
         public async Task EnsureAudiobookFileAsync_AllowsFileWithinBasePath_WhenBasePathHasTrailingSeparator()
         {
             var oldDir = Path.Join(Path.GetTempPath(), "listenarr-audiofile-old", Guid.NewGuid().ToString(), "Old Folder");

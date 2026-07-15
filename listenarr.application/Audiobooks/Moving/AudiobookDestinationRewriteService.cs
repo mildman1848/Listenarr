@@ -23,7 +23,7 @@ public sealed class AudiobookDestinationRewriteService : IAudiobookDestinationRe
     private readonly IFileSystemSemanticsResolver _semanticsResolver;
     private readonly IRootFolderRelocationService _relocationService;
     private readonly IFilesystemMutationCoordinator _mutationCoordinator;
-    private readonly IAudiobookOperationCoordinator? _audiobookOperationCoordinator;
+    private readonly IAudiobookOperationCoordinator _audiobookOperationCoordinator;
     private readonly ILogger<AudiobookDestinationRewriteService> _logger;
 
     public AudiobookDestinationRewriteService(
@@ -35,7 +35,7 @@ public sealed class AudiobookDestinationRewriteService : IAudiobookDestinationRe
         ILogger<AudiobookDestinationRewriteService> logger,
         IRootFolderRelocationService relocationService,
         IFilesystemMutationCoordinator mutationCoordinator,
-        IAudiobookOperationCoordinator? audiobookOperationCoordinator = null)
+        IAudiobookOperationCoordinator audiobookOperationCoordinator)
     {
         _repo = repo;
         _configService = configService;
@@ -45,7 +45,7 @@ public sealed class AudiobookDestinationRewriteService : IAudiobookDestinationRe
         _logger = logger;
         _relocationService = relocationService ?? throw new ArgumentNullException(nameof(relocationService));
         _mutationCoordinator = mutationCoordinator ?? throw new ArgumentNullException(nameof(mutationCoordinator));
-        _audiobookOperationCoordinator = audiobookOperationCoordinator;
+        _audiobookOperationCoordinator = audiobookOperationCoordinator ?? throw new ArgumentNullException(nameof(audiobookOperationCoordinator));
     }
 
     public Task<AudiobookDestinationRewriteResult> RewriteDestinationAsync(
@@ -54,20 +54,14 @@ public sealed class AudiobookDestinationRewriteService : IAudiobookDestinationRe
         string? expectedSourcePath,
         CancellationToken cancellationToken = default) =>
         _mutationCoordinator.ExecuteExclusiveAsync(
-            lockedCancellationToken => _audiobookOperationCoordinator != null
-                ? _audiobookOperationCoordinator.ExecuteExclusiveAsync(
-                    audiobookId,
-                    token => RewriteDestinationCoreAsync(
-                        audiobookId,
-                        destinationPath,
-                        expectedSourcePath,
-                        token),
-                    lockedCancellationToken)
-                : RewriteDestinationCoreAsync(
+            lockedCancellationToken => _audiobookOperationCoordinator.ExecuteExclusiveAsync(
+                audiobookId,
+                token => RewriteDestinationCoreAsync(
                     audiobookId,
                     destinationPath,
                     expectedSourcePath,
-                    lockedCancellationToken),
+                    token),
+                lockedCancellationToken),
             cancellationToken);
 
     private async Task<AudiobookDestinationRewriteResult> RewriteDestinationCoreAsync(
@@ -340,7 +334,8 @@ public sealed class AudiobookDestinationRewriteService : IAudiobookDestinationRe
         {
             return await _relocationService.IsBoundaryProtectedAsync(path, semantics, cancellationToken);
         }
-        catch (ArgumentException)
+        catch (Exception exception) when (exception is
+            ArgumentException or NotSupportedException or PathTooLongException or System.Security.SecurityException)
         {
             // Legacy stored source paths can be invalid for the current host. A metadata-only
             // rewrite must still be able to repair the BasePath without source filesystem access.
@@ -360,17 +355,30 @@ public sealed class AudiobookDestinationRewriteService : IAudiobookDestinationRe
                 sourceBasePath,
                 sourceSemantics);
         }
-        catch (ArgumentException)
+        catch (Exception exception) when (exception is
+            ArgumentException or NotSupportedException or PathTooLongException or System.Security.SecurityException)
         {
             // If a legacy stored path cannot be canonicalized, keep stale-source protection by
             // accepting only the exact value the caller read before submitting the repair. The
             // legacy entity getter may normalize relative stored paths, so also accept the same
             // normalized storage value that legacy update callers already send.
-            return string.Equals(expectedSourcePath, sourceBasePath, StringComparison.Ordinal)
-                || string.Equals(
+            if (string.Equals(expectedSourcePath, sourceBasePath, StringComparison.Ordinal))
+            {
+                return true;
+            }
+
+            try
+            {
+                return string.Equals(
                     FileUtils.NormalizeStoredPath(expectedSourcePath),
                     sourceBasePath,
                     StringComparison.Ordinal);
+            }
+            catch (Exception normalizeException) when (normalizeException is
+                ArgumentException or NotSupportedException or PathTooLongException or System.Security.SecurityException)
+            {
+                return false;
+            }
         }
     }
 
@@ -387,7 +395,8 @@ public sealed class AudiobookDestinationRewriteService : IAudiobookDestinationRe
                     return root;
                 }
             }
-            catch (ArgumentException)
+            catch (Exception exception) when (exception is
+                ArgumentException or NotSupportedException or PathTooLongException or System.Security.SecurityException)
             {
                 // Invalid legacy audiobook paths are repaired by the rewrite path below rather
                 // than being treated as a configured filesystem boundary.

@@ -29,6 +29,59 @@ public sealed class BackendArchitectureTests
     }
 
     [Fact]
+    public void PathMutatingServices_RequireAudiobookOperationCoordinator()
+    {
+        Type[] serviceTypes =
+        [
+            typeof(AudiobookFileService),
+            typeof(AudiobookDestinationRewriteService),
+            typeof(RenameService),
+            typeof(DownloadImportService),
+            typeof(ManualImportController),
+            typeof(LibraryBulkEditWorkflow),
+            typeof(LibraryDeleteWorkflow),
+            typeof(LibraryManualScanWorkflow),
+            typeof(LibraryMetadataRescanWorkflow),
+            typeof(LibraryMoveWorkflow),
+            typeof(LibraryUpdateWorkflow),
+            typeof(MetadataRescanProcessor),
+            typeof(MoveJobProcessor),
+            typeof(RootFolderService),
+            typeof(RootFolderRelocationService),
+            typeof(ScanJobProcessor)
+        ];
+
+        AssertRequiredConstructorParameter<IAudiobookOperationCoordinator>(serviceTypes);
+    }
+
+    [Fact]
+    public void LibraryDestinationCreatingServices_RequireDestinationMutationGuard()
+    {
+        AssertRequiredConstructorParameter<ILibraryDestinationMutationGuard>(
+        [
+            typeof(LibraryAddService),
+            typeof(LibraryAddWorkflow)
+        ]);
+    }
+
+    [Fact]
+    public void GlobalFilesystemMutationServices_RequireFilesystemMutationCoordinator()
+    {
+        Type[] serviceTypes =
+        [
+            typeof(AudiobookDestinationRewriteService),
+            typeof(LibraryAddService),
+            typeof(LibraryAddWorkflow),
+            typeof(LibraryMoveWorkflow),
+            typeof(MoveQueueService),
+            typeof(RootFolderService),
+            typeof(RootFolderRelocationService)
+        ];
+
+        AssertRequiredConstructorParameter<IFilesystemMutationCoordinator>(serviceTypes);
+    }
+
+    [Fact]
     public void DomainAndApplication_DoNotReferenceForbiddenImplementationPackages()
     {
         var forbiddenPackages = new[]
@@ -576,6 +629,24 @@ public sealed class BackendArchitectureTests
             .ToList();
 
         Assert.Empty(violations);
+    }
+
+    private static void AssertRequiredConstructorParameter<TParameter>(IEnumerable<Type> serviceTypes)
+    {
+        foreach (var serviceType in serviceTypes)
+        {
+            var coordinatorParameters = serviceType
+                .GetConstructors(System.Reflection.BindingFlags.Instance
+                    | System.Reflection.BindingFlags.Public
+                    | System.Reflection.BindingFlags.NonPublic)
+                .SelectMany(constructor => constructor.GetParameters())
+                .Where(parameter => parameter.ParameterType == typeof(TParameter))
+                .ToList();
+
+            var coordinatorParameter = Assert.Single(coordinatorParameters);
+            Assert.False(coordinatorParameter.IsOptional);
+            Assert.False(coordinatorParameter.HasDefaultValue);
+        }
     }
 
     private static void AssertProjectReferences(string relativeProject, IReadOnlyCollection<string> expected)

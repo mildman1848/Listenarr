@@ -16,6 +16,7 @@
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.EntityFrameworkCore;
 using Listenarr.Tests.Builders;
 using Listenarr.Tests.Common;
 
@@ -103,6 +104,91 @@ namespace Listenarr.Tests.Features.Api.Features.Library
                     && !command.DeleteEmptySource
                     && command.SourceCleanupBoundary == null),
                 It.IsAny<CancellationToken>()), Times.Once);
+        }
+
+        [Fact]
+        [Trait("Method", "EnqueueMove")]
+        [Trait("Scenario", "RejectsStalePhysicalSourcePath")]
+        public async Task MoveAudiobook_PhysicalMoveRejectsStaleExistingSourcePath()
+        {
+            var moveQueue = new Mock<IMoveQueueService>(MockBehavior.Strict);
+            Init(services => services.WithSingleton(moveQueue.Object));
+            var outputPath = FileService.GetTempDirectory("listenarr-move-output");
+            await _applicationSettingsRepository.SaveAsync(new ApplicationSettingsBuilder()
+                .WithOutputPath(outputPath)
+                .Build());
+
+            var currentSource = FileService.GetTempDirectory("listenarr-current-source");
+            var staleSource = FileService.GetTempDirectory("listenarr-stale-source");
+            var audiobook = await _audiobookRepository.AddAsync(new AudiobookBuilder()
+                .WithTitle("Stale Physical Source")
+                .WithBasePath(currentSource)
+                .Build());
+
+            var result = await _provider.GetRequiredService<LibraryController>().EnqueueMove(
+                audiobook.Id,
+                new LibraryController.MoveRequest
+                {
+                    DestinationPath = Path.Join(outputPath, "target"),
+                    SourcePath = staleSource,
+                    MoveFiles = true
+                });
+
+            var conflict = Assert.IsType<ConflictObjectResult>(result);
+            Assert.Equal(409, conflict.StatusCode);
+            Assert.Contains("source_path_changed", conflict.Value?.ToString() ?? string.Empty);
+            moveQueue.Verify(
+                service => service.EnqueueMoveAsync(
+                    It.IsAny<MoveEnqueueCommand>(),
+                    It.IsAny<CancellationToken>()),
+                Times.Never);
+        }
+
+        [Fact]
+        public async Task MoveAudiobook_SourceChangesAfterPreflight_RejectsBeforeQueuePersistence()
+        {
+            var moveQueue = new Mock<IMoveQueueService>(MockBehavior.Strict);
+            var updatedSource = FileService.GetTempDirectory("listenarr-updated-source");
+            using var coordinator = new BeforeExecuteAudiobookCoordinator(async () =>
+            {
+                using var scope = _provider.CreateScope();
+                var db = scope.ServiceProvider.GetRequiredService<ListenArrDbContext>();
+                var audiobook = await db.Audiobooks.SingleAsync();
+                audiobook.BasePath = updatedSource;
+                await db.SaveChangesAsync();
+            });
+            Init(services => services
+                .WithSingleton(moveQueue.Object)
+                .WithSingleton<IAudiobookOperationCoordinator>(coordinator));
+            var outputPath = FileService.GetTempDirectory("listenarr-move-output");
+            await _applicationSettingsRepository.SaveAsync(new ApplicationSettingsBuilder()
+                .WithOutputPath(outputPath)
+                .Build());
+            var originalSource = FileService.GetTempDirectory("listenarr-original-source");
+            var audiobook = await _audiobookRepository.AddAsync(new AudiobookBuilder()
+                .WithTitle("Enqueue Fence")
+                .WithBasePath(originalSource)
+                .Build());
+
+            var result = await _provider.GetRequiredService<LibraryController>().EnqueueMove(
+                audiobook.Id,
+                new LibraryController.MoveRequest
+                {
+                    DestinationPath = Path.Join(outputPath, "target"),
+                    SourcePath = originalSource,
+                    MoveFiles = true
+                });
+
+            var conflict = Assert.IsType<ConflictObjectResult>(result);
+            Assert.Contains("source_path_changed", conflict.Value?.ToString() ?? string.Empty);
+            moveQueue.Verify(service => service.EnqueueMoveAsync(
+                It.IsAny<MoveEnqueueCommand>(),
+                It.IsAny<CancellationToken>()), Times.Never);
+            using var verificationScope = _provider.CreateScope();
+            var verification = verificationScope.ServiceProvider.GetRequiredService<ListenArrDbContext>();
+            Assert.Equal(
+                FileUtils.NormalizeStoredPath(updatedSource),
+                (await verification.Audiobooks.SingleAsync()).BasePath);
         }
 
         [Fact]
@@ -431,6 +517,57 @@ namespace Listenarr.Tests.Features.Api.Features.Library
                 It.IsAny<string?>(),
                 It.IsAny<bool>(),
                 It.IsAny<string?>()), Times.Never);
+        }
+
+        [Fact]
+        public async Task MoveAudiobook_PhysicalPreflightWaitsForFilesystemMutationCoordinator()
+        {
+            var coordinator = new FilesystemMutationCoordinator();
+            var moveQueue = new Mock<IMoveQueueService>();
+            moveQueue.Setup(service => service.EnqueueMoveAsync(
+                    It.IsAny<MoveEnqueueCommand>(),
+                    It.IsAny<CancellationToken>()))
+                .ReturnsAsync(Guid.NewGuid());
+            Init(services => services
+                .WithSingleton(moveQueue.Object)
+                .WithSingleton<IFilesystemMutationCoordinator>(coordinator));
+            var outputPath = FileService.GetTempDirectory("listenarr-move-output");
+            await _applicationSettingsRepository.SaveAsync(new ApplicationSettingsBuilder()
+                .WithOutputPath(outputPath)
+                .Build());
+            var sourcePath = FileService.GetTempDirectory("listenarr-move-src");
+            await FileService.GetFileAsync(sourcePath, "book.m4b", "audio");
+            var audiobook = await _audiobookRepository.AddAsync(new AudiobookBuilder()
+                .WithTitle("Physical Gate")
+                .WithBasePath(sourcePath)
+                .Build());
+            var targetPath = Path.Join(outputPath, "physical-target");
+            var lockEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var releaseLock = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var lockTask = coordinator.ExecuteExclusiveAsync(async _ =>
+            {
+                lockEntered.SetResult();
+                await releaseLock.Task;
+            });
+            await lockEntered.Task;
+
+            var moveTask = _provider.GetRequiredService<LibraryController>().EnqueueMove(
+                audiobook.Id,
+                new LibraryController.MoveRequest
+                {
+                    DestinationPath = targetPath,
+                    SourcePath = sourcePath,
+                    MoveFiles = true
+                });
+            await Task.Delay(50);
+            Assert.False(moveTask.IsCompleted);
+
+            releaseLock.SetResult();
+            await lockTask;
+            Assert.IsType<AcceptedResult>(await moveTask);
+            moveQueue.Verify(service => service.EnqueueMoveAsync(
+                It.IsAny<MoveEnqueueCommand>(),
+                It.IsAny<CancellationToken>()), Times.Once);
         }
 
         [Fact]
@@ -960,6 +1097,75 @@ namespace Listenarr.Tests.Features.Api.Features.Library
                     && command.SourceIdentity.CaseSensitivity == FileSystemCaseSensitivity.Sensitive
                     && command.TargetIdentity.CaseSensitivity == FileSystemCaseSensitivity.Sensitive),
                 It.IsAny<CancellationToken>()), Times.Once);
+        }
+
+        private sealed class BeforeExecuteAudiobookCoordinator(Func<Task> beforeExecute)
+            : IAudiobookOperationCoordinator, IDisposable
+        {
+            private readonly AudiobookOperationCoordinator _inner = new();
+            private int _invoked;
+
+            public Task ExecuteExclusiveAsync(
+                int audiobookId,
+                Func<CancellationToken, Task> operation,
+                CancellationToken cancellationToken = default) =>
+                _inner.ExecuteExclusiveAsync(
+                    audiobookId,
+                    token => ExecuteAfterCallbackAsync(operation, token),
+                    cancellationToken);
+
+            public Task<T> ExecuteExclusiveAsync<T>(
+                int audiobookId,
+                Func<CancellationToken, Task<T>> operation,
+                CancellationToken cancellationToken = default) =>
+                _inner.ExecuteExclusiveAsync(
+                    audiobookId,
+                    token => ExecuteAfterCallbackAsync(operation, token),
+                    cancellationToken);
+
+            public Task ExecuteExclusiveAsync(
+                IEnumerable<int> audiobookIds,
+                Func<CancellationToken, Task> operation,
+                CancellationToken cancellationToken = default) =>
+                _inner.ExecuteExclusiveAsync(
+                    audiobookIds,
+                    token => ExecuteAfterCallbackAsync(operation, token),
+                    cancellationToken);
+
+            public Task<T> ExecuteExclusiveAsync<T>(
+                IEnumerable<int> audiobookIds,
+                Func<CancellationToken, Task<T>> operation,
+                CancellationToken cancellationToken = default) =>
+                _inner.ExecuteExclusiveAsync(
+                    audiobookIds,
+                    token => ExecuteAfterCallbackAsync(operation, token),
+                    cancellationToken);
+
+            private async Task ExecuteAfterCallbackAsync(
+                Func<CancellationToken, Task> operation,
+                CancellationToken cancellationToken)
+            {
+                await InvokeBeforeExecuteOnceAsync();
+                await operation(cancellationToken);
+            }
+
+            private async Task<T> ExecuteAfterCallbackAsync<T>(
+                Func<CancellationToken, Task<T>> operation,
+                CancellationToken cancellationToken)
+            {
+                await InvokeBeforeExecuteOnceAsync();
+                return await operation(cancellationToken);
+            }
+
+            private async Task InvokeBeforeExecuteOnceAsync()
+            {
+                if (Interlocked.Exchange(ref _invoked, 1) == 0)
+                {
+                    await beforeExecute();
+                }
+            }
+
+            public void Dispose() => _inner.Dispose();
         }
 
         [Fact]

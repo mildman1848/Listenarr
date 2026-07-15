@@ -60,7 +60,27 @@ namespace Listenarr.Infrastructure.Persistence.Repositories
 
         public async Task UpdateAsync(AudiobookFile file, CancellationToken ct = default)
         {
-            _db.AudiobookFiles.Update(file);
+            ArgumentNullException.ThrowIfNull(file);
+
+            var entry = _db.Entry(file);
+            if (entry.State == EntityState.Detached)
+            {
+                var existing = await _db.AudiobookFiles
+                    .FirstOrDefaultAsync(candidate => candidate.Id == file.Id, ct);
+                if (existing == null)
+                {
+                    return;
+                }
+
+                var preservedPath = existing.Path;
+                var preservedAudiobookId = existing.AudiobookId;
+                _db.Entry(existing).CurrentValues.SetValues(file);
+                // Detached metadata updates cannot safely establish a new path or ownership.
+                // Move/rename workflows update those references under their coordinated contracts.
+                existing.Path = preservedPath;
+                existing.AudiobookId = preservedAudiobookId;
+            }
+
             await _db.SaveChangesAsync(ct);
         }
 

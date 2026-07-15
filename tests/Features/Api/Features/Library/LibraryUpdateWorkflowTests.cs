@@ -56,10 +56,14 @@ public sealed class LibraryUpdateWorkflowTests
                 It.IsAny<CancellationToken>()))
             .ReturnsAsync(new AudiobookDestinationRewriteResult(id, target, source));
 
+        var services = new ServiceCollection();
+        services.AddSingleton(repository.Object);
+        using var provider = services.BuildServiceProvider();
+        using var operationCoordinator = new AudiobookOperationCoordinator();
         var workflow = new LibraryUpdateWorkflow(
-            repository.Object,
-            Mock.Of<IServiceScopeFactory>(),
+            provider.GetRequiredService<IServiceScopeFactory>(),
             rewriteService.Object,
+            operationCoordinator,
             NullLogger<LibraryUpdateWorkflow>.Instance);
 
         var result = await workflow.UpdateAsync(id, new AudiobookUpdateRequest { BasePath = target });
@@ -111,10 +115,14 @@ public sealed class LibraryUpdateWorkflowTests
                 It.IsAny<CancellationToken>()))
             .ReturnsAsync(new AudiobookDestinationRewriteResult(id, target, source));
 
+        var services = new ServiceCollection();
+        services.AddSingleton(repository.Object);
+        using var provider = services.BuildServiceProvider();
+        using var operationCoordinator = new AudiobookOperationCoordinator();
         var workflow = new LibraryUpdateWorkflow(
-            repository.Object,
-            Mock.Of<IServiceScopeFactory>(),
+            provider.GetRequiredService<IServiceScopeFactory>(),
             rewriteService.Object,
+            operationCoordinator,
             NullLogger<LibraryUpdateWorkflow>.Instance);
 
         var result = await workflow.UpdateAsync(

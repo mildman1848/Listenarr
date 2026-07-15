@@ -9,12 +9,49 @@ public sealed partial class RootFolderRelocationService
         Guid moveJobId,
         CancellationToken cancellationToken = default)
     {
+        await using (var preflightDb = await dbContextFactory.CreateDbContextAsync(cancellationToken))
+        {
+            var shouldReconcile = await preflightDb.MoveJobs
+                .AsNoTracking()
+                .AnyAsync(
+                    candidate => candidate.Id == moveJobId
+                        && candidate.RelocationId != null
+                        && (candidate.Status == MoveJobStatus.Completed
+                            || candidate.Status == MoveJobStatus.NeedsAttention
+                            || candidate.Status == MoveJobStatus.Failed
+                            || candidate.Status == MoveJobStatus.Superseded),
+                    cancellationToken);
+            if (!shouldReconcile)
+            {
+                return;
+            }
+        }
+
+        var result = await _mutationCoordinator.ExecuteExclusiveAsync(
+            token => ExecuteWithAllAudiobookLocksAsync(
+                lockedToken => OnMoveJobStateChangedCoreAsync(moveJobId, lockedToken),
+                token),
+            cancellationToken);
+        if (result != null)
+        {
+            await BroadcastAsync(result, cancellationToken);
+        }
+    }
+
+    private async Task<RootFolderPathChangeResult?> OnMoveJobStateChangedCoreAsync(
+        Guid moveJobId,
+        CancellationToken cancellationToken)
+    {
         await using var db = await dbContextFactory.CreateDbContextAsync(cancellationToken);
         await using var transaction = await db.Database.BeginTransactionAsync(cancellationToken);
         var job = await db.MoveJobs.AsNoTracking().SingleOrDefaultAsync(
             candidate => candidate.Id == moveJobId,
             cancellationToken);
-        if (job?.RelocationId == null) return;
+        if (job?.RelocationId == null)
+        {
+            return null;
+        }
+
         var relocation = await db.RootFolderRelocations
             .Include(candidate => candidate.MoveJobs)
             .SingleAsync(candidate => candidate.Id == job.RelocationId, cancellationToken);
@@ -61,10 +98,24 @@ public sealed partial class RootFolderRelocationService
 
         await db.SaveChangesAsync(cancellationToken);
         await transaction.CommitAsync(cancellationToken);
-        await BroadcastAsync(Map(relocation, root?.Path ?? ResolveCurrentPathFallback(relocation)), cancellationToken);
+        return Map(relocation, root?.Path ?? ResolveCurrentPathFallback(relocation));
     }
 
     public async Task ReconcileActiveAsync(CancellationToken cancellationToken = default)
+    {
+        var results = await _mutationCoordinator.ExecuteExclusiveAsync(
+            token => ExecuteWithAllAudiobookLocksAsync(
+                ReconcileActiveCoreAsync,
+                token),
+            cancellationToken);
+        foreach (var result in results)
+        {
+            await BroadcastAsync(result, cancellationToken);
+        }
+    }
+
+    private async Task<List<RootFolderPathChangeResult>> ReconcileActiveCoreAsync(
+        CancellationToken cancellationToken)
     {
         await ReconcileRootIdentitiesAsync(cancellationToken);
         await using var db = await dbContextFactory.CreateDbContextAsync(cancellationToken);
@@ -84,10 +135,17 @@ public sealed partial class RootFolderRelocationService
         var terminalJobIds = terminalJobs
             .GroupBy(job => job.RelocationId)
             .Select(group => group.First().Id);
+        var results = new List<RootFolderPathChangeResult>();
         foreach (var jobId in terminalJobIds)
         {
-            await OnMoveJobStateChangedAsync(jobId, cancellationToken);
+            var result = await OnMoveJobStateChangedCoreAsync(jobId, cancellationToken);
+            if (result != null)
+            {
+                results.Add(result);
+            }
         }
+
+        return results;
     }
 
     private async Task ReconcileRootIdentitiesAsync(CancellationToken cancellationToken)

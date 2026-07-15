@@ -96,8 +96,10 @@ namespace Listenarr.Tests.Features.Api.Services
             services.AddSingleton(metadataService.Object);
             using var provider = services.BuildServiceProvider();
 
+            using var operationCoordinator = new AudiobookOperationCoordinator();
             var processor = new MetadataRescanProcessor(
                 provider.GetRequiredService<IServiceScopeFactory>(),
+                operationCoordinator,
                 Mock.Of<ILogger<MetadataRescanProcessor>>());
 
             await processor.RunCycleAsync(CancellationToken.None);

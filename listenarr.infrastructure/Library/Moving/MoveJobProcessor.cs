@@ -32,7 +32,7 @@ internal partial class MoveJobProcessor(
     IMoveCleanupBoundaryResolver cleanupBoundaryResolver,
     IMoveScanHandoffStore moveScanHandoffStore,
     TimeProvider timeProvider,
-    IAudiobookOperationCoordinator? audiobookOperationCoordinator = null,
+    IAudiobookOperationCoordinator audiobookOperationCoordinator,
     IAudiobookUpdatePublisher? audiobookUpdatePublisher = null) : IMoveJobProcessor, IMoveJobProcessorPhases
 {
     public async Task ProcessJobAsync(MoveJob job, CancellationToken stoppingToken)
@@ -51,16 +51,32 @@ internal partial class MoveJobProcessor(
         MovePostCommitContext? postCommit = null;
         void RegisterPostCommit(MovePostCommitContext context) => postCommit = context;
 
-        if (audiobookOperationCoordinator != null)
+        if (string.IsNullOrWhiteSpace(job.LeaseOwner))
         {
-            await audiobookOperationCoordinator.ExecuteExclusiveAsync(
-                job.AudiobookId,
-                token => ProcessJobCoreAsync(job, RegisterPostCommit, token),
-                stoppingToken);
+            throw new MoveLeaseLostException(job.Id, job.LeaseGeneration);
         }
-        else
+
+        await moveQueueService.UpdateJobStatusAsync(
+            job.Id,
+            job.LeaseOwner,
+            job.LeaseGeneration,
+            MoveJobStatus.Running,
+            cancellationToken: stoppingToken);
+        job.Status = MoveJobStatus.Running;
+        job.Error = null;
+
+        await audiobookOperationCoordinator.ExecuteExclusiveAsync(
+            job.AudiobookId,
+            token => ProcessJobCoreAsync(job, RegisterPostCommit, token),
+            stoppingToken);
+
+        if (postCommit == null)
         {
-            await ProcessJobCoreAsync(job, RegisterPostCommit, stoppingToken);
+            await moveQueueService.NotifyPersistedJobStateAsync(
+                job.Id,
+                job.Status,
+                job.Error,
+                stoppingToken);
         }
 
         return postCommit;

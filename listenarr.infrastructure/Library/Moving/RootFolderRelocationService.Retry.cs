@@ -11,7 +11,9 @@ public sealed partial class RootFolderRelocationService
         CancellationToken cancellationToken = default)
     {
         var result = await _mutationCoordinator.ExecuteExclusiveAsync(
-            token => RetryCoreAsync(relocationId, token),
+            token => ExecuteWithAllAudiobookLocksAsync(
+                lockedToken => RetryCoreAsync(relocationId, lockedToken),
+                token),
             cancellationToken);
         await BroadcastAsync(result, cancellationToken);
         return result;
@@ -68,6 +70,15 @@ public sealed partial class RootFolderRelocationService
         foreach (var job in relocation.MoveJobs.Where(job => job.Status is
             MoveJobStatus.NeedsAttention or MoveJobStatus.Failed or MoveJobStatus.Superseded))
         {
+            // Superseded jobs are terminal evidence that their persisted source snapshot is
+            // stale. Retrying them would reactivate the exact unsafe operation that superseded
+            // status is intended to fence off.
+            if (job.Status == MoveJobStatus.Superseded)
+            {
+                skippedSupersededJobs++;
+                continue;
+            }
+
             if (string.IsNullOrWhiteSpace(job.RequestedPath)
                 || !job.TryGetTargetIdentity(out var targetIdentity))
             {
@@ -88,12 +99,6 @@ public sealed partial class RootFolderRelocationService
                 cancellationToken);
             if (conflictingJob != null)
             {
-                if (job.Status == MoveJobStatus.Superseded)
-                {
-                    skippedSupersededJobs++;
-                    continue;
-                }
-
                 throw new ApplicationConflictException(
                     "move_job_retry_conflict",
                     "A newer move for this audiobook is already active.");

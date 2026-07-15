@@ -25,6 +25,38 @@ namespace Listenarr.Tests.Features.Api.Features.Library
     public class LibraryController_BulkUpdateTests : BaseTests
     {
         [Fact]
+        public async Task BulkUpdate_InvalidRootFolderStillAppliesValidMetadataUpdates()
+        {
+            var controller = _provider.GetRequiredService<LibraryController>();
+            var audiobook = await _audiobookRepository.AddAsync(new Audiobook
+            {
+                Title = "Partial Bulk Update",
+                Monitored = false
+            });
+
+            var actionResult = await controller.BulkUpdateAudiobooks(new LibraryController.BulkUpdateRequest
+            {
+                Ids = [audiobook.Id],
+                Updates = new Dictionary<string, object>
+                {
+                    ["monitored"] = true,
+                    ["rootFolder"] = "   "
+                }
+            });
+
+            var ok = Assert.IsType<OkObjectResult>(actionResult);
+            var json = JsonSerializer.Serialize(ok.Value);
+            using var document = JsonDocument.Parse(json);
+            var result = Assert.Single(document.RootElement.GetProperty("results").EnumerateArray());
+            Assert.True(result.GetProperty("success").GetBoolean());
+            Assert.NotEmpty(result.GetProperty("errors").EnumerateArray());
+
+            var stored = await GetFreshAudiobookAsync(audiobook.Id);
+            Assert.NotNull(stored);
+            Assert.True(stored.Monitored);
+        }
+
+        [Fact]
         public async Task BulkUpdate_ApplyRootMonitoredQuality_ReturnsPerIdResultsAndPersistsChanges()
         {
             // Arrange
@@ -47,12 +79,27 @@ namespace Listenarr.Tests.Features.Api.Features.Library
                 MustNotContain = new List<string>()
             });
 
+            var sourceBasePath = Path.Join(
+                FileService.GetTempPath(),
+                $"bulk-update-source-{Guid.NewGuid():N}");
+            var sourceFilePath = Path.Join(sourceBasePath, "book.m4b");
+            var sourceImagePath = Path.Join(sourceBasePath, "cover.jpg");
             var a1 = await _audiobookRepository.AddAsync(new Audiobook
             {
                 Title = "Book A",
                 Authors = new List<string> { "Author A" },
                 Monitored = false,
-                QualityProfileId = null
+                QualityProfileId = null,
+                BasePath = sourceBasePath,
+                FilePath = sourceFilePath,
+                ImageUrl = sourceImagePath,
+                Files =
+                [
+                    new AudiobookFile
+                    {
+                        Path = sourceFilePath
+                    }
+                ]
             });
 
             await _audiobookRepository.AddAsync(new Audiobook
@@ -96,7 +143,7 @@ namespace Listenarr.Tests.Features.Api.Features.Library
             Assert.False(second.GetProperty("success").GetBoolean());
             Assert.True(second.GetProperty("errors").GetArrayLength() >= 1);
 
-            var storedA1 = await _audiobookRepository.GetByIdAsync(a1.Id);
+            var storedA1 = await GetFreshAudiobookAsync(a1.Id);
             Assert.NotNull(storedA1);
             Assert.True(storedA1.Monitored);
             Assert.Equal(42, storedA1.QualityProfileId);
@@ -104,9 +151,20 @@ namespace Listenarr.Tests.Features.Api.Features.Library
             Assert.StartsWith(FileUtils.NormalizeStoredPath(tempRoot), storedA1.BasePath);
             Assert.Contains("Author A", storedA1.BasePath);
             Assert.Contains("Book A", storedA1.BasePath);
+            Assert.Equal(Path.Join(storedA1.BasePath, "book.m4b"), storedA1.FilePath);
+            Assert.Equal(Path.Join(storedA1.BasePath, "cover.jpg"), storedA1.ImageUrl);
+            var storedFile = Assert.Single(storedA1.Files!);
+            Assert.Equal(Path.Join(storedA1.BasePath, "book.m4b"), storedFile.Path);
 
             var histories = await _historyRepository.GetByAudiobookIdAsync(a1.Id);
             Assert.True(histories.Count >= 1);
+        }
+
+        private async Task<Audiobook?> GetFreshAudiobookAsync(int id)
+        {
+            using var scope = _provider.CreateScope();
+            var repository = scope.ServiceProvider.GetRequiredService<IAudiobookRepository>();
+            return await repository.GetByIdAsync(id);
         }
     }
 }

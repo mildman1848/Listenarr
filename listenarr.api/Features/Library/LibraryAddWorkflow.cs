@@ -31,6 +31,8 @@ namespace Listenarr.Api.Features.Library
         private readonly IHistoryRepository _historyRepository;
         private readonly INotificationService? _notificationService;
         private readonly ILibraryAddService? _libraryAddService;
+        private readonly ILibraryDestinationMutationGuard _destinationMutationGuard;
+        private readonly IFilesystemMutationCoordinator _mutationCoordinator;
         private readonly ILogger<LibraryAddWorkflow> _logger;
 
         public LibraryAddWorkflow(
@@ -38,6 +40,8 @@ namespace Listenarr.Api.Features.Library
             IImageCacheService imageCacheService,
             IServiceScopeFactory scopeFactory,
             IHistoryRepository historyRepository,
+            ILibraryDestinationMutationGuard destinationMutationGuard,
+            IFilesystemMutationCoordinator mutationCoordinator,
             ILogger<LibraryAddWorkflow> logger,
             INotificationService? notificationService = null,
             ILibraryAddService? libraryAddService = null)
@@ -46,12 +50,19 @@ namespace Listenarr.Api.Features.Library
             _imageCacheService = imageCacheService;
             _scopeFactory = scopeFactory;
             _historyRepository = historyRepository;
+            _destinationMutationGuard = destinationMutationGuard
+                ?? throw new ArgumentNullException(nameof(destinationMutationGuard));
+            _mutationCoordinator = mutationCoordinator ?? throw new ArgumentNullException(nameof(mutationCoordinator));
             _logger = logger;
             _notificationService = notificationService;
             _libraryAddService = libraryAddService;
         }
 
-        public async Task<IActionResult> AddAsync(LibraryController.AddToLibraryRequest request)
+        public Task<IActionResult> AddAsync(LibraryController.AddToLibraryRequest request) =>
+            _mutationCoordinator.ExecuteExclusiveAsync(
+                _ => AddCoreAsync(request));
+
+        private async Task<IActionResult> AddCoreAsync(LibraryController.AddToLibraryRequest request)
         {
             if (_libraryAddService != null)
             {
@@ -108,20 +119,9 @@ namespace Listenarr.Api.Features.Library
                 }
             }
 
-            string? imageUrl;
-            try
-            {
-                imageUrl = await ResolveLibraryImageUrlAsync(request, firstIsbn);
-            }
-            catch (LibraryAddConflictException ex)
-            {
-                return new ConflictObjectResult(new { message = "Audiobook already exists in library", audiobook = ex.Audiobook });
-            }
-
             var audiobook = metadata.ToAudiobook();
 
             audiobook.Monitored = request.Monitored;
-            audiobook.ImageUrl = imageUrl;
 
             AudiobookSeriesMembershipHelper.ApplyToAudiobook(
                 audiobook,
@@ -157,6 +157,25 @@ namespace Listenarr.Api.Features.Library
                 audiobook.BasePath = normalizedDestinationPath;
                 _logger.LogInformation("Using custom destination path for audiobook '{Title}': {BasePath}",
                     audiobook.Title, audiobook.BasePath);
+            }
+
+            if (!string.IsNullOrWhiteSpace(audiobook.BasePath))
+            {
+                var destinationBlockingReason = await _destinationMutationGuard.GetBlockingReasonAsync(
+                    audiobook.BasePath);
+                if (destinationBlockingReason != null)
+                {
+                    return new BadRequestObjectResult(new { message = destinationBlockingReason });
+                }
+            }
+
+            try
+            {
+                audiobook.ImageUrl = await ResolveLibraryImageUrlAsync(request, firstIsbn);
+            }
+            catch (LibraryAddConflictException ex)
+            {
+                return new ConflictObjectResult(new { message = "Audiobook already exists in library", audiobook = ex.Audiobook });
             }
 
             await _repo.AddAsync(audiobook);

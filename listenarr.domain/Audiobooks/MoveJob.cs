@@ -185,7 +185,7 @@ namespace Listenarr.Domain.Audiobooks
             ArgumentException.ThrowIfNullOrWhiteSpace(deduplicationKey);
 
             job.Status = MoveJobStatus.Queued;
-            job.Phase = MoveJobPhase.None;
+            // Preserve the durable phase so retries resume from the last proven checkpoint.
             job.Error = null;
             job.FailureKind = MoveFailureKind.None;
             job.AttemptCount = 0;

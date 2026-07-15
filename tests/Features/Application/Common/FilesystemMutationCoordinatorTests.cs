@@ -31,6 +31,38 @@ public sealed class FilesystemMutationCoordinatorTests
     }
 
     [Fact]
+    public async Task ExecuteExclusiveAsync_NestedCallIsReentrantWhileExternalCallerWaits()
+    {
+        using var coordinator = new FilesystemMutationCoordinator();
+        var nestedEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseOuter = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var externalEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        var outer = coordinator.ExecuteExclusiveAsync(async _ =>
+        {
+            await coordinator.ExecuteExclusiveAsync(_ =>
+            {
+                nestedEntered.SetResult();
+                return Task.CompletedTask;
+            });
+            await releaseOuter.Task;
+        });
+        await nestedEntered.Task;
+
+        var external = coordinator.ExecuteExclusiveAsync(_ =>
+        {
+            externalEntered.SetResult();
+            return Task.CompletedTask;
+        });
+
+        await Task.Delay(50);
+        Assert.False(externalEntered.Task.IsCompleted);
+        releaseOuter.SetResult();
+        await Task.WhenAll(outer, external);
+        Assert.True(externalEntered.Task.IsCompletedSuccessfully);
+    }
+
+    [Fact]
     public async Task ExecuteExclusiveAsync_CancelledWaiterDoesNotEnter()
     {
         using var coordinator = new FilesystemMutationCoordinator();

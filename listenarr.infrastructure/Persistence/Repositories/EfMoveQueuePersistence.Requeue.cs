@@ -78,7 +78,6 @@ public sealed partial class EfMoveQueuePersistence
                             .SetProperty(job => job.IdentityKeyVersion, 3)
                             .SetProperty(job => job.ActiveDeduplicationKey, command.DeduplicationKey)
                             .SetProperty(job => job.Status, MoveJobStatus.Queued)
-                            .SetProperty(job => job.Phase, MoveJobPhase.None)
                             .SetProperty(job => job.FailureKind, MoveFailureKind.None)
                             .SetProperty(job => job.AttemptCount, 0)
                             .SetProperty(job => job.Error, (string?)null)
@@ -161,7 +160,6 @@ public sealed partial class EfMoveQueuePersistence
         && job.TargetIdentityBoundary == command.TargetIdentity.BoundaryPath
         && job.IdentityKeyVersion == 3
         && job.ActiveDeduplicationKey == command.DeduplicationKey
-        && job.Phase == MoveJobPhase.None
         && job.FailureKind == MoveFailureKind.None
         && job.AttemptCount == 0
         && job.Error == null
@@ -178,7 +176,6 @@ public sealed partial class EfMoveQueuePersistence
         job.IdentityKeyVersion = 3;
         job.ActiveDeduplicationKey = command.DeduplicationKey;
         job.Status = MoveJobStatus.Queued;
-        job.Phase = MoveJobPhase.None;
         job.Error = null;
         job.FailureKind = MoveFailureKind.None;
         job.AttemptCount = 0;

@@ -28,6 +28,7 @@ namespace Listenarr.Application.Audiobooks.RootFolders
         private readonly IFileSystemSemanticsResolver _semanticsResolver;
         private readonly IRootFolderRelocationService _relocationService;
         private readonly IFilesystemMutationCoordinator _mutationCoordinator;
+        private readonly IAudiobookOperationCoordinator _audiobookOperationCoordinator;
 
         public RootFolderService(
             IRootFolderRepository repo,
@@ -35,7 +36,8 @@ namespace Listenarr.Application.Audiobooks.RootFolders
             IFileSystemSemanticsResolver semanticsResolver,
             IMoveQueueService moveQueue,
             IRootFolderRelocationService relocationService,
-            IFilesystemMutationCoordinator mutationCoordinator)
+            IFilesystemMutationCoordinator mutationCoordinator,
+            IAudiobookOperationCoordinator audiobookOperationCoordinator)
         {
             _repo = repo;
             _logger = logger;
@@ -43,6 +45,8 @@ namespace Listenarr.Application.Audiobooks.RootFolders
             _mutationCoordinator = mutationCoordinator ?? throw new ArgumentNullException(nameof(mutationCoordinator));
             _moveQueue = moveQueue ?? throw new ArgumentNullException(nameof(moveQueue));
             _relocationService = relocationService ?? throw new ArgumentNullException(nameof(relocationService));
+            _audiobookOperationCoordinator = audiobookOperationCoordinator
+                ?? throw new ArgumentNullException(nameof(audiobookOperationCoordinator));
         }
 
         public async Task<RootFolder?> GetDefaultAsync()
@@ -112,11 +116,15 @@ namespace Listenarr.Application.Audiobooks.RootFolders
                 await EnsureNoActiveRelocationAsync(newRoot.Id);
                 var targetSemantics = await ResolveSemanticsAsync(newRoot.Path, newRoot.CaseSensitivityMode);
                 await EnsureNoActiveMoveJobsTouchRootAsync(newRoot.Path, targetSemantics.Semantics);
-                await _repo.ReassignAudiobooksAndRemoveAsync(
-                    root.Id,
-                    newRoot.Id,
-                    sourceSemantics.Semantics,
-                    targetSemantics.Semantics);
+                var audiobookIds = await _repo.GetAllAudiobookIdsAsync();
+                await _audiobookOperationCoordinator.ExecuteExclusiveAsync(
+                    audiobookIds,
+                    token => _repo.ReassignAudiobooksAndRemoveAsync(
+                        root.Id,
+                        newRoot.Id,
+                        sourceSemantics.Semantics,
+                        targetSemantics.Semantics,
+                        token));
                 return;
             }
 

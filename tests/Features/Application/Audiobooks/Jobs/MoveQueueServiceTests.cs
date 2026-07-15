@@ -601,7 +601,7 @@ namespace Listenarr.Tests.Features.Application.Audiobooks.Jobs
         }
 
         [Fact]
-        public async Task RequeueMoveAsync_FailedJob_ResetsRetryStateBeforePersistence()
+        public async Task RequeueMoveAsync_FailedJob_ResetsRetryStateAndPreservesRecoveryPhase()
         {
             var future = DateTimeOffset.UtcNow.AddHours(1);
             var job = new MoveJob
@@ -631,7 +631,7 @@ namespace Listenarr.Tests.Features.Application.Audiobooks.Jobs
 
             Assert.Equal(job.Id, requeuedJobId);
             Assert.Equal(MoveJobStatus.Queued, job.Status);
-            Assert.Equal(MoveJobPhase.None, job.Phase);
+            Assert.Equal(MoveJobPhase.CleaningSource, job.Phase);
             Assert.Null(job.Error);
             Assert.Equal(MoveFailureKind.None, job.FailureKind);
             Assert.Equal(0, job.AttemptCount);
@@ -719,7 +719,7 @@ namespace Listenarr.Tests.Features.Application.Audiobooks.Jobs
         }
 
         [Fact]
-        public async Task RequeuedJob_MarkedRunning_UsesPlannedPhase()
+        public async Task RequeuedRecoveryJob_MarkedRunning_PreservesRecoveryPhase()
         {
             var item = new MoveJob
             {
@@ -743,7 +743,7 @@ namespace Listenarr.Tests.Features.Application.Audiobooks.Jobs
             await service.UpdateJobStatusAsync(item.Id, LeaseOwner, 0, MoveJobStatus.Running);
 
             Assert.Equal(MoveJobStatus.Running, item.Status);
-            Assert.Equal(MoveJobPhase.Planned, item.Phase);
+            Assert.Equal(MoveJobPhase.CleaningSource, item.Phase);
         }
 
         [Fact]
@@ -909,7 +909,6 @@ namespace Listenarr.Tests.Features.Application.Audiobooks.Jobs
                     job.SetTargetIdentity(command.TargetIdentity);
                     job.IdentityKeyVersion = 3;
                     job.Status = MoveJobStatus.Queued;
-                    job.Phase = MoveJobPhase.None;
                     job.Error = null;
                     job.FailureKind = MoveFailureKind.None;
                     job.AttemptCount = 0;

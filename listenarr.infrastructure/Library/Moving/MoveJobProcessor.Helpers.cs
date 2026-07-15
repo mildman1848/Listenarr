@@ -68,7 +68,7 @@ namespace Listenarr.Infrastructure.Library.Moving
             return new MoveLeaseToken(job.LeaseOwner, job.LeaseGeneration);
         }
 
-        private Task UpdateJobStatusAsync(
+        private async Task UpdateJobStatusAsync(
             MoveJob job,
             MoveJobStatus status,
             string? error = null,
@@ -79,13 +79,15 @@ namespace Listenarr.Infrastructure.Library.Moving
                 throw new MoveLeaseLostException(job.Id, job.LeaseGeneration);
             }
 
-            return moveQueueService.UpdateJobStatusAsync(
+            await moveQueueService.UpdateJobStatusWithoutNotificationAsync(
                 job.Id,
                 job.LeaseOwner,
                 job.LeaseGeneration,
                 status,
                 error,
                 cancellationToken);
+            job.Status = status;
+            job.Error = error;
         }
 
         private async Task<FinalizedMoveRecoveryOutcome> TryRecoverFinalizedMoveAsync(
@@ -184,12 +186,24 @@ namespace Listenarr.Infrastructure.Library.Moving
                 return true;
             }
 
-            return !string.IsNullOrWhiteSpace(audiobook.BasePath)
-                && FileSystemPathIdentity.AreEquivalent(
+            if (string.IsNullOrWhiteSpace(audiobook.BasePath))
+            {
+                return false;
+            }
+
+            try
+            {
+                return FileSystemPathIdentity.AreEquivalent(
                     Path.GetFullPath(audiobook.BasePath)
                         .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar),
                     target.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar),
                     targetSemantics);
+            }
+            catch (Exception exception) when (exception is
+                ArgumentException or NotSupportedException or PathTooLongException or System.Security.SecurityException)
+            {
+                return false;
+            }
         }
 
         private sealed record FinalizedMoveRecoveryOutcome(
@@ -319,12 +333,16 @@ namespace Listenarr.Infrastructure.Library.Moving
             AudiobookContentMoveService? contentMoveService = null,
             AudiobookContentMoveRequest? moveRequest = null)
         {
-            var result = await moveQueueService.ScheduleRetryAsync(
+            var result = await moveQueueService.ScheduleRetryWithoutNotificationAsync(
                 job.Id,
                 job.LeaseOwner!,
                 job.LeaseGeneration,
                 error,
                 cancellationToken);
+            job.Status = result.Status;
+            job.Error = result.Status == MoveJobStatus.NeedsAttention
+                ? $"{error} Automatic retry limit exhausted; operator attention is required."
+                : error;
             if (result.Status == MoveJobStatus.NeedsAttention)
             {
                 if (contentMoveService != null && moveRequest != null)

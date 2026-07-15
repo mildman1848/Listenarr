@@ -9,6 +9,7 @@
  */
 using Listenarr.Tests.Builders;
 using Listenarr.Tests.Common;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging.Abstractions;
 
 namespace Listenarr.Tests.Features.Infrastructure.Metadata.Jobs
@@ -17,6 +18,67 @@ namespace Listenarr.Tests.Features.Infrastructure.Metadata.Jobs
     [Trait("Name", "MetadataRescanProcessorTests")]
     public sealed class MetadataRescanProcessorTests : BaseTests
     {
+        [Fact]
+        public async Task RunCycleAsync_PathChangesDuringExtraction_DiscardsStaleMetadataResult()
+        {
+            var extractionStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var releaseExtraction = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var metadataService = new Mock<IMetadataService>();
+            metadataService.Setup(service => service.ExtractFileMetadataAsync(It.IsAny<string>()))
+                .Returns(async () =>
+                {
+                    extractionStarted.SetResult();
+                    await releaseExtraction.Task;
+                    return new AudioMetadata
+                    {
+                        Duration = TimeSpan.FromSeconds(321),
+                        Format = "m4b"
+                    };
+                });
+            Init(builder => builder.WithSingleton(metadataService.Object));
+
+            var oldPath = await FileService.GetFileAsync(
+                FileService.GetTempDirectory("metadata-rescan-stale-old"),
+                "book.m4b",
+                "old audio");
+            var newPath = await FileService.GetFileAsync(
+                FileService.GetTempDirectory("metadata-rescan-stale-new"),
+                "book.m4b",
+                "new audio");
+            var audiobook = await _audiobookRepository.AddAsync(new AudiobookBuilder()
+                .WithTitle("Stale Metadata Extraction")
+                .WithBasePath(Path.GetDirectoryName(oldPath)!)
+                .Build());
+            var file = await _audiobookFileRepository.AddAsync(new AudiobookFileBuilder()
+                .WithAudiobook(audiobook)
+                .WithPath(oldPath)
+                .Build());
+
+            var processor = new MetadataRescanProcessor(
+                _provider.GetRequiredService<IServiceScopeFactory>(),
+                _provider.GetRequiredService<IAudiobookOperationCoordinator>(),
+                NullLogger<MetadataRescanProcessor>.Instance);
+            var cycle = processor.RunCycleAsync(CancellationToken.None);
+            await extractionStarted.Task;
+
+            var factory = _provider.GetRequiredService<IDbContextFactory<ListenArrDbContext>>();
+            await using (var moveContext = await factory.CreateDbContextAsync())
+            {
+                var movedFile = await moveContext.AudiobookFiles.SingleAsync(candidate => candidate.Id == file.Id);
+                movedFile.Path = newPath;
+                await moveContext.SaveChangesAsync();
+            }
+
+            releaseExtraction.SetResult();
+            await cycle;
+
+            await using var verification = await factory.CreateDbContextAsync();
+            var persisted = await verification.AudiobookFiles.SingleAsync(candidate => candidate.Id == file.Id);
+            Assert.Equal(newPath, persisted.Path);
+            Assert.Null(persisted.DurationSeconds);
+            Assert.Null(persisted.Format);
+        }
+
         [Theory]
         [InlineData(FileSystemCaseSensitivityMode.Sensitive, false)]
         [InlineData(FileSystemCaseSensitivityMode.Insensitive, true)]
@@ -44,6 +106,7 @@ namespace Listenarr.Tests.Features.Infrastructure.Metadata.Jobs
 
             var processor = new MetadataRescanProcessor(
                 _provider.GetRequiredService<IServiceScopeFactory>(),
+                _provider.GetRequiredService<IAudiobookOperationCoordinator>(),
                 NullLogger<MetadataRescanProcessor>.Instance);
             await processor.RunCycleAsync(CancellationToken.None);
 

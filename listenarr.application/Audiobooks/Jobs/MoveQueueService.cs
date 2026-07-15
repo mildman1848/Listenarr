@@ -278,6 +278,24 @@ namespace Listenarr.Application.Audiobooks.Jobs
             string? error = null,
             CancellationToken cancellationToken = default)
         {
+            await UpdateJobStatusWithoutNotificationAsync(
+                id,
+                leaseOwner,
+                leaseGeneration,
+                status,
+                error,
+                cancellationToken);
+            await NotifyPersistedJobStateAsync(id, status, error, cancellationToken);
+        }
+
+        public async Task UpdateJobStatusWithoutNotificationAsync(
+            Guid id,
+            string leaseOwner,
+            int leaseGeneration,
+            MoveJobStatus status,
+            string? error = null,
+            CancellationToken cancellationToken = default)
+        {
             var updatedAt = _timeProvider.GetUtcNow();
             MoveJob? dbJob;
             try
@@ -303,8 +321,6 @@ namespace Listenarr.Application.Audiobooks.Jobs
                 _logger.LogWarning(ex, "Failed to persist move job status change for {JobId}", id);
                 throw;
             }
-
-            await NotifyPersistedJobStateAsync(id, status, error, cancellationToken);
         }
 
         public async Task NotifyPersistedJobStateAsync(

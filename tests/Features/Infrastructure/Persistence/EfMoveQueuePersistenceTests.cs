@@ -806,7 +806,7 @@ public sealed class EfMoveQueuePersistenceTests : IAsyncLifetime
     }
 
     [Fact]
-    public async Task RequeueAsync_PersistsResetRetryAndLeaseState()
+    public async Task RequeueAsync_ResetsRetryAndLeaseStateButPreservesRecoveryPhase()
     {
         var persistence = CreatePersistence();
         var future = DateTimeOffset.UtcNow.AddHours(1);
@@ -830,7 +830,7 @@ public sealed class EfMoveQueuePersistenceTests : IAsyncLifetime
         var persisted = await persistence.GetByIdAsync(job.Id);
         Assert.NotNull(persisted);
         Assert.Equal(MoveJobStatus.Queued, persisted.Status);
-        Assert.Equal(MoveJobPhase.None, persisted.Phase);
+        Assert.Equal(MoveJobPhase.CleaningSource, persisted.Phase);
         Assert.Null(persisted.Error);
         Assert.Equal(MoveFailureKind.None, persisted.FailureKind);
         Assert.Null(persisted.NextAttemptAt);

@@ -73,7 +73,7 @@ namespace Listenarr.Tests.Features.Infrastructure.Library.Moving
             var dst = FileService.GetTempDirectory("listenarr_test_dst");
             await FileService.GetFileAsync(src, "file1.txt", "one");
 
-            var ab = new Audiobook { Title = "MoveBroadcastTest", BasePath = dst };
+            var ab = new Audiobook { Title = "MoveBroadcastTest", BasePath = src };
             await _audiobookRepository.AddAsync(ab);
 
             var moveQueue = _provider.GetRequiredService<IMoveQueueService>();

@@ -335,7 +335,8 @@ namespace Listenarr.Tests.Features.Infrastructure.Library.Scanning
                 _provider.GetRequiredService<ILogger<ScanJobProcessor>>(),
                 _provider.GetRequiredService<IHubContext<DownloadHub>>(),
                 _provider.GetRequiredService<IAppMetricsService>(),
-                _provider.GetRequiredService<IFileSystemSemanticsResolver>());
+                _provider.GetRequiredService<IFileSystemSemanticsResolver>(),
+                _provider.GetRequiredService<IAudiobookOperationCoordinator>());
 
             await processor.ProcessJobAsync(job, CancellationToken.None);
 

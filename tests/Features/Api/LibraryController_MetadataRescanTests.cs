@@ -162,6 +162,171 @@ namespace Listenarr.Tests.Features.Api
         }
 
         [Fact]
+        public async Task RescanMetadata_BasePathChangesDuringProviderLookup_PreservesCurrentPath()
+        {
+            var lookupStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var releaseLookup = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var metadataMock = new Mock<IAudiobookMetadataService>();
+            metadataMock
+                .Setup(service => service.GetMetadataAsync("B0PATHRACE", "us", false))
+                .Returns(async () =>
+                {
+                    lookupStarted.SetResult();
+                    await releaseLookup.Task;
+                    return new
+                    {
+                        metadata = new AudibleBookResponse
+                        {
+                            Asin = "B0PATHRACE",
+                            Title = "Updated During Race"
+                        },
+                        source = "Audible"
+                    };
+                });
+            var factory = _factory.WithWebHostBuilder(builder =>
+            {
+                builder.ConfigureServices(services =>
+                {
+                    services.RemoveAll<IAudiobookMetadataService>();
+                    services.AddSingleton(metadataMock.Object);
+                });
+            });
+
+            var oldBasePath = Path.Join(Path.GetTempPath(), $"metadata-rescan-old-{Guid.NewGuid():N}");
+            var newBasePath = Path.Join(Path.GetTempPath(), $"metadata-rescan-new-{Guid.NewGuid():N}");
+            int audiobookId;
+            using (var scope = factory.Services.CreateScope())
+            {
+                var db = scope.ServiceProvider.GetRequiredService<ListenArrDbContext>();
+                var audiobook = new Audiobook
+                {
+                    Title = "Before Race",
+                    BasePath = oldBasePath,
+                    Asin = "B0PATHRACE",
+                    ExternalIdentifiers =
+                    [
+                        new AudiobookExternalIdentifier
+                        {
+                            Type = AudiobookExternalIdentifierType.Asin,
+                            ValueRaw = "B0PATHRACE",
+                            ValueNormalized = "B0PATHRACE",
+                            Region = "us",
+                            IsPrimary = true,
+                            Source = AudiobookExternalIdentifierSource.Manual
+                        }
+                    ]
+                };
+                db.Audiobooks.Add(audiobook);
+                await db.SaveChangesAsync();
+                audiobookId = audiobook.Id;
+            }
+
+            var client = factory.CreateClient();
+            var rescan = PostRescanAsync(client, audiobookId);
+            await lookupStarted.Task;
+            using (var scope = factory.Services.CreateScope())
+            {
+                var db = scope.ServiceProvider.GetRequiredService<ListenArrDbContext>();
+                var audiobook = await db.Audiobooks.SingleAsync(candidate => candidate.Id == audiobookId);
+                audiobook.BasePath = newBasePath;
+                await db.SaveChangesAsync();
+            }
+
+            releaseLookup.SetResult();
+            var response = await rescan;
+            response.EnsureSuccessStatusCode();
+
+            using var verificationScope = factory.Services.CreateScope();
+            var verification = verificationScope.ServiceProvider.GetRequiredService<ListenArrDbContext>();
+            var updated = await verification.Audiobooks.SingleAsync(candidate => candidate.Id == audiobookId);
+            Assert.Equal(FileUtils.NormalizeStoredPath(newBasePath), updated.BasePath);
+            Assert.Equal("Updated During Race", updated.Title);
+        }
+
+        [Fact]
+        public async Task RescanMetadata_MetadataChangesDuringProviderLookup_ReturnsConflictWithoutOverwrite()
+        {
+            var lookupStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var releaseLookup = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var metadataMock = new Mock<IAudiobookMetadataService>();
+            metadataMock
+                .Setup(service => service.GetMetadataAsync("B0METARACE", "us", false))
+                .Returns(async () =>
+                {
+                    lookupStarted.SetResult();
+                    await releaseLookup.Task;
+                    return new
+                    {
+                        metadata = new AudibleBookResponse
+                        {
+                            Asin = "B0METARACE",
+                            Title = "Provider Title"
+                        },
+                        source = "Audible"
+                    };
+                });
+            var factory = _factory.WithWebHostBuilder(builder =>
+            {
+                builder.ConfigureServices(services =>
+                {
+                    services.RemoveAll<IAudiobookMetadataService>();
+                    services.AddSingleton(metadataMock.Object);
+                });
+            });
+
+            int audiobookId;
+            using (var scope = factory.Services.CreateScope())
+            {
+                var db = scope.ServiceProvider.GetRequiredService<ListenArrDbContext>();
+                var audiobook = new Audiobook
+                {
+                    Title = "Original Title",
+                    Asin = "B0METARACE",
+                    ExternalIdentifiers =
+                    [
+                        new AudiobookExternalIdentifier
+                        {
+                            Type = AudiobookExternalIdentifierType.Asin,
+                            ValueRaw = "B0METARACE",
+                            ValueNormalized = "B0METARACE",
+                            Region = "us",
+                            IsPrimary = true,
+                            Source = AudiobookExternalIdentifierSource.Manual
+                        }
+                    ]
+                };
+                db.Audiobooks.Add(audiobook);
+                await db.SaveChangesAsync();
+                audiobookId = audiobook.Id;
+            }
+
+            var client = factory.CreateClient();
+            var rescan = PostRescanAsync(client, audiobookId);
+            await lookupStarted.Task;
+            using (var scope = factory.Services.CreateScope())
+            {
+                var db = scope.ServiceProvider.GetRequiredService<ListenArrDbContext>();
+                var audiobook = await db.Audiobooks.SingleAsync(candidate => candidate.Id == audiobookId);
+                audiobook.Title = "Manual Title";
+                await db.SaveChangesAsync();
+            }
+
+            releaseLookup.SetResult();
+            var response = await rescan;
+            Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
+            Assert.Contains(
+                "audiobook_metadata_changed",
+                await response.Content.ReadAsStringAsync(),
+                StringComparison.Ordinal);
+
+            using var verificationScope = factory.Services.CreateScope();
+            var verification = verificationScope.ServiceProvider.GetRequiredService<ListenArrDbContext>();
+            Assert.Equal(
+                "Manual Title",
+                (await verification.Audiobooks.SingleAsync(candidate => candidate.Id == audiobookId)).Title);
+        }
+
+        [Fact]
         public async Task RescanMetadata_Returns429_WhenRepeatedImmediately_ForSameAudiobookAndActor()
         {
             var metadataMock = new Mock<IAudiobookMetadataService>();

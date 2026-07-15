@@ -26,6 +26,7 @@ namespace Listenarr.Application.Audiobooks.Files
     public class AudiobookFileService(
         IMemoryCache memoryCache,
         MetadataExtractionLimiter limiter,
+        IAudiobookRepository audiobookRepository,
         IAudiobookFileRepository audiobookFileRepository,
         IHistoryRepository historyRepository,
         IMetadataService metadataService,
@@ -35,17 +36,27 @@ namespace Listenarr.Application.Audiobooks.Files
         IFileSystemSemanticsResolver semanticsResolver,
         IRootFolderService rootFolderService,
         ILogger<AudiobookFileService> logger,
-        IAudiobookOperationCoordinator? audiobookOperationCoordinator = null) : IAudiobookFileService
+        IAudiobookOperationCoordinator audiobookOperationCoordinator) : IAudiobookFileService
     {
         public Task<bool> EnsureAudiobookFileAsync(
             Audiobook audiobook,
             string filePath,
             string? source = "scan") =>
-            audiobookOperationCoordinator != null
-                ? audiobookOperationCoordinator.ExecuteExclusiveAsync(
-                    audiobook.Id,
-                    _ => EnsureAudiobookFileCoreAsync(audiobook, filePath, source))
-                : EnsureAudiobookFileCoreAsync(audiobook, filePath, source);
+            audiobookOperationCoordinator.ExecuteExclusiveAsync(
+                audiobook.Id,
+                async _ =>
+                {
+                    var currentAudiobook = await audiobookRepository.GetByIdSnapshotAsync(audiobook.Id);
+                    if (currentAudiobook == null)
+                    {
+                        logger.LogDebug(
+                            "Skipping audiobook file registration because audiobook {AudiobookId} no longer exists",
+                            audiobook.Id);
+                        return false;
+                    }
+
+                    return await EnsureAudiobookFileCoreAsync(currentAudiobook, filePath, source);
+                });
 
         private async Task<bool> EnsureAudiobookFileCoreAsync(
             Audiobook audiobook,

@@ -51,7 +51,8 @@ namespace Listenarr.Tests.Features.Application.Audiobooks.RootFolders
                     semanticsResolver: null!,
                     Mock.Of<IMoveQueueService>(),
                     Mock.Of<IRootFolderRelocationService>(),
-                    new FilesystemMutationCoordinator()));
+                    new FilesystemMutationCoordinator(),
+                    new AudiobookOperationCoordinator()));
         }
 
         [Fact]
@@ -566,6 +567,68 @@ namespace Listenarr.Tests.Features.Application.Audiobooks.RootFolders
         }
 
         [Fact]
+        public async Task DeleteWithReassignment_WaitsForEveryExistingAudiobookOperation()
+        {
+            var options = new DbContextOptionsBuilder<ListenArrDbContext>()
+                .UseInMemoryDatabase(Guid.NewGuid().ToString())
+                .Options;
+            var sourcePath = Path.Join(rootPath, "Author", "Title");
+            var expectedPath = Path.Join(newRootPath, "Author", "Title");
+            int unrelatedAudiobookId;
+            int sourceRootId;
+            int targetRootId;
+            await using (var db = new ListenArrDbContext(options))
+            {
+                var sourceRoot = new RootFolder { Name = "Source", Path = rootPath };
+                var targetRoot = new RootFolder { Name = "Target", Path = newRootPath };
+                var audiobook = new Audiobook { Title = "Reassigned", BasePath = sourcePath };
+                var unrelatedAudiobook = new Audiobook
+                {
+                    Title = "Unrelated",
+                    BasePath = FileUtils.GetAbsolutePath("other-root", "Author", "Title")
+                };
+                db.RootFolders.AddRange(sourceRoot, targetRoot);
+                db.Audiobooks.AddRange(audiobook, unrelatedAudiobook);
+                await db.SaveChangesAsync();
+                unrelatedAudiobookId = unrelatedAudiobook.Id;
+                sourceRootId = sourceRoot.Id;
+                targetRootId = targetRoot.Id;
+            }
+
+            var repo = new EfRootFolderRepository(
+                new TestDbFactory(options),
+                Mock.Of<ILogger<EfRootFolderRepository>>());
+            using var operationCoordinator = new AudiobookOperationCoordinator();
+            var service = new RootFolderService(
+                repo,
+                null!,
+                audiobookOperationCoordinator: operationCoordinator);
+            var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var blocker = operationCoordinator.ExecuteExclusiveAsync(
+                unrelatedAudiobookId,
+                async _ =>
+                {
+                    entered.SetResult();
+                    await release.Task;
+                });
+            await entered.Task;
+
+            var deleteTask = service.DeleteAsync(sourceRootId, targetRootId);
+            await Task.Delay(50);
+            Assert.False(deleteTask.IsCompleted);
+
+            release.SetResult();
+            await Task.WhenAll(blocker, deleteTask);
+
+            await using var verification = new ListenArrDbContext(options);
+            Assert.Equal(
+                expectedPath,
+                (await verification.Audiobooks.SingleAsync(audiobook => audiobook.Title == "Reassigned")).BasePath);
+            Assert.DoesNotContain(verification.RootFolders, root => root.Id == sourceRootId);
+        }
+
+        [Fact]
         public async Task Delete_Throws_WhenReassignmentTargetHasActiveRelocation()
         {
             var options = new DbContextOptionsBuilder<ListenArrDbContext>()
@@ -1001,14 +1064,16 @@ namespace Listenarr.Tests.Features.Application.Audiobooks.RootFolders
             IMoveQueueService? moveQueue = null,
             IFileSystemSemanticsResolver? semanticsResolver = null,
             IRootFolderRelocationService? relocationService = null,
-            IFilesystemMutationCoordinator? mutationCoordinator = null)
+            IFilesystemMutationCoordinator? mutationCoordinator = null,
+            IAudiobookOperationCoordinator? audiobookOperationCoordinator = null)
             : base(
                 repo,
                 logger,
                 semanticsResolver ?? BuildSemanticsResolver(),
                 moveQueue ?? Mock.Of<IMoveQueueService>(),
                 relocationService ?? Mock.Of<IRootFolderRelocationService>(),
-                mutationCoordinator ?? new FilesystemMutationCoordinator())
+                mutationCoordinator ?? new FilesystemMutationCoordinator(),
+                audiobookOperationCoordinator ?? new AudiobookOperationCoordinator())
         {
         }
 

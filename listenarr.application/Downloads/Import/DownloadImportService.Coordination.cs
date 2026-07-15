@@ -6,11 +6,24 @@ public partial class DownloadImportService
         Audiobook audiobook,
         List<string> files,
         CancellationToken ct = default,
-        DownloadImportOptions? options = null) =>
-        audiobookOperationCoordinator != null
-            ? audiobookOperationCoordinator.ExecuteExclusiveAsync(
-                audiobook.Id,
-                token => ImportDownloadFilesCoreAsync(audiobook, files, token, options),
-                ct)
-            : ImportDownloadFilesCoreAsync(audiobook, files, ct, options);
+        DownloadImportOptions? options = null)
+    {
+        ArgumentNullException.ThrowIfNull(audiobook);
+        return audiobookOperationCoordinator.ExecuteExclusiveAsync(
+            audiobook.Id,
+            async token =>
+            {
+                var currentAudiobook = await audiobookRepository.GetByIdSnapshotAsync(
+                    audiobook.Id,
+                    token)
+                    ?? throw new InvalidOperationException(
+                        $"Audiobook {audiobook.Id} no longer exists");
+                return await ImportDownloadFilesCoreAsync(
+                    currentAudiobook,
+                    files,
+                    token,
+                    options);
+            },
+            ct);
+    }
 }

@@ -65,6 +65,7 @@ public sealed class AudiobookDestinationRewriteServiceTests
                 It.IsAny<CancellationToken>()))
             .ReturnsAsync(true);
 
+        using var operationCoordinator = new AudiobookOperationCoordinator();
         var service = new AudiobookDestinationRewriteService(
             repository.Object,
             settings.Object,
@@ -73,7 +74,8 @@ public sealed class AudiobookDestinationRewriteServiceTests
             semanticsResolver.Object,
             Mock.Of<ILogger<AudiobookDestinationRewriteService>>(),
             relocationService.Object,
-            new FilesystemMutationCoordinator());
+            new FilesystemMutationCoordinator(),
+            operationCoordinator);
 
         var result = await service.RewriteDestinationAsync(
             85,
@@ -151,6 +153,7 @@ public sealed class AudiobookDestinationRewriteServiceTests
                 It.IsAny<CancellationToken>()))
             .ReturnsAsync(true);
 
+        using var operationCoordinator = new AudiobookOperationCoordinator();
         var service = new AudiobookDestinationRewriteService(
             repository.Object,
             settings.Object,
@@ -159,7 +162,8 @@ public sealed class AudiobookDestinationRewriteServiceTests
             semanticsResolver.Object,
             Mock.Of<ILogger<AudiobookDestinationRewriteService>>(),
             relocationService.Object,
-            new FilesystemMutationCoordinator());
+            new FilesystemMutationCoordinator(),
+            operationCoordinator);
 
         var result = await service.RewriteDestinationAsync(85, destinationPath, expectedSourcePath: null);
 

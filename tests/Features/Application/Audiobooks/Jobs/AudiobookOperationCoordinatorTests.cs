@@ -35,6 +35,74 @@ public sealed class AudiobookOperationCoordinatorTests
     }
 
     [Fact]
+    public async Task ManyAudiobooks_DoNotUseRecursiveLockDepth()
+    {
+        using var coordinator = new AudiobookOperationCoordinator();
+        var audiobookIds = Enumerable.Range(1, 10_000).Reverse().ToArray();
+        var entered = false;
+
+        await coordinator.ExecuteExclusiveAsync(
+            audiobookIds,
+            _ =>
+            {
+                entered = true;
+                return Task.CompletedTask;
+            });
+
+        Assert.True(entered);
+    }
+
+    [Fact]
+    public async Task OverlappingSets_UseCanonicalOrder()
+    {
+        using var coordinator = new AudiobookOperationCoordinator();
+        var firstEntered = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseFirst = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var secondEntered = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+
+        var first = coordinator.ExecuteExclusiveAsync(
+            [2, 1],
+            async _ =>
+            {
+                firstEntered.TrySetResult();
+                await releaseFirst.Task;
+            });
+        await firstEntered.Task;
+
+        var second = coordinator.ExecuteExclusiveAsync(
+            [1, 2],
+            _ =>
+            {
+                secondEntered.TrySetResult();
+                return Task.CompletedTask;
+            });
+        await Task.Delay(50);
+        Assert.False(secondEntered.Task.IsCompleted);
+
+        releaseFirst.TrySetResult();
+        await Task.WhenAll(first, second);
+        Assert.True(secondEntered.Task.IsCompletedSuccessfully);
+    }
+
+    [Fact]
+    public async Task NestedLowerKeyAcquisition_ThrowsInsteadOfDeadlocking()
+    {
+        using var coordinator = new AudiobookOperationCoordinator();
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            coordinator.ExecuteExclusiveAsync(
+                2,
+                _ => coordinator.ExecuteExclusiveAsync(
+                    [1, 2],
+                    _ => Task.CompletedTask)));
+
+        Assert.Contains("higher key", exception.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public async Task DifferentAudiobooks_CanRunConcurrently()
     {
         using var coordinator = new AudiobookOperationCoordinator();
@@ -92,6 +160,46 @@ public sealed class AudiobookOperationCoordinatorTests
             });
 
         Assert.Equal(2, nestedCount);
+    }
+
+    [Fact]
+    public async Task CanceledMultiKeyWaiter_ReleasesAlreadyAcquiredKeys()
+    {
+        using var coordinator = new AudiobookOperationCoordinator();
+        var secondKeyEntered = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseSecondKey = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var blocker = coordinator.ExecuteExclusiveAsync(
+            2,
+            async _ =>
+            {
+                secondKeyEntered.TrySetResult();
+                await releaseSecondKey.Task;
+            });
+        await secondKeyEntered.Task;
+
+        using var cancellation = new CancellationTokenSource();
+        var waiting = coordinator.ExecuteExclusiveAsync(
+            [1, 2],
+            _ => Task.CompletedTask,
+            cancellation.Token);
+        await Task.Delay(50);
+        await cancellation.CancelAsync();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => waiting);
+
+        var keyOneEntered = false;
+        await coordinator.ExecuteExclusiveAsync(
+            1,
+            _ =>
+            {
+                keyOneEntered = true;
+                return Task.CompletedTask;
+            });
+        Assert.True(keyOneEntered);
+
+        releaseSecondKey.TrySetResult();
+        await blocker;
     }
 
     [Fact]

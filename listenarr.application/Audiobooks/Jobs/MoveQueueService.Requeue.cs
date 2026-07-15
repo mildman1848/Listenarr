@@ -157,7 +157,6 @@ public partial class MoveQueueService
     private static bool CanRequeueJobStatus(MoveJobStatus status) =>
         status is MoveJobStatus.Failed or
             MoveJobStatus.NeedsAttention or
-            MoveJobStatus.Completed or
             MoveJobStatus.Queued;
 
     private static string BuildDeduplicationKey(

@@ -33,7 +33,7 @@ namespace Listenarr.Application.Audiobooks.Renaming
         private readonly IRootFolderService? _rootFolderService;
         private readonly IFileSystemSemanticsResolver _semanticsResolver;
         private readonly IHistoryRepository? _historyRepository;
-        private readonly IAudiobookOperationCoordinator? _audiobookOperationCoordinator;
+        private readonly IAudiobookOperationCoordinator _audiobookOperationCoordinator;
 
         public RenameService(
             IConfigurationService configService,
@@ -43,9 +43,9 @@ namespace Listenarr.Application.Audiobooks.Renaming
             IFileSystem fileSystem,
             ILogger<RenameService> logger,
             IFileSystemSemanticsResolver semanticsResolver,
+            IAudiobookOperationCoordinator audiobookOperationCoordinator,
             IRootFolderService? rootFolderService = null,
-            IHistoryRepository? historyRepository = null,
-            IAudiobookOperationCoordinator? audiobookOperationCoordinator = null)
+            IHistoryRepository? historyRepository = null)
         {
             _configService = configService;
             _fileNamingService = fileNamingService;
@@ -56,7 +56,7 @@ namespace Listenarr.Application.Audiobooks.Renaming
             _semanticsResolver = semanticsResolver;
             _rootFolderService = rootFolderService;
             _historyRepository = historyRepository;
-            _audiobookOperationCoordinator = audiobookOperationCoordinator;
+            _audiobookOperationCoordinator = audiobookOperationCoordinator ?? throw new ArgumentNullException(nameof(audiobookOperationCoordinator));
         }
 
         public async Task<List<RenamePreview>> PreviewRenameAsync(int[] audiobookIds, CancellationToken ct = default)
@@ -88,12 +88,10 @@ namespace Listenarr.Application.Audiobooks.Renaming
             var results = new List<RenameResult>();
             foreach (var op in operations)
             {
-                var result = _audiobookOperationCoordinator != null
-                    ? await _audiobookOperationCoordinator.ExecuteExclusiveAsync(
-                        op.AudiobookId,
-                        token => ExecuteSingleAsync(op, settings, rootFolders, token),
-                        ct)
-                    : await ExecuteSingleAsync(op, settings, rootFolders, ct);
+                var result = await _audiobookOperationCoordinator.ExecuteExclusiveAsync(
+                    op.AudiobookId,
+                    token => ExecuteSingleAsync(op, settings, rootFolders, token),
+                    ct);
                 results.Add(result);
             }
             return results;

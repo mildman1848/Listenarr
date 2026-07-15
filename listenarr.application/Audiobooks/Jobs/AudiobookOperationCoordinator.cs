@@ -17,8 +17,20 @@ public sealed class AudiobookOperationCoordinator : IAudiobookOperationCoordinat
         int audiobookId,
         Func<CancellationToken, Task> operation,
         CancellationToken cancellationToken = default) =>
+        ExecuteExclusiveAsync([audiobookId], operation, cancellationToken);
+
+    public Task<T> ExecuteExclusiveAsync<T>(
+        int audiobookId,
+        Func<CancellationToken, Task<T>> operation,
+        CancellationToken cancellationToken = default) =>
+        ExecuteExclusiveAsync([audiobookId], operation, cancellationToken);
+
+    public Task ExecuteExclusiveAsync(
+        IEnumerable<int> audiobookIds,
+        Func<CancellationToken, Task> operation,
+        CancellationToken cancellationToken = default) =>
         ExecuteExclusiveAsync<object?>(
-            audiobookId,
+            audiobookIds,
             async token =>
             {
                 await operation(token);
@@ -27,68 +39,128 @@ public sealed class AudiobookOperationCoordinator : IAudiobookOperationCoordinat
             cancellationToken);
 
     public async Task<T> ExecuteExclusiveAsync<T>(
-        int audiobookId,
+        IEnumerable<int> audiobookIds,
         Func<CancellationToken, Task<T>> operation,
         CancellationToken cancellationToken = default)
     {
+        ArgumentNullException.ThrowIfNull(audiobookIds);
         ArgumentNullException.ThrowIfNull(operation);
         ObjectDisposedException.ThrowIf(_disposed, this);
         cancellationToken.ThrowIfCancellationRequested();
 
+        var orderedIds = audiobookIds
+            .Distinct()
+            .OrderBy(id => id)
+            .ToArray();
+        if (orderedIds.Length == 0)
+        {
+            return await operation(cancellationToken);
+        }
+
         var held = _held.Value;
-        if (held != null && held.TryGetValue(audiobookId, out var depth))
+        if (held is { Count: > 0 })
         {
-            held[audiobookId] = depth + 1;
-            try
+            var highestHeldId = held.Keys.Max();
+            var lowerUnheldId = orderedIds
+                .Where(id => !held.ContainsKey(id) && id < highestHeldId)
+                .Select(id => (int?)id)
+                .FirstOrDefault();
+            if (lowerUnheldId.HasValue)
             {
-                return await operation(cancellationToken);
-            }
-            finally
-            {
-                held[audiobookId] = depth;
+                throw new InvalidOperationException(
+                    $"Cannot acquire audiobook operation key {lowerUnheldId.Value} after higher key {highestHeldId} is already held.");
             }
         }
 
-        Entry entry;
-        lock (_sync)
-        {
-            ObjectDisposedException.ThrowIf(_disposed, this);
-            if (!_entries.TryGetValue(audiobookId, out entry!))
-            {
-                entry = new Entry();
-                _entries.Add(audiobookId, entry);
-            }
-            entry.References++;
-        }
-
-        var acquired = false;
+        var acquired = new List<(int Id, Entry Entry)>();
+        var reentered = new List<(int Id, int PreviousDepth)>();
         try
         {
-            await entry.Gate.WaitAsync(cancellationToken);
-            acquired = true;
-            held ??= [];
-            _held.Value = held;
-            held[audiobookId] = 1;
+            foreach (var audiobookId in orderedIds)
+            {
+                if (held != null && held.TryGetValue(audiobookId, out var depth))
+                {
+                    held[audiobookId] = depth + 1;
+                    reentered.Add((audiobookId, depth));
+                    continue;
+                }
+
+                var entry = AddReference(audiobookId);
+                try
+                {
+                    await entry.Gate.WaitAsync(cancellationToken);
+                }
+                catch
+                {
+                    ReleaseReference(audiobookId, entry, releaseGate: false);
+                    throw;
+                }
+
+                acquired.Add((audiobookId, entry));
+                held ??= [];
+                _held.Value = held;
+                held[audiobookId] = 1;
+            }
+
             return await operation(cancellationToken);
         }
         finally
         {
-            if (acquired)
+            for (var index = reentered.Count - 1; index >= 0; index--)
             {
-                held!.Remove(audiobookId);
-                entry.Gate.Release();
+                var (audiobookId, previousDepth) = reentered[index];
+                held![audiobookId] = previousDepth;
             }
 
-            lock (_sync)
+            for (var index = acquired.Count - 1; index >= 0; index--)
             {
-                entry.References--;
-                if (entry.References == 0
-                    && _entries.TryGetValue(audiobookId, out var current)
-                    && ReferenceEquals(current, entry))
-                {
-                    _entries.Remove(audiobookId);
-                    entry.Gate.Dispose();
-                }
+                var (audiobookId, entry) = acquired[index];
+                held!.Remove(audiobookId);
+                ReleaseReference(audiobookId, entry, releaseGate: true);
+            }
+
+            if (held is { Count: 0 })
+            {
+                _held.Value = null;
+            }
+        }
+    }
+
+    private Entry AddReference(int audiobookId)
+    {
+        lock (_sync)
+        {
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            if (!_entries.TryGetValue(audiobookId, out var entry))
+            {
+                entry = new Entry();
+                _entries.Add(audiobookId, entry);
+            }
+
+            entry.References++;
+            return entry;
+        }
+    }
+
+    private void ReleaseReference(
+        int audiobookId,
+        Entry entry,
+        bool releaseGate)
+    {
+        if (releaseGate)
+        {
+            entry.Gate.Release();
+        }
+
+        lock (_sync)
+        {
+            entry.References--;
+            if (entry.References == 0
+                && _entries.TryGetValue(audiobookId, out var current)
+                && ReferenceEquals(current, entry))
+            {
+                _entries.Remove(audiobookId);
+                entry.Gate.Dispose();
             }
         }
     }

@@ -29,6 +29,7 @@ namespace Listenarr.Api.Features.Library
         private readonly IAudiobookFilesystemDeleteService _audiobookFilesystemDeleteService;
         private readonly string _contentRootPath;
         private readonly IFileSystem _fileSystem;
+        private readonly IAudiobookOperationCoordinator _audiobookOperationCoordinator;
         private readonly ILogger<LibraryDeleteWorkflow> _logger;
 
         public LibraryDeleteWorkflow(
@@ -37,6 +38,7 @@ namespace Listenarr.Api.Features.Library
             IAudiobookFilesystemDeleteService audiobookFilesystemDeleteService,
             IApplicationPathService applicationPathService,
             IFileSystem fileSystem,
+            IAudiobookOperationCoordinator audiobookOperationCoordinator,
             ILogger<LibraryDeleteWorkflow> logger)
         {
             _repo = repo;
@@ -44,10 +46,16 @@ namespace Listenarr.Api.Features.Library
             _audiobookFilesystemDeleteService = audiobookFilesystemDeleteService;
             _contentRootPath = applicationPathService.ContentRootPath;
             _fileSystem = fileSystem;
+            _audiobookOperationCoordinator = audiobookOperationCoordinator ?? throw new ArgumentNullException(nameof(audiobookOperationCoordinator));
             _logger = logger;
         }
 
-        public async Task<IActionResult> DeleteAsync(int id, bool deleteFiles, bool deleteFolder)
+        public Task<IActionResult> DeleteAsync(int id, bool deleteFiles, bool deleteFolder) =>
+            _audiobookOperationCoordinator.ExecuteExclusiveAsync(
+                id,
+                _ => DeleteCoreAsync(id, deleteFiles, deleteFolder));
+
+        private async Task<IActionResult> DeleteCoreAsync(int id, bool deleteFiles, bool deleteFolder)
         {
             var audiobook = await _repo.GetByIdAsync(id);
             if (audiobook == null)

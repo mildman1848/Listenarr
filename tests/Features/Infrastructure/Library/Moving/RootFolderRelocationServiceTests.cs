@@ -12,6 +12,7 @@ public sealed class RootFolderRelocationServiceTests : IAsyncLifetime
         $"relocation-{Guid.NewGuid():N}.db");
     private string TempRoot => Path.GetDirectoryName(_databasePath)!;
     private TestDbContextFactory _factory = null!;
+    private readonly AudiobookOperationCoordinator _operationCoordinator = new();
 
     public async Task InitializeAsync()
     {
@@ -26,6 +27,7 @@ public sealed class RootFolderRelocationServiceTests : IAsyncLifetime
 
     public Task DisposeAsync()
     {
+        _operationCoordinator.Dispose();
         if (File.Exists(_databasePath)) File.Delete(_databasePath);
         return Task.CompletedTask;
     }
@@ -296,7 +298,8 @@ public sealed class RootFolderRelocationServiceTests : IAsyncLifetime
             new FileSystemSemanticsResolver(),
             new NoopHubBroadcaster(),
             TimeProvider.System,
-            coordinator);
+            coordinator,
+            _operationCoordinator);
         var moveService = new MoveQueueService(
             Microsoft.Extensions.Logging.Abstractions.NullLogger<MoveQueueService>.Instance,
             new EfMoveQueuePersistence(_factory, new FileSystemSemanticsResolver()),
@@ -335,7 +338,8 @@ public sealed class RootFolderRelocationServiceTests : IAsyncLifetime
             new FileSystemSemanticsResolver(),
             new NoopHubBroadcaster(),
             TimeProvider.System,
-            coordinator);
+            coordinator,
+            _operationCoordinator);
         var moveService = new MoveQueueService(
             Microsoft.Extensions.Logging.Abstractions.NullLogger<MoveQueueService>.Instance,
             new EfMoveQueuePersistence(_factory, new FileSystemSemanticsResolver()),
@@ -359,6 +363,34 @@ public sealed class RootFolderRelocationServiceTests : IAsyncLifetime
         coordinator.ReleaseFirst();
         await relocationTask;
         await Assert.ThrowsAsync<MoveRelocationConflictException>(() => moveTask);
+    }
+
+    [Fact]
+    public async Task RelocationStart_WaitsForActiveAudiobookOperationBeforeLoadingTransactionState()
+    {
+        var (rootId, audiobookId, _, target) = await SeedRelocationScenarioAsync();
+        var operationEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseOperation = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var blocker = _operationCoordinator.ExecuteExclusiveAsync(
+            audiobookId,
+            async _ =>
+            {
+                operationEntered.SetResult();
+                await releaseOperation.Task;
+            });
+        await operationEntered.Task;
+
+        var relocationTask = CreateService().StartAsync(
+            rootId,
+            BuildRelocationCommand(target));
+
+        await Task.Delay(50);
+        Assert.False(relocationTask.IsCompleted);
+        releaseOperation.SetResult();
+        await blocker;
+
+        var result = await relocationTask;
+        Assert.Equal(RootFolderRelocationStatus.Pending, result.Status);
     }
 
     [Fact]
@@ -617,7 +649,8 @@ public sealed class RootFolderRelocationServiceTests : IAsyncLifetime
             new FileSystemSemanticsResolver(),
             new NoopHubBroadcaster(),
             TimeProvider.System,
-            coordinator);
+            coordinator,
+            _operationCoordinator);
 
         var firstRetry = service.RetryAsync(relocationId);
         await coordinator.FirstEntered;
@@ -655,7 +688,8 @@ public sealed class RootFolderRelocationServiceTests : IAsyncLifetime
             new FileSystemSemanticsResolver(),
             broadcaster,
             TimeProvider.System,
-            coordinator);
+            coordinator,
+            _operationCoordinator);
 
         var result = await service.RetryAsync(relocationId);
 
@@ -675,7 +709,8 @@ public sealed class RootFolderRelocationServiceTests : IAsyncLifetime
             new FileSystemSemanticsResolver(),
             broadcaster,
             TimeProvider.System,
-            coordinator);
+            coordinator,
+            _operationCoordinator);
         var blocker = coordinator.ExecuteExclusiveAsync(_ => Task.CompletedTask);
         await coordinator.FirstEntered;
         using var cancellation = new CancellationTokenSource();
@@ -821,7 +856,8 @@ public sealed class RootFolderRelocationServiceTests : IAsyncLifetime
             new TargetUnavailableSemanticsResolver(target),
             broadcaster,
             TimeProvider.System,
-            coordinator);
+            coordinator,
+            _operationCoordinator);
         var result = await retryService.RetryAsync(started.RelocationId!.Value);
 
         Assert.Equal(RootFolderRelocationStatus.NeedsAttention, result.Status);
@@ -1042,6 +1078,211 @@ public sealed class RootFolderRelocationServiceTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task OnMoveJobStateChanged_NonRelocationJob_SkipsGlobalCoordinator()
+    {
+        Guid jobId;
+        await using (var db = await _factory.CreateDbContextAsync())
+        {
+            var audiobook = new Audiobook
+            {
+                Title = "Ordinary Move",
+                BasePath = Path.Join(Path.GetTempPath(), $"ordinary-move-{Guid.NewGuid():N}")
+            };
+            db.Audiobooks.Add(audiobook);
+            await db.SaveChangesAsync();
+            var job = new MoveJob
+            {
+                AudiobookId = audiobook.Id,
+                SourcePath = audiobook.BasePath,
+                RequestedPath = Path.Join(Path.GetTempPath(), $"ordinary-target-{Guid.NewGuid():N}"),
+                Status = MoveJobStatus.Running
+            };
+            db.MoveJobs.Add(job);
+            await db.SaveChangesAsync();
+            jobId = job.Id;
+        }
+
+        var coordinator = new FirstEntryPausingCoordinator();
+        var service = new RootFolderRelocationService(
+            _factory,
+            new FileSystemSemanticsResolver(),
+            new NoopHubBroadcaster(),
+            TimeProvider.System,
+            coordinator,
+            _operationCoordinator);
+
+        await service.OnMoveJobStateChangedAsync(jobId);
+
+        Assert.Equal(0, coordinator.EntryCount);
+    }
+
+    [Fact]
+    public async Task OnMoveJobStateChanged_NonTerminalRelocationJob_SkipsGlobalCoordinator()
+    {
+        Guid jobId;
+        await using (var db = await _factory.CreateDbContextAsync())
+        {
+            var source = Path.Join(Path.GetTempPath(), $"running-relocation-source-{Guid.NewGuid():N}");
+            var target = Path.Join(Path.GetTempPath(), $"running-relocation-target-{Guid.NewGuid():N}");
+            var root = new RootFolder { Name = "Library", Path = source };
+            var audiobook = new Audiobook { Title = "Running", BasePath = Path.Join(source, "Title") };
+            db.RootFolders.Add(root);
+            db.Audiobooks.Add(audiobook);
+            await db.SaveChangesAsync();
+            var relocation = new RootFolderRelocation
+            {
+                RootFolderId = root.Id,
+                ActiveRootFolderId = root.Id,
+                SourcePath = source,
+                TargetPath = target,
+                Mode = RootFolderRelocationMode.Relocate,
+                Status = RootFolderRelocationStatus.Running,
+                DesiredName = root.Name,
+                TotalJobs = 1
+            };
+            db.RootFolderRelocations.Add(relocation);
+            await db.SaveChangesAsync();
+            var job = new MoveJob
+            {
+                AudiobookId = audiobook.Id,
+                SourcePath = audiobook.BasePath,
+                RequestedPath = Path.Join(target, "Title"),
+                Status = MoveJobStatus.Running,
+                RelocationId = relocation.Id
+            };
+            db.MoveJobs.Add(job);
+            await db.SaveChangesAsync();
+            jobId = job.Id;
+        }
+
+        var coordinator = new FirstEntryPausingCoordinator();
+        var service = new RootFolderRelocationService(
+            _factory,
+            new FileSystemSemanticsResolver(),
+            new NoopHubBroadcaster(),
+            TimeProvider.System,
+            coordinator,
+            _operationCoordinator);
+
+        await service.OnMoveJobStateChangedAsync(jobId);
+
+        Assert.Equal(0, coordinator.EntryCount);
+    }
+
+    [Fact]
+    public async Task OnMoveJobStateChanged_WaitsForFilesystemMutationCoordinator()
+    {
+        var source = Path.Join(Path.GetTempPath(), $"finalize-lock-source-{Guid.NewGuid():N}");
+        var target = Path.Join(Path.GetTempPath(), $"finalize-lock-target-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(source);
+        int rootId;
+        await using (var db = await _factory.CreateDbContextAsync())
+        {
+            var root = new RootFolder { Name = "Library", Path = source };
+            db.RootFolders.Add(root);
+            db.Audiobooks.Add(new Audiobook { Title = "Title", BasePath = Path.Join(source, "Title") });
+            await db.SaveChangesAsync();
+            rootId = root.Id;
+        }
+
+        await CreateService().StartAsync(
+            rootId,
+            new RootFolderPathChangeCommand(
+                target,
+                RootFolderRelocationMode.Relocate,
+                true,
+                "Finalized Library",
+                false,
+                FileSystemCaseSensitivityMode.Auto));
+        Guid jobId;
+        await using (var db = await _factory.CreateDbContextAsync())
+        {
+            var job = await db.MoveJobs.SingleAsync();
+            job.Status = MoveJobStatus.Completed;
+            job.ActiveDeduplicationKey = null;
+            var audiobook = await db.Audiobooks.SingleAsync();
+            audiobook.BasePath = job.RequestedPath;
+            await db.SaveChangesAsync();
+            jobId = job.Id;
+        }
+
+        var coordinator = new FirstEntryPausingCoordinator();
+        var service = new RootFolderRelocationService(
+            _factory,
+            new FileSystemSemanticsResolver(),
+            new NoopHubBroadcaster(),
+            TimeProvider.System,
+            coordinator,
+            _operationCoordinator);
+        var finalizationTask = service.OnMoveJobStateChangedAsync(jobId);
+        await coordinator.FirstEntered;
+        Assert.False(finalizationTask.IsCompleted);
+
+        coordinator.ReleaseFirst();
+        await finalizationTask;
+
+        await using var verification = await _factory.CreateDbContextAsync();
+        Assert.Equal(target, (await verification.RootFolders.SingleAsync()).Path);
+        Assert.Equal(
+            RootFolderRelocationStatus.Completed,
+            (await verification.RootFolderRelocations.SingleAsync()).Status);
+    }
+
+    [Fact]
+    public async Task ReconcileActive_WaitsForFilesystemMutationCoordinator()
+    {
+        var source = Path.Join(Path.GetTempPath(), $"reconcile-lock-source-{Guid.NewGuid():N}");
+        var target = Path.Join(Path.GetTempPath(), $"reconcile-lock-target-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(source);
+        int rootId;
+        await using (var db = await _factory.CreateDbContextAsync())
+        {
+            var root = new RootFolder { Name = "Library", Path = source };
+            db.RootFolders.Add(root);
+            db.Audiobooks.Add(new Audiobook { Title = "Title", BasePath = Path.Join(source, "Title") });
+            await db.SaveChangesAsync();
+            rootId = root.Id;
+        }
+
+        await CreateService().StartAsync(
+            rootId,
+            new RootFolderPathChangeCommand(
+                target,
+                RootFolderRelocationMode.Relocate,
+                true,
+                "Library",
+                false,
+                FileSystemCaseSensitivityMode.Auto));
+        await using (var db = await _factory.CreateDbContextAsync())
+        {
+            var job = await db.MoveJobs.SingleAsync();
+            job.Status = MoveJobStatus.Superseded;
+            job.ActiveDeduplicationKey = null;
+            await db.SaveChangesAsync();
+        }
+
+        var coordinator = new FirstEntryPausingCoordinator();
+        var service = new RootFolderRelocationService(
+            _factory,
+            new FileSystemSemanticsResolver(),
+            new NoopHubBroadcaster(),
+            TimeProvider.System,
+            coordinator,
+            _operationCoordinator);
+        var reconciliationTask = service.ReconcileActiveAsync();
+        await coordinator.FirstEntered;
+        Assert.False(reconciliationTask.IsCompleted);
+
+        coordinator.ReleaseFirst();
+        await reconciliationTask;
+
+        await using var verification = await _factory.CreateDbContextAsync();
+        Assert.Equal(
+            RootFolderRelocationStatus.NeedsAttention,
+            (await verification.RootFolderRelocations.SingleAsync()).Status);
+    }
+
+    [Fact]
     public async Task CompletedJobs_FinalizeRootOnlyAfterEveryAudiobookPathMoved()
     {
         var source = Path.Join(Path.GetTempPath(), $"finalize-source-{Guid.NewGuid():N}");
@@ -1091,7 +1332,7 @@ public sealed class RootFolderRelocationServiceTests : IAsyncLifetime
     }
 
     [Fact]
-    public async Task SupersededJob_ReconciliationRequiresAttentionAndCanRetry()
+    public async Task SupersededJob_RetryPreservesTerminalStaleState()
     {
         var source = Path.Join(Path.GetTempPath(), $"superseded-source-{Guid.NewGuid():N}");
         var target = Path.Join(Path.GetTempPath(), $"superseded-target-{Guid.NewGuid():N}");
@@ -1130,10 +1371,13 @@ public sealed class RootFolderRelocationServiceTests : IAsyncLifetime
         var needsAttention = await service.GetAsync(started.RelocationId!.Value);
         Assert.Equal(RootFolderRelocationStatus.NeedsAttention, needsAttention!.Status);
 
-        await service.RetryAsync(started.RelocationId.Value);
+        var retried = await service.RetryAsync(started.RelocationId.Value);
         await using var verification = await _factory.CreateDbContextAsync();
-        Assert.Equal(MoveJobStatus.Queued, (await verification.MoveJobs.SingleAsync()).Status);
-        Assert.Equal(jobId, (await verification.MoveJobs.SingleAsync()).Id);
+        var preservedJob = await verification.MoveJobs.SingleAsync();
+        Assert.Equal(MoveJobStatus.Superseded, preservedJob.Status);
+        Assert.Equal(jobId, preservedJob.Id);
+        Assert.Equal(RootFolderRelocationStatus.NeedsAttention, retried.Status);
+        Assert.Contains("superseded", retried.Error, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
@@ -1270,7 +1514,8 @@ public sealed class RootFolderRelocationServiceTests : IAsyncLifetime
             new FileSystemSemanticsResolver(),
             new ThrowingHubBroadcaster(),
             TimeProvider.System,
-            new FilesystemMutationCoordinator());
+            new FilesystemMutationCoordinator(),
+            _operationCoordinator);
         var result = await service.StartAsync(
             rootId,
             new RootFolderPathChangeCommand(
@@ -1421,7 +1666,8 @@ public sealed class RootFolderRelocationServiceTests : IAsyncLifetime
             new TargetUnavailableSemanticsResolver(protectedPath),
             new NoopHubBroadcaster(),
             TimeProvider.System,
-            new FilesystemMutationCoordinator());
+            new FilesystemMutationCoordinator(),
+            _operationCoordinator);
         var caseDistinctPath = Path.Join(
             Path.GetDirectoryName(protectedPath)!,
             Path.GetFileName(protectedPath).ToUpperInvariant(),
@@ -1665,7 +1911,8 @@ public sealed class RootFolderRelocationServiceTests : IAsyncLifetime
         new FileSystemSemanticsResolver(),
         new NoopHubBroadcaster(),
         TimeProvider.System,
-        new FilesystemMutationCoordinator());
+        new FilesystemMutationCoordinator(),
+        _operationCoordinator);
 
     private sealed class TestDbContextFactory(DbContextOptions<ListenArrDbContext> options)
         : IDbContextFactory<ListenArrDbContext>

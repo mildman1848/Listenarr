@@ -7,6 +7,7 @@
  * by the Free Software Foundation, either version 3 of the License, or
  * (at your option) any later version.
  */
+using Listenarr.Application.Audiobooks.RootFolders;
 using Listenarr.Infrastructure.Library.Realtime;
 using Listenarr.Infrastructure.Persistence.Repositories;
 using Microsoft.Extensions.DependencyInjection;
@@ -28,6 +29,7 @@ internal static class LibraryRegistrationExtensions
         services.AddScoped<IAudiobookFileService, AudiobookFileService>();
         services.AddScoped<IAuthorCatalogService, AuthorCatalogService>();
         services.AddScoped<ISeriesCatalogService, SeriesCatalogService>();
+        services.AddScoped<ILibraryDestinationMutationGuard, LibraryDestinationMutationGuard>();
         services.AddScoped<ILibraryAddService, LibraryAddService>();
         services.AddScoped<IAudiobookFilesystemDeleteService, AudiobookFilesystemDeleteService>();
         services.AddScoped<ILibraryListService, LibraryListService>();

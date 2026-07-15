@@ -33,6 +33,8 @@ namespace Listenarr.Application.Audiobooks.Catalog
         private readonly IConfigurationService _configurationService;
         private readonly IFileNamingService _fileNamingService;
         private readonly IRootFolderService _rootFolderService;
+        private readonly ILibraryDestinationMutationGuard _destinationMutationGuard;
+        private readonly IFilesystemMutationCoordinator _mutationCoordinator;
         private readonly INotificationService? _notificationService;
 
         public LibraryAddService(
@@ -45,6 +47,8 @@ namespace Listenarr.Application.Audiobooks.Catalog
             IConfigurationService configurationService,
             IFileNamingService fileNamingService,
             IRootFolderService rootFolderService,
+            ILibraryDestinationMutationGuard destinationMutationGuard,
+            IFilesystemMutationCoordinator mutationCoordinator,
             INotificationService? notificationService = null)
         {
             _repo = repo;
@@ -56,12 +60,22 @@ namespace Listenarr.Application.Audiobooks.Catalog
             _configurationService = configurationService;
             _fileNamingService = fileNamingService;
             _rootFolderService = rootFolderService;
+            _destinationMutationGuard = destinationMutationGuard
+                ?? throw new ArgumentNullException(nameof(destinationMutationGuard));
+            _mutationCoordinator = mutationCoordinator ?? throw new ArgumentNullException(nameof(mutationCoordinator));
             _notificationService = notificationService;
         }
 
-        public async Task<LibraryAddOperationResult> AddToLibraryAsync(
+        public Task<LibraryAddOperationResult> AddToLibraryAsync(
             LibraryAddOperationRequest request,
-            CancellationToken cancellationToken = default)
+            CancellationToken cancellationToken = default) =>
+            _mutationCoordinator.ExecuteExclusiveAsync(
+                token => AddToLibraryCoreAsync(request, token),
+                cancellationToken);
+
+        private async Task<LibraryAddOperationResult> AddToLibraryCoreAsync(
+            LibraryAddOperationRequest request,
+            CancellationToken cancellationToken)
         {
             ArgumentNullException.ThrowIfNull(request);
 
@@ -120,11 +134,8 @@ namespace Listenarr.Application.Audiobooks.Catalog
                 }
             }
 
-            var imageUrl = await MoveImageToLibraryStorageAsync(metadata, request.SearchResult, firstIsbn);
-
             var audiobook = metadata.ToAudiobook();
 
-            audiobook.ImageUrl = imageUrl;
             audiobook.Monitored = request.Monitored;
 
             AudiobookIdentifierMapper.SyncImportedIdentifiersFromLegacyFields(audiobook, metadata.Region);
@@ -192,6 +203,18 @@ namespace Listenarr.Application.Audiobooks.Catalog
             }
 
             cancellationToken.ThrowIfCancellationRequested();
+            var destinationBlockingReason = await _destinationMutationGuard.GetBlockingReasonAsync(
+                audiobook.BasePath!,
+                cancellationToken);
+            if (destinationBlockingReason != null)
+            {
+                return ValidationFailure(destinationBlockingReason);
+            }
+
+            audiobook.ImageUrl = await MoveImageToLibraryStorageAsync(
+                metadata,
+                request.SearchResult,
+                firstIsbn);
             await _repo.AddAsync(audiobook);
 
             await ResolveAuthorAsinsAsync(audiobook);

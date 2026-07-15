@@ -31,6 +31,7 @@ namespace Listenarr.Api.Features.Library
         private readonly LibraryScanQueueWorkflow _scanQueueWorkflow;
         private readonly IFileSystem _fileSystem;
         private readonly IFileSystemSemanticsResolver _semanticsResolver;
+        private readonly IAudiobookOperationCoordinator _audiobookOperationCoordinator;
         private readonly ILogger<LibraryManualScanWorkflow> _logger;
 
         public LibraryManualScanWorkflow(
@@ -40,6 +41,7 @@ namespace Listenarr.Api.Features.Library
             LibraryScanQueueWorkflow scanQueueWorkflow,
             IFileSystem fileSystem,
             IFileSystemSemanticsResolver semanticsResolver,
+            IAudiobookOperationCoordinator audiobookOperationCoordinator,
             ILogger<LibraryManualScanWorkflow> logger,
             INotificationService? notificationService = null)
         {
@@ -49,11 +51,17 @@ namespace Listenarr.Api.Features.Library
             _scanQueueWorkflow = scanQueueWorkflow;
             _fileSystem = fileSystem;
             _semanticsResolver = semanticsResolver;
+            _audiobookOperationCoordinator = audiobookOperationCoordinator ?? throw new ArgumentNullException(nameof(audiobookOperationCoordinator));
             _logger = logger;
             _notificationService = notificationService;
         }
 
-        public async Task<IActionResult> ScanAsync(int id, LibraryController.ScanRequest? request)
+        public Task<IActionResult> ScanAsync(int id, LibraryController.ScanRequest? request) =>
+            _audiobookOperationCoordinator.ExecuteExclusiveAsync(
+                id,
+                _ => ScanCoreAsync(id, request));
+
+        private async Task<IActionResult> ScanCoreAsync(int id, LibraryController.ScanRequest? request)
         {
             var audiobook = await _repo.GetByIdAsync(id);
             if (audiobook == null) return new NotFoundObjectResult(new { message = "Audiobook not found" });

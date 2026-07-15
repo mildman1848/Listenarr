@@ -47,6 +47,10 @@ public partial class LibraryController
     public class MoveRequest
     {
         public string? DestinationPath { get; set; }
+        /// <summary>
+        /// Optional optimistic-concurrency value containing the source path observed by the caller.
+        /// It must match the audiobook's current BasePath and is never used as a filesystem source override.
+        /// </summary>
         public string? SourcePath { get; set; }
         public bool? MoveFiles { get; set; }
         public bool? DeleteEmptySource { get; set; }

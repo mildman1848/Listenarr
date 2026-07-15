@@ -227,6 +227,137 @@ namespace Listenarr.Tests.Features.Infrastructure.Persistence
         }
 
         [Fact]
+        [Trait("Scenario", "NullableRelocationRootDowngradeFailsClosed")]
+        public async Task NullableRelocationRoot_DowngradeRejectsOrphanHistoryWithoutCorruption()
+        {
+            await using var connection = new SqliteConnection("DataSource=:memory:");
+            await connection.OpenAsync();
+
+            var options = new DbContextOptionsBuilder<ListenArrDbContext>()
+                .UseSqlite(connection, sqlite =>
+                    sqlite.MigrationsAssembly(typeof(ListenArrDbContext).Assembly.GetName().Name))
+                .Options;
+            var relocationId = Guid.NewGuid();
+
+            await using var context = new ListenArrDbContext(options);
+            var migrator = context.GetService<IMigrator>();
+            await migrator.MigrateAsync("20260708225144_SetRootFolderRelocationRootDeleteBehavior");
+
+            var root = new RootFolder
+            {
+                Name = "Deleted Library",
+                Path = "/library",
+                IsDefault = true
+            };
+            context.RootFolders.Add(root);
+            await context.SaveChangesAsync();
+            context.RootFolderRelocations.Add(new RootFolderRelocation
+            {
+                Id = relocationId,
+                RootFolderId = root.Id,
+                SourcePath = "/library",
+                TargetPath = "/new-library",
+                Mode = RootFolderRelocationMode.MetadataOnly,
+                Status = RootFolderRelocationStatus.Completed,
+                DesiredName = "Deleted Library",
+                DesiredIsDefault = true,
+                CompletedAt = DateTime.UtcNow
+            });
+            await context.SaveChangesAsync();
+
+            context.RootFolders.Remove(root);
+            await context.SaveChangesAsync();
+            context.ChangeTracker.Clear();
+            Assert.Null((await context.RootFolderRelocations.SingleAsync()).RootFolderId);
+
+            var exception = await Assert.ThrowsAsync<SqliteException>(() =>
+                migrator.MigrateAsync("20260708224900_AddRootFolderRelocationSkippedItems"));
+            Assert.Contains(
+                "CK_RootRelocationDowngrade_NoOrphanHistory",
+                exception.Message,
+                StringComparison.Ordinal);
+
+            await using (var rootIdCommand = connection.CreateCommand())
+            {
+                rootIdCommand.CommandText =
+                    "SELECT \"RootFolderId\" FROM \"RootFolderRelocations\" LIMIT 1;";
+                Assert.Equal(DBNull.Value, await rootIdCommand.ExecuteScalarAsync());
+            }
+
+            await using (var foreignKeyCheck = connection.CreateCommand())
+            {
+                foreignKeyCheck.CommandText = "PRAGMA foreign_key_check;";
+                await using var reader = await foreignKeyCheck.ExecuteReaderAsync();
+                Assert.False(await reader.ReadAsync());
+            }
+
+            await migrator.MigrateAsync();
+            Assert.Contains(
+                "20260708225144_SetRootFolderRelocationRootDeleteBehavior",
+                await context.Database.GetAppliedMigrationsAsync());
+        }
+
+        [Fact]
+        [Trait("Scenario", "NullableRelocationRootDowngradePreservesValidHistory")]
+        public async Task NullableRelocationRoot_DowngradePreservesHistoryWithExistingRoot()
+        {
+            await using var connection = new SqliteConnection("DataSource=:memory:");
+            await connection.OpenAsync();
+
+            var options = new DbContextOptionsBuilder<ListenArrDbContext>()
+                .UseSqlite(connection, sqlite =>
+                    sqlite.MigrationsAssembly(typeof(ListenArrDbContext).Assembly.GetName().Name))
+                .Options;
+
+            await using var context = new ListenArrDbContext(options);
+            var migrator = context.GetService<IMigrator>();
+            await migrator.MigrateAsync("20260708225144_SetRootFolderRelocationRootDeleteBehavior");
+
+            var root = new RootFolder
+            {
+                Name = "Retained Library",
+                Path = "/library",
+                IsDefault = true
+            };
+            context.RootFolders.Add(root);
+            await context.SaveChangesAsync();
+            context.RootFolderRelocations.Add(new RootFolderRelocation
+            {
+                Id = Guid.NewGuid(),
+                RootFolderId = root.Id,
+                SourcePath = "/library",
+                TargetPath = "/new-library",
+                Mode = RootFolderRelocationMode.MetadataOnly,
+                Status = RootFolderRelocationStatus.Completed,
+                DesiredName = "Retained Library",
+                DesiredIsDefault = true,
+                CompletedAt = DateTime.UtcNow
+            });
+            await context.SaveChangesAsync();
+
+            await migrator.MigrateAsync("20260708224900_AddRootFolderRelocationSkippedItems");
+
+            await using (var rootIdCommand = connection.CreateCommand())
+            {
+                rootIdCommand.CommandText =
+                    "SELECT \"RootFolderId\" FROM \"RootFolderRelocations\" LIMIT 1;";
+                Assert.Equal((long)root.Id, await rootIdCommand.ExecuteScalarAsync());
+            }
+
+            await using (var foreignKeyCheck = connection.CreateCommand())
+            {
+                foreignKeyCheck.CommandText = "PRAGMA foreign_key_check;";
+                await using var reader = await foreignKeyCheck.ExecuteReaderAsync();
+                Assert.False(await reader.ReadAsync());
+            }
+
+            await migrator.MigrateAsync();
+            Assert.Contains(
+                "20260708225144_SetRootFolderRelocationRootDeleteBehavior",
+                await context.Database.GetAppliedMigrationsAsync());
+        }
+
+        [Fact]
         [Trait("Scenario", "MoveJobsSourcePathRegression")]
         public void MoveJobs_SourcePathColumn_ExistsAfterMigrate()
         {

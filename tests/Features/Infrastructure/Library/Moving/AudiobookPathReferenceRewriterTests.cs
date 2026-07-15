@@ -67,6 +67,37 @@ public sealed class AudiobookPathReferenceRewriterTests
     }
 
     [Fact]
+    public void Rewrite_CurrentBasePathMatchesNeitherEndpoint_ThrowsBeforeChangingReferences()
+    {
+        var source = Path.GetFullPath(Path.Join(Path.GetTempPath(), "rewrite-source"));
+        var target = Path.GetFullPath(Path.Join(Path.GetTempPath(), "rewrite-target"));
+        var current = Path.GetFullPath(Path.Join(Path.GetTempPath(), "rewrite-newer"));
+        var filePath = Path.Join(source, "book.m4b");
+        var audiobook = new Audiobook
+        {
+            BasePath = current,
+            FilePath = filePath,
+            ImageUrl = Path.Join(source, "cover.jpg"),
+            Files = [new AudiobookFile { Path = filePath }]
+        };
+        var semantics = FileSystemPathSemantics.CurrentHostDefault;
+
+        var exception = Assert.Throws<AudiobookPathRewriteException>(() =>
+            AudiobookPathReferenceRewriter.Rewrite(
+                audiobook,
+                source,
+                target,
+                semantics,
+                semantics));
+
+        Assert.Contains("path changed", exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(current, audiobook.BasePath);
+        Assert.Equal(filePath, audiobook.FilePath);
+        Assert.Equal(Path.Join(source, "cover.jpg"), audiobook.ImageUrl);
+        Assert.Equal(filePath, audiobook.Files![0].Path);
+    }
+
+    [Fact]
     public void Rewrite_MapsSourceRootReferencesToTargetRoot()
     {
         var audiobook = new Audiobook

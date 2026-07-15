@@ -30,8 +30,9 @@ namespace Listenarr.Application.Downloads.Import
         ImportDestinationPlanner destinationPlanner,
         IFileSystemSemanticsResolver semanticsResolver,
         ArchiveImportExtractor archiveImportExtractor,
-        ILogger<DownloadImportService> logger,
-        IAudiobookOperationCoordinator? audiobookOperationCoordinator = null) : IDownloadImportService
+        IAudiobookRepository audiobookRepository,
+        IAudiobookOperationCoordinator audiobookOperationCoordinator,
+        ILogger<DownloadImportService> logger) : IDownloadImportService
     {
         private async Task<List<ImportResult>> ImportDownloadFilesCoreAsync(
             Audiobook audiobook,

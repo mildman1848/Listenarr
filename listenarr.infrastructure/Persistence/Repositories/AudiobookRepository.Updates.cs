@@ -1,0 +1,69 @@
+using Microsoft.EntityFrameworkCore;
+
+namespace Listenarr.Infrastructure.Persistence.Repositories;
+
+public partial class AudiobookRepository
+{
+    public async Task<bool> UpdateAsync(Audiobook audiobook)
+    {
+        ArgumentNullException.ThrowIfNull(audiobook);
+
+        var entry = _db.Entry(audiobook);
+        if (entry.State == EntityState.Detached)
+        {
+            var existing = await _db.Audiobooks.FirstOrDefaultAsync(candidate => candidate.Id == audiobook.Id);
+            if (existing == null)
+            {
+                return false;
+            }
+
+            var preservedBasePath = existing.BasePath;
+            var preservedFilePath = existing.FilePath;
+            var preservedFileSize = existing.FileSize;
+            var preservedImageUrl = existing.ImageUrl;
+            _db.Entry(existing).CurrentValues.SetValues(audiobook);
+            // A detached entity has no original-value snapshot, so any path-bearing value may
+            // be stale. Path changes must use a tracked entity or the dedicated expected-source
+            // rewrite contract.
+            existing.BasePath = preservedBasePath;
+            existing.FilePath = preservedFilePath;
+            existing.FileSize = preservedFileSize;
+            existing.ImageUrl = preservedImageUrl;
+        }
+
+        // Tracked entities retain EF's original-value snapshot, so SaveChanges writes only
+        // properties the caller actually changed. Calling Update here would mark BasePath and
+        // every other property modified, allowing an unrelated stale metadata save to undo a
+        // completed move from another DbContext.
+        await _db.SaveChangesAsync();
+        return true;
+    }
+
+    public async Task<bool> UpdateWithIdentifierReplaceAsync(
+        Audiobook audiobook,
+        List<AudiobookExternalIdentifier> newIdentifiers,
+        CancellationToken ct = default)
+    {
+        var existing = await _db.AudiobookExternalIdentifiers
+            .Where(identifier => identifier.AudiobookId == audiobook.Id)
+            .ToListAsync(ct);
+        if (existing.Count > 0)
+        {
+            _db.AudiobookExternalIdentifiers.RemoveRange(existing);
+        }
+
+        foreach (var identifier in newIdentifiers)
+        {
+            identifier.AudiobookId = audiobook.Id;
+        }
+
+        if (newIdentifiers.Count > 0)
+        {
+            _db.AudiobookExternalIdentifiers.AddRange(newIdentifiers);
+        }
+
+        audiobook.ExternalIdentifiers = newIdentifiers;
+        await _db.SaveChangesAsync(ct);
+        return true;
+    }
+}

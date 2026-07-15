@@ -17,7 +17,6 @@ internal partial class MoveJobProcessor
         try
         {
             logger.LogInformation("Processing move job {JobId} for audiobook {AudiobookId} to {Path}", job.Id, job.AudiobookId, LogRedaction.SanitizeFilePath(job.RequestedPath));
-            await UpdateJobStatusAsync(job, MoveJobStatus.Running, cancellationToken: stoppingToken);
 
             using var scope = scopeFactory.CreateScope();
             var audiobookRepository = scope.ServiceProvider.GetRequiredService<IAudiobookRepository>();
@@ -38,7 +37,16 @@ internal partial class MoveJobProcessor
                 metrics.Increment("worker.move.job.failed");
                 return;
             }
-            var target = Path.GetFullPath(requested);
+            var target = await ResolvePersistedEndpointAsync(
+                job,
+                requested,
+                "target",
+                stoppingToken);
+            if (target == null)
+            {
+                return;
+            }
+
             PathIdentitySnapshot targetIdentity;
             try
             {
@@ -52,18 +60,29 @@ internal partial class MoveJobProcessor
             }
 
             var targetSemantics = targetIdentity.Semantics;
-            var hasPersistedSource = !string.IsNullOrWhiteSpace(job.SourcePath);
             var source = job.SourcePath;
             AudiobookContentMoveResult? recoveredMove = null;
             MoveCleanupBoundaryResolution? cleanupBoundaryResolution = null;
+            var hasFilesystemExecutionEvidence = false;
+            PathIdentitySnapshot? recoverySourceIdentity = null;
             FileSystemPathSemantics? recoverySourceSemantics = null;
             if (!string.IsNullOrWhiteSpace(source))
             {
-                source = Path.GetFullPath(source);
-                PathIdentitySnapshot recoverySourceIdentity;
+                source = await ResolvePersistedEndpointAsync(
+                    job,
+                    source,
+                    "source",
+                    stoppingToken);
+                if (source == null)
+                {
+                    return;
+                }
+
+                PathIdentitySnapshot resolvedSourceIdentity;
                 try
                 {
-                    recoverySourceIdentity = await GetRequiredIdentityAsync(job, source, target: false, stoppingToken);
+                    resolvedSourceIdentity = await GetRequiredIdentityAsync(job, source, target: false, stoppingToken);
+                    recoverySourceIdentity = resolvedSourceIdentity;
                 }
                 catch (MoveNeedsAttentionException exception)
                 {
@@ -72,47 +91,16 @@ internal partial class MoveJobProcessor
                     return;
                 }
 
-                recoverySourceSemantics = recoverySourceIdentity.Semantics;
-                if (FileSystemPathIdentity.AreEquivalentEndpoints(
-                        source,
-                        recoverySourceIdentity,
-                        target,
-                        targetIdentity))
-                {
-                    try
-                    {
-                        await contentMoveService.VerifyNoFilesystemMoveStartedAsync(
-                            new AudiobookContentMoveRequest(
-                                source,
-                                target,
-                                job.Id,
-                                job.DeleteEmptySource,
-                                recoverySourceIdentity.Semantics,
-                                targetSemantics,
-                                CreateLeaseToken(job)),
-                            stoppingToken);
-                    }
-                    catch (MoveNeedsAttentionException exception)
-                    {
-                        await UpdateJobStatusAsync(
-                            job,
-                            MoveJobStatus.NeedsAttention,
-                            exception.Message,
-                            stoppingToken);
-                        metrics.Increment("worker.move.job.needs_attention");
-                        logger.LogWarning(
-                            exception,
-                            "Identical-endpoint move job {JobId} has execution evidence and was preserved",
-                            job.Id);
-                        return;
-                    }
-
-                    await UpdateJobStatusAsync(
+                recoverySourceSemantics = resolvedSourceIdentity.Semantics;
+                if (await TryHandleIdenticalEndpointsAsync(
                         job,
-                        MoveJobStatus.Superseded,
-                        "Superseded because the persisted source and target endpoints are identical.",
-                        stoppingToken);
-                    metrics.Increment("worker.move.job.skipped");
+                        source,
+                        resolvedSourceIdentity,
+                        target,
+                        targetIdentity,
+                        contentMoveService,
+                        stoppingToken))
+                {
                     return;
                 }
 
@@ -127,7 +115,7 @@ internal partial class MoveJobProcessor
                     target,
                     job.Id,
                     job.DeleteEmptySource,
-                    recoverySourceIdentity.Semantics,
+                    resolvedSourceIdentity.Semantics,
                     targetSemantics,
                     CreateLeaseToken(job),
                     cleanupBoundaryResolution.Boundary);
@@ -166,6 +154,41 @@ internal partial class MoveJobProcessor
                 }
             }
 
+            if (recoveredMove == null
+                && job.Phase <= MoveJobPhase.Planned
+                && !string.IsNullOrWhiteSpace(source)
+                && recoverySourceIdentity.HasValue)
+            {
+                var executionEvidence = await HasFilesystemExecutionEvidenceAsync(
+                    job,
+                    source,
+                    recoverySourceIdentity.Value,
+                    target,
+                    targetIdentity,
+                    cleanupBoundaryResolution?.Boundary,
+                    contentMoveService,
+                    stoppingToken);
+                if (!executionEvidence.HasValue)
+                {
+                    return;
+                }
+
+                hasFilesystemExecutionEvidence = executionEvidence.Value;
+                if (!hasFilesystemExecutionEvidence
+                    && !await ValidateSourceStateBeforeMutationAsync(
+                        job,
+                        source,
+                        recoverySourceIdentity.Value,
+                        target,
+                        targetIdentity,
+                        recoveredMove: null,
+                        hasFilesystemExecutionEvidence: false,
+                        stoppingToken))
+                {
+                    return;
+                }
+            }
+
             if (recoveredMove == null)
             {
                 var finalizedRecovery = await TryRecoverFinalizedMoveAsync(
@@ -197,29 +220,7 @@ internal partial class MoveJobProcessor
                 return;
             }
 
-            if (hasPersistedSource
-                && recoveredMove == null
-                && !Directory.Exists(source)
-                && !string.IsNullOrWhiteSpace(audiobook.BasePath)
-                && Directory.Exists(audiobook.BasePath))
-            {
-                await UpdateJobStatusAsync(
-                    job,
-                    MoveJobStatus.NeedsAttention,
-                    "Persisted source path does not exist and cannot be recovered",
-                    stoppingToken);
-                metrics.Increment("worker.move.job.needs_attention");
-                return;
-            }
-
-            if (recoveredMove == null && !Directory.Exists(source))
-            {
-                await UpdateJobStatusAsync(job, MoveJobStatus.Failed, "Source path invalid or does not exist", stoppingToken);
-                metrics.Increment("worker.move.job.failed");
-                return;
-            }
-
-            source = recoveredMove?.Source ?? Path.GetFullPath(source);
+            source = recoveredMove?.Source ?? source;
             PathIdentitySnapshot sourceIdentity;
             try
             {
@@ -229,6 +230,26 @@ internal partial class MoveJobProcessor
             {
                 await UpdateJobStatusAsync(job, MoveJobStatus.NeedsAttention, exception.Message, stoppingToken);
                 metrics.Increment("worker.move.job.needs_attention");
+                return;
+            }
+
+            if (!await ValidateSourceStateBeforeMutationAsync(
+                    job,
+                    source,
+                    sourceIdentity,
+                    target,
+                    targetIdentity,
+                    recoveredMove,
+                    hasFilesystemExecutionEvidence,
+                    stoppingToken))
+            {
+                return;
+            }
+
+            if (recoveredMove == null && !Directory.Exists(source))
+            {
+                await UpdateJobStatusAsync(job, MoveJobStatus.Failed, "Source path invalid or does not exist", stoppingToken);
+                metrics.Increment("worker.move.job.failed");
                 return;
             }
 
@@ -285,30 +306,6 @@ internal partial class MoveJobProcessor
             logger.LogError(ex, "Unexpected error processing move job {JobId}", job.Id);
             await UpdateJobStatusAsync(job, MoveJobStatus.Failed, ex.Message, stoppingToken);
             metrics.Increment("worker.move.job.failed");
-        }
-    }
-
-    private void LogCleanupBoundary(MoveJob job, MoveCleanupBoundaryResolution resolution)
-    {
-        if (!job.DeleteEmptySource)
-        {
-            return;
-        }
-
-        if (resolution.IsAvailable)
-        {
-            logger.LogInformation(
-                "Using {BoundaryKind} source cleanup boundary {Boundary} for move job {JobId}",
-                resolution.Kind,
-                LogRedaction.SanitizeFilePath(resolution.Boundary),
-                job.Id);
-        }
-        else
-        {
-            logger.LogWarning(
-                "Move job {JobId} has no safe source cleanup boundary: {Reason}",
-                job.Id,
-                resolution.Reason ?? "boundary unavailable");
         }
     }
 

@@ -309,7 +309,7 @@ namespace Listenarr.Tests.Features.Infrastructure.Library.Moving
         }
 
         [Fact]
-        public async Task ProcessJobAsync_RequeuedCompletedMoveWithRetainedSource_RemainsCompleted()
+        public async Task ProcessJobAsync_CompletedMoveWithRetainedSource_CannotBeRequeued()
         {
             var src = FileService.GetTempDirectory("move-processor-requeue-retained-source");
             await FileService.GetFileAsync(src, "book.m4b", "audio");
@@ -328,15 +328,11 @@ namespace Listenarr.Tests.Features.Infrastructure.Library.Moving
             await processor.ProcessJobAsync(job, CancellationToken.None);
 
             var requeuedJobId = await queue.RequeueMoveAsync(job.Id);
-            Assert.NotNull(requeuedJobId);
-            var requeuedJob = await queue.GetJobAsync(requeuedJobId!.Value);
-            Assert.NotNull(requeuedJob);
-            await PrepareJobForProcessingAsync(queue, requeuedJob!);
-            await processor.ProcessJobAsync(requeuedJob!, CancellationToken.None);
 
-            var completedRequeue = await queue.GetJobAsync(requeuedJob.Id);
-            Assert.NotNull(completedRequeue);
-            Assert.Equal(MoveJobStatus.Completed, completedRequeue!.Status);
+            Assert.Null(requeuedJobId);
+            var completedJob = await queue.GetJobAsync(job.Id);
+            Assert.NotNull(completedJob);
+            Assert.Equal(MoveJobStatus.Completed, completedJob!.Status);
             Assert.True(Directory.Exists(src));
             Assert.Empty(Directory.EnumerateFileSystemEntries(src));
             Assert.True(File.Exists(Path.Join(dst, "book.m4b")));
@@ -732,6 +728,91 @@ namespace Listenarr.Tests.Features.Infrastructure.Library.Moving
         }
 
         [Fact]
+        public async Task ProcessJobAsync_MetadataRewriteAfterEnqueue_SupersedesStaleExistingSourceWithoutMutation()
+        {
+            var queuedSource = FileService.GetTempDirectory("move-processor-queued-source");
+            await FileService.GetFileAsync(queuedSource, "queued.m4b", "queued audio");
+            var newerSource = FileService.GetTempDirectory("move-processor-newer-source");
+            await FileService.GetFileAsync(newerSource, "current.m4b", "current audio");
+            var target = Path.Join(FileService.GetTempPath(), $"move-processor-stale-target-{Guid.NewGuid():N}");
+            var audiobook = await _audiobookRepository.AddAsync(new Audiobook
+            {
+                Title = "Move Processor Metadata Race",
+                BasePath = queuedSource
+            });
+            var (queue, job) = await CreateQueuedMoveJobAsync(audiobook, target, queuedSource);
+            audiobook.BasePath = newerSource;
+            await _audiobookRepository.UpdateAsync(audiobook);
+
+            var processor = _provider.GetRequiredService<IMoveJobProcessor>();
+            await processor.ProcessJobAsync(job, CancellationToken.None);
+
+            var updatedJob = await queue.GetJobAsync(job.Id);
+            Assert.NotNull(updatedJob);
+            Assert.Equal(MoveJobStatus.Superseded, updatedJob!.Status);
+            Assert.True(File.Exists(Path.Join(queuedSource, "queued.m4b")));
+            Assert.True(File.Exists(Path.Join(newerSource, "current.m4b")));
+            Assert.False(Directory.Exists(target));
+            Assert.Equal(newerSource, (await _audiobookRepository.GetByIdAsync(audiobook.Id))!.BasePath);
+            var history = await _historyRepository.GetByAudiobookIdAsync(audiobook.Id);
+            Assert.DoesNotContain(history, entry => entry.EventType == "Moved");
+        }
+
+        [Fact]
+        public async Task ProcessJobAsync_MetadataRewriteToRequestedTargetAfterEnqueue_SupersedesWithoutRecoveryArtifacts()
+        {
+            var queuedSource = FileService.GetTempDirectory("move-processor-same-target-source");
+            await FileService.GetFileAsync(queuedSource, "queued.m4b", "queued audio");
+            var target = FileService.GetTempDirectory("move-processor-same-target-destination");
+            var audiobook = await _audiobookRepository.AddAsync(new Audiobook
+            {
+                Title = "Move Processor Same Target Race",
+                BasePath = queuedSource
+            });
+            var (queue, job) = await CreateQueuedMoveJobAsync(audiobook, target, queuedSource);
+            audiobook.BasePath = target;
+            await _audiobookRepository.UpdateAsync(audiobook);
+
+            var processor = _provider.GetRequiredService<IMoveJobProcessor>();
+            await processor.ProcessJobAsync(job, CancellationToken.None);
+
+            var updatedJob = await queue.GetJobAsync(job.Id);
+            Assert.NotNull(updatedJob);
+            Assert.Equal(MoveJobStatus.Superseded, updatedJob!.Status);
+            Assert.True(File.Exists(Path.Join(queuedSource, "queued.m4b")));
+            Assert.False(File.Exists(Path.Join(target, "queued.m4b")));
+            Assert.Equal(target, (await _audiobookRepository.GetByIdAsync(audiobook.Id))!.BasePath);
+            var history = await _historyRepository.GetByAudiobookIdAsync(audiobook.Id);
+            Assert.DoesNotContain(history, entry => entry.EventType == "Moved");
+        }
+
+        [Fact]
+        public async Task ProcessJobAsync_MalformedCurrentBasePath_RequiresAttentionWithoutMutation()
+        {
+            var queuedSource = FileService.GetTempDirectory("move-processor-malformed-source");
+            await FileService.GetFileAsync(queuedSource, "book.m4b", "audio");
+            var target = Path.Join(FileService.GetTempPath(), $"move-processor-malformed-target-{Guid.NewGuid():N}");
+            var audiobook = await _audiobookRepository.AddAsync(new Audiobook
+            {
+                Title = "Move Processor Malformed State",
+                BasePath = queuedSource
+            });
+            var (queue, job) = await CreateQueuedMoveJobAsync(audiobook, target, queuedSource);
+            audiobook.BasePath = "malformed\0path";
+            await _audiobookRepository.UpdateAsync(audiobook);
+
+            var processor = _provider.GetRequiredService<IMoveJobProcessor>();
+            await processor.ProcessJobAsync(job, CancellationToken.None);
+
+            var updatedJob = await queue.GetJobAsync(job.Id);
+            Assert.NotNull(updatedJob);
+            Assert.Equal(MoveJobStatus.NeedsAttention, updatedJob!.Status);
+            Assert.Contains("malformed", updatedJob.Error, StringComparison.OrdinalIgnoreCase);
+            Assert.True(File.Exists(Path.Join(queuedSource, "book.m4b")));
+            Assert.False(Directory.Exists(target));
+        }
+
+        [Fact]
         public async Task ProcessJobAsync_MissingPersistedSource_DoesNotMoveCurrentBasePath()
         {
             var missingSource = Path.Join(FileService.GetTempPath(), $"move-processor-stale-src-{Guid.NewGuid():N}");
@@ -750,12 +831,121 @@ namespace Listenarr.Tests.Features.Infrastructure.Library.Moving
 
             var updatedJob = await queue.GetJobAsync(job.Id);
             Assert.NotNull(updatedJob);
-            Assert.Equal(MoveJobStatus.NeedsAttention, updatedJob!.Status);
+            Assert.Equal(MoveJobStatus.Superseded, updatedJob!.Status);
+            Assert.Contains("source path changed", updatedJob.Error, StringComparison.OrdinalIgnoreCase);
             Assert.True(File.Exists(Path.Join(currentBasePath, "current.m4b")));
             Assert.False(Directory.Exists(target));
             using var verificationScope = _provider.CreateScope();
             var repository = verificationScope.ServiceProvider.GetRequiredService<IAudiobookRepository>();
             Assert.Equal(currentBasePath, (await repository.GetByIdAsync(audiobook.Id))!.BasePath);
+        }
+
+        [Fact]
+        public async Task ProcessJobAsync_SupersededState_PublishesAfterAudiobookLockRelease()
+        {
+            var queuedSource = FileService.GetTempDirectory("move-processor-publish-stale-source");
+            await FileService.GetFileAsync(queuedSource, "queued.m4b", "audio");
+            var currentBasePath = FileService.GetTempDirectory("move-processor-publish-current");
+            await FileService.GetFileAsync(currentBasePath, "current.m4b", "audio");
+            var target = Path.Join(
+                FileService.GetTempPath(),
+                $"move-processor-publish-target-{Guid.NewGuid():N}");
+            var audiobook = await _audiobookRepository.AddAsync(new Audiobook
+            {
+                Title = "Deferred State Publication",
+                BasePath = currentBasePath
+            });
+            var (_, job) = await CreateQueuedMoveJobAsync(
+                audiobook,
+                target,
+                queuedSource);
+            using var coordinator = new TrackingAudiobookOperationCoordinator();
+            var queue = new Mock<IMoveQueueService>(MockBehavior.Strict);
+            queue.Setup(service => service.UpdateJobStatusAsync(
+                    job.Id,
+                    LeaseOwner,
+                    job.LeaseGeneration,
+                    MoveJobStatus.Running,
+                    null,
+                    It.IsAny<CancellationToken>()))
+                .Callback(() => Assert.False(coordinator.IsExecuting))
+                .Returns(Task.CompletedTask);
+            queue.Setup(service => service.UpdateJobStatusWithoutNotificationAsync(
+                    job.Id,
+                    LeaseOwner,
+                    job.LeaseGeneration,
+                    MoveJobStatus.Superseded,
+                    It.IsAny<string?>(),
+                    It.IsAny<CancellationToken>()))
+                .Returns(Task.CompletedTask);
+            queue.Setup(service => service.NotifyPersistedJobStateAsync(
+                    job.Id,
+                    MoveJobStatus.Superseded,
+                    It.Is<string?>(error => error != null && error.Contains("source path changed", StringComparison.OrdinalIgnoreCase)),
+                    It.IsAny<CancellationToken>()))
+                .Callback(() => Assert.False(coordinator.IsExecuting))
+                .Returns(Task.CompletedTask);
+            var processor = ActivatorUtilities.CreateInstance<MoveJobProcessor>(
+                _provider,
+                queue.Object,
+                coordinator);
+
+            await processor.ProcessJobAsync(job, CancellationToken.None);
+
+            queue.Verify(service => service.UpdateJobStatusAsync(
+                    job.Id,
+                    LeaseOwner,
+                    job.LeaseGeneration,
+                    MoveJobStatus.Running,
+                    null,
+                    It.IsAny<CancellationToken>()),
+                Times.Once);
+            queue.Verify(service => service.UpdateJobStatusWithoutNotificationAsync(
+                    job.Id,
+                    LeaseOwner,
+                    job.LeaseGeneration,
+                    MoveJobStatus.Superseded,
+                    It.IsAny<string?>(),
+                    It.IsAny<CancellationToken>()),
+                Times.Once);
+            queue.VerifyAll();
+        }
+
+        [Theory]
+        [InlineData(true)]
+        [InlineData(false)]
+        public async Task ProcessJobAsync_MalformedPersistedEndpoint_RequiresAttentionWithoutMutation(
+            bool malformedSource)
+        {
+            var source = FileService.GetTempDirectory("move-processor-malformed-endpoint-source");
+            await FileService.GetFileAsync(source, "book.m4b", "audio");
+            var target = Path.Join(
+                FileService.GetTempPath(),
+                $"move-processor-malformed-endpoint-target-{Guid.NewGuid():N}");
+            var audiobook = await _audiobookRepository.AddAsync(new Audiobook
+            {
+                Title = "Move Processor Malformed Endpoint",
+                BasePath = source
+            });
+            var (queue, job) = await CreateQueuedMoveJobAsync(audiobook, target, source);
+            if (malformedSource)
+            {
+                job.SourcePath = "malformed\0source";
+            }
+            else
+            {
+                job.RequestedPath = "malformed\0target";
+            }
+
+            var processor = _provider.GetRequiredService<IMoveJobProcessor>();
+            await processor.ProcessJobAsync(job, CancellationToken.None);
+
+            var updatedJob = await queue.GetJobAsync(job.Id);
+            Assert.NotNull(updatedJob);
+            Assert.Equal(MoveJobStatus.NeedsAttention, updatedJob!.Status);
+            Assert.Contains("persisted", updatedJob.Error, StringComparison.OrdinalIgnoreCase);
+            Assert.True(File.Exists(Path.Join(source, "book.m4b")));
+            Assert.False(Directory.Exists(target));
         }
 
         [Fact]
@@ -798,6 +988,82 @@ namespace Listenarr.Tests.Features.Infrastructure.Library.Moving
                 CancellationToken cancellationToken) =>
                 Task.FromException(new InvalidOperationException(
                     "Simulated unexpected post-publication failure."));
+        }
+
+        private sealed class TrackingAudiobookOperationCoordinator : IAudiobookOperationCoordinator, IDisposable
+        {
+            private readonly AudiobookOperationCoordinator _inner = new();
+            private int _executing;
+
+            public bool IsExecuting => Volatile.Read(ref _executing) != 0;
+
+            public Task ExecuteExclusiveAsync(
+                int audiobookId,
+                Func<CancellationToken, Task> operation,
+                CancellationToken cancellationToken = default) =>
+                _inner.ExecuteExclusiveAsync(
+                    audiobookId,
+                    token => TrackAsync(operation, token),
+                    cancellationToken);
+
+            public Task<T> ExecuteExclusiveAsync<T>(
+                int audiobookId,
+                Func<CancellationToken, Task<T>> operation,
+                CancellationToken cancellationToken = default) =>
+                _inner.ExecuteExclusiveAsync(
+                    audiobookId,
+                    token => TrackAsync(operation, token),
+                    cancellationToken);
+
+            public Task ExecuteExclusiveAsync(
+                IEnumerable<int> audiobookIds,
+                Func<CancellationToken, Task> operation,
+                CancellationToken cancellationToken = default) =>
+                _inner.ExecuteExclusiveAsync(
+                    audiobookIds,
+                    token => TrackAsync(operation, token),
+                    cancellationToken);
+
+            public Task<T> ExecuteExclusiveAsync<T>(
+                IEnumerable<int> audiobookIds,
+                Func<CancellationToken, Task<T>> operation,
+                CancellationToken cancellationToken = default) =>
+                _inner.ExecuteExclusiveAsync(
+                    audiobookIds,
+                    token => TrackAsync(operation, token),
+                    cancellationToken);
+
+            private async Task TrackAsync(
+                Func<CancellationToken, Task> operation,
+                CancellationToken cancellationToken)
+            {
+                Interlocked.Increment(ref _executing);
+                try
+                {
+                    await operation(cancellationToken);
+                }
+                finally
+                {
+                    Interlocked.Decrement(ref _executing);
+                }
+            }
+
+            private async Task<T> TrackAsync<T>(
+                Func<CancellationToken, Task<T>> operation,
+                CancellationToken cancellationToken)
+            {
+                Interlocked.Increment(ref _executing);
+                try
+                {
+                    return await operation(cancellationToken);
+                }
+                finally
+                {
+                    Interlocked.Decrement(ref _executing);
+                }
+            }
+
+            public void Dispose() => _inner.Dispose();
         }
 
         private static async Task PrepareJobForProcessingAsync(IMoveQueueService queue, MoveJob job)

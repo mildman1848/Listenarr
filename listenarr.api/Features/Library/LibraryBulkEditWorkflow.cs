@@ -18,6 +18,7 @@
 
 using System.Text.Json;
 using System.Text.RegularExpressions;
+using Listenarr.Application.Common.Exceptions;
 using Listenarr.Domain.Common;
 using Microsoft.AspNetCore.Mvc;
 
@@ -25,32 +26,35 @@ namespace Listenarr.Api.Features.Library
 {
     public sealed class LibraryBulkEditWorkflow
     {
-        private readonly IAudiobookRepository _repo;
         private readonly IImageCacheService _imageCacheService;
         private readonly IHistoryRepository _historyRepository;
         private readonly IServiceScopeFactory _scopeFactory;
         private readonly IFileNamingService _fileNamingService;
         private readonly string _contentRootPath;
         private readonly IFileSystem _fileSystem;
+        private readonly IAudiobookDestinationRewriteService _destinationRewriteService;
+        private readonly IAudiobookOperationCoordinator _audiobookOperationCoordinator;
         private readonly ILogger<LibraryBulkEditWorkflow> _logger;
 
         public LibraryBulkEditWorkflow(
-            IAudiobookRepository repo,
             IImageCacheService imageCacheService,
             IHistoryRepository historyRepository,
             IServiceScopeFactory scopeFactory,
             IFileNamingService fileNamingService,
             IApplicationPathService applicationPathService,
             IFileSystem fileSystem,
+            IAudiobookDestinationRewriteService destinationRewriteService,
+            IAudiobookOperationCoordinator audiobookOperationCoordinator,
             ILogger<LibraryBulkEditWorkflow> logger)
         {
-            _repo = repo;
             _imageCacheService = imageCacheService;
             _historyRepository = historyRepository;
             _scopeFactory = scopeFactory;
             _fileNamingService = fileNamingService;
             _contentRootPath = applicationPathService.ContentRootPath;
             _fileSystem = fileSystem;
+            _destinationRewriteService = destinationRewriteService ?? throw new ArgumentNullException(nameof(destinationRewriteService));
+            _audiobookOperationCoordinator = audiobookOperationCoordinator ?? throw new ArgumentNullException(nameof(audiobookOperationCoordinator));
             _logger = logger;
         }
 
@@ -68,43 +72,18 @@ namespace Listenarr.Api.Features.Library
 
             foreach (var id in request.Ids.Distinct())
             {
-                try
+                var outcome = await _audiobookOperationCoordinator.ExecuteExclusiveAsync(
+                    id,
+                    _ => DeleteOneAsync(id));
+                deletedImagesCount += outcome.DeletedImages;
+                if (outcome.Deleted)
                 {
-                    var audiobook = await _repo.GetByIdAsync(id);
-                    if (audiobook == null)
-                    {
-                        errors.Add($"Audiobook with ID {id} not found");
-                        continue;
-                    }
-
-                    deletedImagesCount += await DeleteCachedImageAsync(audiobook);
-
-                    await _historyRepository.AddAsync(new History
-                    {
-                        AudiobookId = audiobook.Id,
-                        AudiobookTitle = audiobook.Title ?? "Unknown Title",
-                        EventType = "Deleted",
-                        Message = $"Audiobook '{audiobook.Title}' deleted via bulk operation",
-                        Source = "BulkDelete",
-                        Timestamp = DateTime.UtcNow
-                    });
-
-                    var deleted = await _repo.DeleteByIdAsync(id);
-                    if (deleted)
-                    {
-                        deletedCount++;
-                        deletedIds.Add(id);
-                        _logger.LogInformation("Deleted audiobook '{Title}' (ID: {Id}) via bulk operation", LogRedaction.SanitizeText(audiobook.Title), id);
-                    }
-                    else
-                    {
-                        errors.Add($"Failed to delete audiobook with ID {id}");
-                    }
+                    deletedCount++;
+                    deletedIds.Add(id);
                 }
-                catch (Exception ex) when (ex is not OperationCanceledException && ex is not OutOfMemoryException && ex is not StackOverflowException)
+                if (outcome.Error != null)
                 {
-                    _logger.LogError(ex, "Error during bulk delete for ID {Id}: {Message}", id, ex.Message);
-                    errors.Add($"Error deleting audiobook with ID {id}: {ex.Message}");
+                    errors.Add(outcome.Error);
                 }
             }
 
@@ -145,123 +124,222 @@ namespace Listenarr.Api.Features.Library
 
             foreach (var id in request.Ids.Distinct())
             {
-                var entryErrors = new List<string>();
-                var success = false;
-
-                try
-                {
-                    var audiobook = await _repo.GetByIdAsync(id);
-                    if (audiobook == null)
-                    {
-                        entryErrors.Add($"Audiobook with ID {id} not found");
-                        results.Add(new { id, success, errors = entryErrors });
-                        continue;
-                    }
-
-                    var changed = false;
-
-                    if (request.Updates != null && request.Updates.TryGetValue("monitored", out var monitoredObj))
-                    {
-                        try
-                        {
-                            var monVal = monitoredObj is JsonElement je
-                                ? je.ValueKind == JsonValueKind.True
-                                : Convert.ToBoolean(monitoredObj);
-
-                            audiobook.Monitored = monVal;
-                            changed = true;
-                            _logger.LogInformation("Set Monitored={Monitored} for audiobook id={Id}", monVal, id);
-
-                            await AddBulkUpdateHistoryAsync(audiobook, $"Monitored set to {monVal}");
-                        }
-                        catch (Exception ex) when (ex is not OperationCanceledException && ex is not OutOfMemoryException && ex is not StackOverflowException)
-                        {
-                            entryErrors.Add($"Invalid monitored value: {ex.Message}");
-                        }
-                    }
-
-                    if (request.Updates != null && request.Updates.TryGetValue("qualityProfileId", out var qpObj))
-                    {
-                        try
-                        {
-                            var qpVal = qpObj is JsonElement jq
-                                ? jq.GetInt32()
-                                : Convert.ToInt32(qpObj);
-
-                            audiobook.QualityProfileId = qpVal;
-                            changed = true;
-                            _logger.LogInformation("Set QualityProfileId={Profile} for audiobook id={Id}", qpVal, id);
-
-                            await AddBulkUpdateHistoryAsync(audiobook, $"Quality profile set to {qpVal}");
-                        }
-                        catch (Exception ex) when (ex is not OperationCanceledException && ex is not OutOfMemoryException && ex is not StackOverflowException)
-                        {
-                            entryErrors.Add($"Invalid qualityProfileId value: {ex.Message}");
-                        }
-                    }
-
-                    if (request.Updates != null && request.Updates.TryGetValue("rootFolder", out var rootObj))
-                    {
-                        try
-                        {
-                            var rootPath = ExtractRootPath(rootObj);
-                            if (!string.IsNullOrWhiteSpace(rootPath))
-                            {
-                                var fileNamingPattern = !string.IsNullOrWhiteSpace(settings?.FolderNamingPattern)
-                                    ? settings!.FolderNamingPattern
-                                    : settings?.FileNamingPattern ?? string.Empty;
-                                var newBase = LibraryPathPlanner.ComputeAudiobookBaseDirectoryFromPattern(audiobook, rootPath, fileNamingPattern, _fileNamingService);
-                                if (!_fileSystem.TryValidateMutationTarget(newBase, [rootPath], out newBase, out var reason))
-                                {
-                                    entryErrors.Add($"Computed audiobook path is outside the selected root folder: {reason}");
-                                    continue;
-                                }
-
-                                try
-                                {
-                                    if (!_fileSystem.DirectoryExists(newBase))
-                                    {
-                                        _fileSystem.CreateDirectory(newBase);
-                                        _logger.LogInformation("Created directory for audiobook id={Id} at {Path}", id, newBase);
-                                    }
-
-                                    audiobook.BasePath = newBase;
-                                    changed = true;
-
-                                    await AddBulkUpdateHistoryAsync(audiobook, $"BasePath set to {newBase} via bulk update");
-                                }
-                                catch (Exception ex) when (ex is not OperationCanceledException && ex is not OutOfMemoryException && ex is not StackOverflowException)
-                                {
-                                    entryErrors.Add($"Failed to apply root folder for audiobook {id}: {ex.Message}");
-                                }
-                            }
-                        }
-                        catch (Exception ex) when (ex is not OperationCanceledException && ex is not OutOfMemoryException && ex is not StackOverflowException)
-                        {
-                            entryErrors.Add($"Invalid rootFolder value: {ex.Message}");
-                        }
-                    }
-
-                    if (changed)
-                    {
-                        await _repo.UpdateAsync(audiobook);
-                        success = true;
-                    }
-                    else
-                    {
-                        entryErrors.Add("No valid updates provided for this audiobook");
-                    }
-                }
-                catch (Exception ex) when (ex is not OperationCanceledException && ex is not OutOfMemoryException && ex is not StackOverflowException)
-                {
-                    entryErrors.Add($"Unhandled error: {ex.Message}");
-                }
-
-                results.Add(new { id, success, errors = entryErrors });
+                var rootRewrite = await RewriteRootFolderIfRequestedAsync(
+                    id,
+                    request.Updates,
+                    settings);
+                var outcome = await _audiobookOperationCoordinator.ExecuteExclusiveAsync(
+                    id,
+                    _ => UpdateOneAsync(id, request.Updates, rootRewrite.Rewritten));
+                var errors = outcome.Errors
+                    .Concat(rootRewrite.Error == null ? [] : [rootRewrite.Error])
+                    .Distinct(StringComparer.Ordinal)
+                    .ToList();
+                results.Add(new { id, success = outcome.Success, errors });
             }
 
             return new OkObjectResult(new { message = "Bulk update completed", results });
         }
+
+        private async Task<BulkDeleteOutcome> DeleteOneAsync(int id)
+        {
+            try
+            {
+                using var scope = _scopeFactory.CreateScope();
+                var repository = scope.ServiceProvider.GetRequiredService<IAudiobookRepository>();
+                var audiobook = await repository.GetByIdAsync(id);
+                if (audiobook == null)
+                {
+                    return new BulkDeleteOutcome(false, 0, $"Audiobook with ID {id} not found");
+                }
+
+                var deletedImages = await DeleteCachedImageAsync(audiobook);
+                await _historyRepository.AddAsync(new History
+                {
+                    AudiobookId = audiobook.Id,
+                    AudiobookTitle = audiobook.Title ?? "Unknown Title",
+                    EventType = "Deleted",
+                    Message = $"Audiobook '{audiobook.Title}' deleted via bulk operation",
+                    Source = "BulkDelete",
+                    Timestamp = DateTime.UtcNow
+                });
+
+                if (!await repository.DeleteByIdAsync(id))
+                {
+                    return new BulkDeleteOutcome(false, deletedImages, $"Failed to delete audiobook with ID {id}");
+                }
+
+                _logger.LogInformation(
+                    "Deleted audiobook '{Title}' (ID: {Id}) via bulk operation",
+                    LogRedaction.SanitizeText(audiobook.Title),
+                    id);
+                return new BulkDeleteOutcome(true, deletedImages, null);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException
+                && ex is not OutOfMemoryException
+                && ex is not StackOverflowException)
+            {
+                _logger.LogError(ex, "Error during bulk delete for ID {Id}: {Message}", id, ex.Message);
+                return new BulkDeleteOutcome(false, 0, $"Error deleting audiobook with ID {id}: {ex.Message}");
+            }
+        }
+
+        private async Task<RootFolderRewriteOutcome> RewriteRootFolderIfRequestedAsync(
+            int id,
+            Dictionary<string, object>? updates,
+            ApplicationSettings? settings)
+        {
+            if (updates == null || !updates.TryGetValue("rootFolder", out var rootObject))
+            {
+                return new RootFolderRewriteOutcome(false, null);
+            }
+
+            try
+            {
+                var rootPath = ExtractRootPath(rootObject);
+                if (string.IsNullOrWhiteSpace(rootPath))
+                {
+                    return new RootFolderRewriteOutcome(false, "Invalid rootFolder value");
+                }
+
+                using var scope = _scopeFactory.CreateScope();
+                var repository = scope.ServiceProvider.GetRequiredService<IAudiobookRepository>();
+                var audiobook = await repository.GetByIdAsync(id);
+                if (audiobook == null)
+                {
+                    return new RootFolderRewriteOutcome(false, $"Audiobook with ID {id} not found");
+                }
+
+                var namingPattern = !string.IsNullOrWhiteSpace(settings?.FolderNamingPattern)
+                    ? settings!.FolderNamingPattern
+                    : settings?.FileNamingPattern ?? string.Empty;
+                var newBasePath = LibraryPathPlanner.ComputeAudiobookBaseDirectoryFromPattern(
+                    audiobook,
+                    rootPath,
+                    namingPattern,
+                    _fileNamingService);
+                if (!_fileSystem.TryValidateMutationTarget(
+                        newBasePath,
+                        [rootPath],
+                        out newBasePath,
+                        out var reason))
+                {
+                    return new RootFolderRewriteOutcome(
+                        false,
+                        $"Computed audiobook path is outside the selected root folder: {reason}");
+                }
+
+                await _destinationRewriteService.RewriteDestinationAsync(
+                    id,
+                    newBasePath,
+                    audiobook.BasePath);
+                await AddBulkUpdateHistoryAsync(
+                    audiobook,
+                    $"Destination path rewritten to {newBasePath} via bulk update");
+                return new RootFolderRewriteOutcome(true, null);
+            }
+            catch (ListenarrApplicationException ex)
+            {
+                return new RootFolderRewriteOutcome(false, ex.SafeDetail);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException
+                && ex is not OutOfMemoryException
+                && ex is not StackOverflowException)
+            {
+                return new RootFolderRewriteOutcome(
+                    false,
+                    $"Failed to apply root folder for audiobook {id}: {ex.Message}");
+            }
+        }
+
+        private async Task<BulkUpdateOutcome> UpdateOneAsync(
+            int id,
+            Dictionary<string, object>? updates,
+            bool rootFolderRewritten)
+        {
+            var errors = new List<string>();
+            try
+            {
+                using var scope = _scopeFactory.CreateScope();
+                var repository = scope.ServiceProvider.GetRequiredService<IAudiobookRepository>();
+                var audiobook = await repository.GetByIdAsync(id);
+                if (audiobook == null)
+                {
+                    errors.Add($"Audiobook with ID {id} not found");
+                    return new BulkUpdateOutcome(false, errors);
+                }
+
+                var changed = false;
+                if (updates != null && updates.TryGetValue("monitored", out var monitoredObj))
+                {
+                    try
+                    {
+                        var monitored = monitoredObj is JsonElement element
+                            ? element.ValueKind == JsonValueKind.True
+                            : Convert.ToBoolean(monitoredObj);
+                        audiobook.Monitored = monitored;
+                        changed = true;
+                        _logger.LogInformation("Set Monitored={Monitored} for audiobook id={Id}", monitored, id);
+                        await AddBulkUpdateHistoryAsync(audiobook, $"Monitored set to {monitored}");
+                    }
+                    catch (Exception ex) when (ex is not OperationCanceledException
+                        && ex is not OutOfMemoryException
+                        && ex is not StackOverflowException)
+                    {
+                        errors.Add($"Invalid monitored value: {ex.Message}");
+                    }
+                }
+
+                if (updates != null && updates.TryGetValue("qualityProfileId", out var qualityProfileObj))
+                {
+                    try
+                    {
+                        var qualityProfileId = qualityProfileObj is JsonElement element
+                            ? element.GetInt32()
+                            : Convert.ToInt32(qualityProfileObj);
+                        audiobook.QualityProfileId = qualityProfileId;
+                        changed = true;
+                        _logger.LogInformation(
+                            "Set QualityProfileId={Profile} for audiobook id={Id}",
+                            qualityProfileId,
+                            id);
+                        await AddBulkUpdateHistoryAsync(
+                            audiobook,
+                            $"Quality profile set to {qualityProfileId}");
+                    }
+                    catch (Exception ex) when (ex is not OperationCanceledException
+                        && ex is not OutOfMemoryException
+                        && ex is not StackOverflowException)
+                    {
+                        errors.Add($"Invalid qualityProfileId value: {ex.Message}");
+                    }
+                }
+
+                if (!changed && !rootFolderRewritten)
+                {
+                    errors.Add("No valid updates provided for this audiobook");
+                    return new BulkUpdateOutcome(false, errors);
+                }
+
+                if (changed)
+                {
+                    await repository.UpdateAsync(audiobook);
+                }
+
+                return new BulkUpdateOutcome(true, errors);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException
+                && ex is not OutOfMemoryException
+                && ex is not StackOverflowException)
+            {
+                errors.Add($"Unhandled error: {ex.Message}");
+                return new BulkUpdateOutcome(false, errors);
+            }
+        }
+
+        private sealed record BulkDeleteOutcome(bool Deleted, int DeletedImages, string? Error);
+        private sealed record RootFolderRewriteOutcome(bool Rewritten, string? Error);
+        private sealed record BulkUpdateOutcome(bool Success, List<string> Errors);
 
         private async Task<int> DeleteCachedImageAsync(Audiobook audiobook)
         {

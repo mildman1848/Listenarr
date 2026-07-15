@@ -24,6 +24,7 @@ namespace Listenarr.Tests.Features.Api.Features.Library
     public class LibraryController_AddToLibraryTests : BaseTests
     {
         private readonly Mock<IImageCacheService> imageCacheServiceMock = new Mock<IImageCacheService>();
+        private readonly Mock<ILibraryDestinationMutationGuard> destinationGuardMock = new();
         private readonly string imageUrl1 = "http://example.com/a1.jpg";
         private readonly string imageUrl2 = "http://example.com/a2.jpg";
         private string tempRoot = null!;
@@ -32,8 +33,15 @@ namespace Listenarr.Tests.Features.Api.Features.Library
         {
             imageCacheServiceMock.Setup(m => m.MoveToLibraryStorageAsync(It.IsAny<string>(), imageUrl1)).ReturnsAsync("config/cache/images/library/B000TEST01.jpg");
             imageCacheServiceMock.Setup(m => m.MoveToLibraryStorageAsync(It.IsAny<string>(), imageUrl2)).ReturnsAsync("config/cache/images/library/derived.jpg");
+            destinationGuardMock
+                .Setup(guard => guard.GetBlockingReasonAsync(
+                    It.IsAny<string>(),
+                    It.IsAny<CancellationToken>()))
+                .ReturnsAsync((string?)null);
 
-            Init(services => services.WithSingleton(imageCacheServiceMock.Object));
+            Init(services => services
+                .WithSingleton(imageCacheServiceMock.Object)
+                .WithSingleton(destinationGuardMock.Object));
             await InitDataAsync();
         }
 
@@ -50,6 +58,38 @@ namespace Listenarr.Tests.Features.Api.Features.Library
                 .WithIsDefault()
                 .WithPath(tempRoot)
                 .Build());
+        }
+
+        [Fact]
+        public async Task AddToLibrary_WaitsForGlobalFilesystemMutationAndNestedServiceCallIsReentrant()
+        {
+            var coordinator = _provider.GetRequiredService<IFilesystemMutationCoordinator>();
+            var lockEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var releaseLock = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var blocker = coordinator.ExecuteExclusiveAsync(async _ =>
+            {
+                lockEntered.SetResult();
+                await releaseLock.Task;
+            });
+            await lockEntered.Task;
+
+            var addTask = _provider.GetRequiredService<LibraryController>().AddToLibrary(
+                new LibraryController.AddToLibraryRequest
+                {
+                    Metadata = new AudibleBookMetadata
+                    {
+                        Title = "Globally Coordinated",
+                        Author = "Author"
+                    },
+                    Monitored = true
+                });
+            await Task.Delay(50);
+            Assert.False(addTask.IsCompleted);
+
+            releaseLock.SetResult();
+            await blocker;
+            Assert.IsType<OkObjectResult>(await addTask);
+            Assert.Single(await _audiobookRepository.GetAllAsync());
         }
 
         [Fact]
@@ -78,6 +118,39 @@ namespace Listenarr.Tests.Features.Api.Features.Library
             Assert.NotNull(stored.Authors);
             Assert.Contains("Legacy Author", stored.Authors);
             Assert.Equal(Path.Join(tempRoot, "Legacy Author"), stored.BasePath);
+        }
+
+        [Fact]
+        public async Task AddToLibrary_RejectsDestinationProtectedByActiveRelocation()
+        {
+            destinationGuardMock
+                .Setup(guard => guard.GetBlockingReasonAsync(
+                    It.IsAny<string>(),
+                    It.IsAny<CancellationToken>()))
+                .ReturnsAsync("Destination overlaps an active root folder relocation.");
+            var controller = _provider.GetRequiredService<LibraryController>();
+
+            var result = await controller.AddToLibrary(new LibraryController.AddToLibraryRequest
+            {
+                Metadata = new AudibleBookMetadata
+                {
+                    Title = "Relocation Conflict",
+                    Author = "Blocked Author",
+                    ImageUrl = imageUrl1
+                },
+                DestinationPath = Path.Join(tempRoot, "Blocked Author", "Relocation Conflict")
+            });
+
+            var badRequest = Assert.IsType<BadRequestObjectResult>(result);
+            Assert.Contains("active root folder relocation", badRequest.Value?.ToString() ?? string.Empty);
+            Assert.DoesNotContain(
+                await _audiobookRepository.GetAllAsync(),
+                audiobook => audiobook.Title == "Relocation Conflict");
+            imageCacheServiceMock.Verify(
+                service => service.MoveToLibraryStorageAsync(
+                    It.IsAny<string>(),
+                    It.IsAny<string?>()),
+                Times.Never);
         }
 
         [Fact]

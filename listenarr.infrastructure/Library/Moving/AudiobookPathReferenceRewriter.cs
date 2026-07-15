@@ -17,6 +17,13 @@ internal static class AudiobookPathReferenceRewriter
         ArgumentNullException.ThrowIfNull(audiobook);
         ArgumentException.ThrowIfNullOrWhiteSpace(targetBasePath);
 
+        EnsureCurrentBasePathMatchesExpectedState(
+            audiobook.BasePath,
+            sourceBasePath,
+            targetBasePath,
+            sourceSemantics,
+            targetSemantics);
+
         var filePath = audiobook.FilePath;
         var imageUrl = audiobook.ImageUrl;
         var rewrittenFiles = new List<(AudiobookFile File, string? Path)>();
@@ -59,6 +66,62 @@ internal static class AudiobookPathReferenceRewriter
         audiobook.BasePath = targetBasePath;
     }
 
+    private static void EnsureCurrentBasePathMatchesExpectedState(
+        string? currentBasePath,
+        string? sourceBasePath,
+        string targetBasePath,
+        FileSystemPathSemantics sourceSemantics,
+        FileSystemPathSemantics targetSemantics)
+    {
+        if (string.IsNullOrWhiteSpace(sourceBasePath))
+        {
+            if (string.IsNullOrWhiteSpace(currentBasePath)
+                || StoredPathsMatch(currentBasePath, targetBasePath)
+                || PathsMatch(currentBasePath, targetBasePath, targetSemantics))
+            {
+                return;
+            }
+
+            throw new AudiobookPathRewriteException(
+                "The audiobook path changed before its path references could be rewritten.");
+        }
+
+        if (!string.IsNullOrWhiteSpace(currentBasePath)
+            && (StoredPathsMatch(currentBasePath, sourceBasePath)
+                || PathsMatch(currentBasePath, sourceBasePath, sourceSemantics)
+                || StoredPathsMatch(currentBasePath, targetBasePath)
+                || PathsMatch(currentBasePath, targetBasePath, targetSemantics)))
+        {
+            return;
+        }
+
+        throw new AudiobookPathRewriteException(
+            "The audiobook path changed before its path references could be rewritten.");
+    }
+
+    private static bool StoredPathsMatch(string currentPath, string expectedPath) =>
+        string.Equals(currentPath, expectedPath, StringComparison.Ordinal)
+        || string.Equals(
+            currentPath,
+            FileUtils.NormalizeStoredPath(expectedPath),
+            StringComparison.Ordinal);
+
+    private static bool PathsMatch(
+        string path,
+        string expectedPath,
+        FileSystemPathSemantics semantics)
+    {
+        try
+        {
+            return FileSystemPathIdentity.AreEquivalent(path, expectedPath, semantics);
+        }
+        catch (Exception exception) when (exception is
+            ArgumentException or NotSupportedException or PathTooLongException or System.Security.SecurityException)
+        {
+            return false;
+        }
+    }
+
     private static string? RewriteAbsoluteReference(
         string? path,
         string sourceBasePath,
@@ -77,7 +140,8 @@ internal static class AudiobookPathReferenceRewriter
         {
             isInsideSource = FileSystemPathIdentity.IsSameOrInside(path, sourceBasePath, sourceSemantics);
         }
-        catch (ArgumentException)
+        catch (Exception exception) when (exception is
+            ArgumentException or NotSupportedException or PathTooLongException or System.Security.SecurityException)
         {
             // Relative and non-filesystem references are intentionally preserved.
             return path;

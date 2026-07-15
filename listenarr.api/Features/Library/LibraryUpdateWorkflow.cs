@@ -22,34 +22,33 @@ using Microsoft.AspNetCore.Mvc;
 
 namespace Listenarr.Api.Features.Library
 {
-    public sealed class LibraryUpdateWorkflow
+    public sealed partial class LibraryUpdateWorkflow
     {
-        private readonly IAudiobookRepository _repo;
         private readonly IServiceScopeFactory _scopeFactory;
         private readonly IAudiobookDestinationRewriteService _destinationRewriteService;
+        private readonly IAudiobookOperationCoordinator _audiobookOperationCoordinator;
         private readonly ILogger<LibraryUpdateWorkflow> _logger;
 
         public LibraryUpdateWorkflow(
-            IAudiobookRepository repo,
             IServiceScopeFactory scopeFactory,
             IAudiobookDestinationRewriteService destinationRewriteService,
+            IAudiobookOperationCoordinator audiobookOperationCoordinator,
             ILogger<LibraryUpdateWorkflow> logger)
         {
-            _repo = repo;
             _scopeFactory = scopeFactory;
             _destinationRewriteService = destinationRewriteService;
+            _audiobookOperationCoordinator = audiobookOperationCoordinator ?? throw new ArgumentNullException(nameof(audiobookOperationCoordinator));
             _logger = logger;
         }
 
         public async Task<IActionResult> UpdateAsync(int id, AudiobookUpdateRequest request)
         {
-            var existingAudiobook = await _repo.GetByIdAsync(id);
+            var existingAudiobook = await GetAudiobookPreflightSnapshotAsync(id);
             if (existingAudiobook == null)
             {
                 return new NotFoundObjectResult(new { message = "Audiobook not found" });
             }
 
-            var legacyIdentifierFieldsTouched = false;
             var basePathRewritten = false;
             var metadataUpdateRequested = HasMetadataUpdates(request);
 
@@ -86,73 +85,23 @@ namespace Listenarr.Api.Features.Library
                         };
                     }
 
-                    existingAudiobook = await _repo.GetByIdAsync(id);
-                    if (existingAudiobook == null)
-                    {
-                        return new NotFoundObjectResult(new { message = "Audiobook not found" });
-                    }
                 }
             }
 
-            if (request.Title != null) existingAudiobook.Title = request.Title;
-            if (request.Subtitle != null) existingAudiobook.Subtitle = request.Subtitle;
-            if (request.Authors != null) existingAudiobook.Authors = request.Authors;
-            if (!basePathRewritten && request.ImageUrl != null) existingAudiobook.ImageUrl = request.ImageUrl;
-            if (request.PublishYear != null) existingAudiobook.PublishYear = request.PublishYear;
-            if (request.PublishedDate != null) existingAudiobook.PublishedDate = request.PublishedDate;
-            if (request.Description != null) existingAudiobook.Description = request.Description;
-            if (request.Genres != null) existingAudiobook.Genres = request.Genres;
-            if (request.Tags != null) existingAudiobook.Tags = request.Tags;
-            if (request.Narrators != null) existingAudiobook.Narrators = request.Narrators;
-            if (request.Isbn != null)
-            {
-                existingAudiobook.Isbn = request.Isbn;
-                legacyIdentifierFieldsTouched = true;
-            }
+            return await _audiobookOperationCoordinator.ExecuteExclusiveAsync(
+                id,
+                _ => ApplyMetadataUpdatesAsync(
+                    id,
+                    request,
+                    basePathRewritten,
+                    metadataUpdateRequested));
+        }
 
-            if (request.Asin != null)
-            {
-                existingAudiobook.Asin = request.Asin;
-                legacyIdentifierFieldsTouched = true;
-            }
-
-            if (request.OpenLibraryId != null)
-            {
-                existingAudiobook.OpenLibraryId = request.OpenLibraryId;
-                legacyIdentifierFieldsTouched = true;
-            }
-
-            if (request.Publisher != null) existingAudiobook.Publisher = request.Publisher;
-            if (request.Language != null) existingAudiobook.Language = request.Language;
-            if (request.Runtime != null) existingAudiobook.Runtime = request.Runtime;
-            if (request.Edition != null) existingAudiobook.Edition = request.Edition;
-            if (request.Version != null) existingAudiobook.Version = request.Version;
-
-            ApplySeriesMembershipUpdates(existingAudiobook, request);
-
-            if (request.Explicit.HasValue) existingAudiobook.Explicit = request.Explicit.Value;
-            if (request.Abridged.HasValue) existingAudiobook.Abridged = request.Abridged.Value;
-            if (request.Monitored.HasValue) existingAudiobook.Monitored = request.Monitored.Value;
-
-            if (!basePathRewritten && request.FilePath != null) existingAudiobook.FilePath = request.FilePath;
-            if (request.FileSize.HasValue) existingAudiobook.FileSize = request.FileSize;
-            if (request.Quality != null) existingAudiobook.Quality = request.Quality;
-
-            await ApplyQualityProfileAsync(existingAudiobook, request);
-
-            if (legacyIdentifierFieldsTouched)
-            {
-                AudiobookIdentifierMapper.SyncImportedIdentifiersFromLegacyFields(existingAudiobook);
-            }
-
-            if (metadataUpdateRequested)
-            {
-                await _repo.UpdateAsync(existingAudiobook);
-            }
-
-            _logger.LogInformation("Updated audiobook '{Title}' (ID: {Id})", LogRedaction.SanitizeText(existingAudiobook.Title), id);
-
-            return new OkObjectResult(new { message = "Audiobook updated successfully", audiobook = existingAudiobook });
+        private async Task<Audiobook?> GetAudiobookPreflightSnapshotAsync(int id)
+        {
+            using var scope = _scopeFactory.CreateScope();
+            var repository = scope.ServiceProvider.GetRequiredService<IAudiobookRepository>();
+            return await repository.GetByIdAsync(id);
         }
 
         private static bool HasMetadataUpdates(AudiobookUpdateRequest request) =>

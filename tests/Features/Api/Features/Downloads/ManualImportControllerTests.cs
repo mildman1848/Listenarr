@@ -23,6 +23,7 @@ namespace Listenarr.Tests.Features.Api.Features.Downloads
     public class ManualImport_MultiFileCollisionTests : IDisposable
     {
 
+        private readonly AudiobookOperationCoordinator _operationCoordinator = new();
         private List<string> _tempDirectories = [];
 
         public void Dispose()
@@ -33,6 +34,7 @@ namespace Listenarr.Tests.Features.Api.Features.Downloads
             }
 
             _tempDirectories.Clear();
+            _operationCoordinator.Dispose();
         }
         private static void TryDeleteDirectory(string path)
         {
@@ -77,7 +79,7 @@ namespace Listenarr.Tests.Features.Api.Features.Downloads
             return scanMock;
         }
 
-        public static ManualImportController GetController(Audiobook book, ApplicationSettings settings, Mock<IAudiobookRepository> repoMock = null, Mock<IScanQueueService> scanMock = null, IFileMover fileMover = null)
+        public ManualImportController GetController(Audiobook book, ApplicationSettings settings, Mock<IAudiobookRepository> repoMock = null, Mock<IScanQueueService> scanMock = null, IFileMover fileMover = null)
         {
             repoMock ??= GetRepoMock(book);
             scanMock ??= GetScanMock();
@@ -121,7 +123,8 @@ namespace Listenarr.Tests.Features.Api.Features.Downloads
                 rootFolderMock.Object,
                 fileMover,
                 new LocalFileSystem(),
-                new FileSystemSemanticsResolver()
+                new FileSystemSemanticsResolver(),
+                _operationCoordinator
             );
         }
 

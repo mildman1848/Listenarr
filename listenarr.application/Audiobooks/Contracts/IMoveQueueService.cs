@@ -69,7 +69,14 @@ namespace Listenarr.Application.Audiobooks.Contracts
             int leaseGeneration,
             string error,
             CancellationToken cancellationToken = default);
+        Task<MoveRetryScheduleResult> ScheduleRetryWithoutNotificationAsync(
+            Guid id,
+            string leaseOwner,
+            int leaseGeneration,
+            string error,
+            CancellationToken cancellationToken = default);
         Task UpdateJobStatusAsync(Guid id, string leaseOwner, int leaseGeneration, MoveJobStatus status, string? error = null, CancellationToken cancellationToken = default);
+        Task UpdateJobStatusWithoutNotificationAsync(Guid id, string leaseOwner, int leaseGeneration, MoveJobStatus status, string? error = null, CancellationToken cancellationToken = default);
         Task NotifyPersistedJobStateAsync(Guid id, MoveJobStatus status, string? error = null, CancellationToken cancellationToken = default);
         System.Threading.Channels.ChannelReader<MoveJob> Reader { get; }
     }

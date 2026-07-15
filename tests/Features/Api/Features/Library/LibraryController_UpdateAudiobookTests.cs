@@ -110,7 +110,7 @@ namespace Listenarr.Tests.Features.Api.Features.Library
             var actionResult = await controller.UpdateAudiobook(existingAudiobook.Id, request);
 
             Assert.IsType<OkObjectResult>(actionResult);
-            var storedAudiobook = await _audiobookRepository.GetByIdAsync(existingAudiobook.Id);
+            var storedAudiobook = await GetFreshAudiobookAsync(existingAudiobook.Id);
             Assert.NotNull(storedAudiobook);
             Assert.Equal("Edited Title", storedAudiobook.Title);
             Assert.Equal("Edited Subtitle", storedAudiobook.Subtitle);
@@ -169,7 +169,7 @@ namespace Listenarr.Tests.Features.Api.Features.Library
             });
 
             Assert.IsType<OkObjectResult>(result);
-            var updated = await _audiobookRepository.GetByIdAsync(audiobook.Id);
+            var updated = await GetFreshAudiobookAsync(audiobook.Id);
             Assert.NotNull(updated);
             Assert.Equal("Edited", updated.Title);
             Assert.False(updated.Monitored);
@@ -214,7 +214,7 @@ namespace Listenarr.Tests.Features.Api.Features.Library
             });
 
             Assert.IsType<OkObjectResult>(result);
-            var updated = await _audiobookRepository.GetByIdAsync(audiobook.Id);
+            var updated = await GetFreshAudiobookAsync(audiobook.Id);
             Assert.NotNull(updated);
             Assert.Equal("Legacy Path Update Edited", updated.Title);
             Assert.Equal(FileUtils.NormalizeStoredPath(targetPath), updated.BasePath);
@@ -260,7 +260,7 @@ namespace Listenarr.Tests.Features.Api.Features.Library
             });
 
             Assert.IsType<OkObjectResult>(result);
-            var updated = await _audiobookRepository.GetByIdAsync(audiobook.Id);
+            var updated = await GetFreshAudiobookAsync(audiobook.Id);
             Assert.NotNull(updated);
             Assert.Equal("Stale Path Payload Edited", updated.Title);
             Assert.Equal(FileUtils.NormalizeStoredPath(targetPath), updated.BasePath);
@@ -293,7 +293,7 @@ namespace Listenarr.Tests.Features.Api.Features.Library
             });
 
             Assert.IsType<OkObjectResult>(result);
-            var updated = await _audiobookRepository.GetByIdAsync(audiobook.Id);
+            var updated = await GetFreshAudiobookAsync(audiobook.Id);
             Assert.NotNull(updated);
             Assert.Equal("Metadata Path Update Edited", updated.Title);
             Assert.Equal(basePath, updated.BasePath);
@@ -333,12 +333,19 @@ namespace Listenarr.Tests.Features.Api.Features.Library
             var badRequest = Assert.IsType<BadRequestObjectResult>(result);
             Assert.Contains("configured root folder or output path", badRequest.Value?.ToString() ?? string.Empty);
 
-            var unchanged = await _audiobookRepository.GetByIdAsync(audiobook.Id);
+            var unchanged = await GetFreshAudiobookAsync(audiobook.Id);
             Assert.NotNull(unchanged);
             Assert.Equal("Invalid Legacy Path Update", unchanged.Title);
             Assert.Equal(sourcePath, unchanged.BasePath);
             Assert.Equal(originalFilePath, unchanged.FilePath);
             Assert.Equal(originalFilePath, Assert.Single(unchanged.Files!).Path);
+        }
+
+        private async Task<Audiobook?> GetFreshAudiobookAsync(int id)
+        {
+            using var scope = _provider.CreateScope();
+            var repository = scope.ServiceProvider.GetRequiredService<IAudiobookRepository>();
+            return await repository.GetByIdAsync(id);
         }
     }
 }

@@ -20,6 +20,7 @@ using Listenarr.Tests.Builders;
 using System.Runtime.InteropServices;
 using System.IO.Compression;
 using Listenarr.Tests.Mocks;
+using Microsoft.EntityFrameworkCore;
 
 namespace Listenarr.Tests.Features.Application.Downloads.Import
 {
@@ -70,6 +71,47 @@ namespace Listenarr.Tests.Features.Application.Downloads.Import
 
             Assert.True(resolved);
             Assert.Equal("/library/ Disc 1/Chapter 01.mp3 ", destination);
+        }
+
+        [Fact]
+        public async Task ImportDownloadFilesAsync_StaleAudiobookArgument_UsesCurrentPersistedBasePath()
+        {
+            var oldBasePath = FileService.GetTempDirectory("download-import-stale-old");
+            var newBasePath = FileService.GetTempDirectory("download-import-stale-new");
+            var sourceFile = await FileService.GetTempFileAsync("stale-import.mp3");
+            var staleAudiobook = await _audiobookRepository.AddAsync(new AudiobookBuilder()
+                .WithTitle("Current Destination")
+                .WithAuthor("Author")
+                .WithBasePath(oldBasePath)
+                .Build());
+            await _applicationSettingsRepository.SaveAsync(new ApplicationSettingsBuilder()
+                .WithOutputPath(newBasePath)
+                .WithMetadataProcessing()
+                .WithMoveFileOnCompleted()
+                .WithFileNamingPattern("{Title}")
+                .WithMultiFileNamingPattern("{Title}")
+                .Build());
+
+            var factory = _provider.GetRequiredService<IDbContextFactory<ListenArrDbContext>>();
+            await using (var moveContext = await factory.CreateDbContextAsync())
+            {
+                var current = await moveContext.Audiobooks.SingleAsync(
+                    candidate => candidate.Id == staleAudiobook.Id);
+                current.BasePath = newBasePath;
+                await moveContext.SaveChangesAsync();
+            }
+
+            var service = _provider.GetRequiredService<IDownloadImportService>();
+            var result = Assert.Single(await service.ImportDownloadFilesAsync(
+                staleAudiobook,
+                [sourceFile]));
+
+            Assert.True(result.Success);
+            Assert.NotNull(result.FinalPath);
+            Assert.StartsWith(newBasePath, result.FinalPath, StringComparison.OrdinalIgnoreCase);
+            Assert.False(result.FinalPath.StartsWith(
+                oldBasePath,
+                StringComparison.OrdinalIgnoreCase));
         }
 
         [Theory]

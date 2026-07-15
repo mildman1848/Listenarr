@@ -25,6 +25,7 @@ namespace Listenarr.Tests.Features.Application.Audiobooks.Renaming
     {
         private readonly string _tempRoot = Path.Join(Path.GetTempPath(), "ListenarrRenameTests", Guid.NewGuid().ToString("N"));
         private readonly List<ListenArrDbContext> _contexts = new();
+        private readonly AudiobookOperationCoordinator _operationCoordinator = new();
 
         public void Dispose()
         {
@@ -48,6 +49,8 @@ namespace Listenarr.Tests.Features.Application.Audiobooks.Renaming
             {
                 context.Dispose();
             }
+
+            _operationCoordinator.Dispose();
         }
 
         [Fact]
@@ -619,7 +622,8 @@ namespace Listenarr.Tests.Features.Application.Audiobooks.Renaming
                 repo,
                 new LocalFileSystem(),
                 NullLogger<RenameService>.Instance,
-                semanticsResolver);
+                semanticsResolver,
+                _operationCoordinator);
 
             return (service, db, dbName);
         }

@@ -16,6 +16,7 @@
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
 using Microsoft.EntityFrameworkCore;
+using Listenarr.Infrastructure.Persistence.Repositories;
 using Listenarr.Tests.Builders;
 
 namespace Listenarr.Tests.Features.Infrastructure.Repositories
@@ -58,6 +59,174 @@ namespace Listenarr.Tests.Features.Infrastructure.Repositories
 
             Assert.True(wantedDto.wanted);
             Assert.False(hasFileDto.wanted);
+        }
+
+        [Fact]
+        public async Task GetByIdsWithFilesAsync_ReturnsDetachedPreviewSnapshots()
+        {
+            var options = new DbContextOptionsBuilder<ListenArrDbContext>()
+                .UseInMemoryDatabase(Guid.NewGuid().ToString())
+                .Options;
+            await using var db = new ListenArrDbContext(options);
+            var audiobook = new Audiobook
+            {
+                Title = "Preview Snapshot",
+                Files = [new AudiobookFile { Path = "/library/book.m4b" }]
+            };
+            db.Audiobooks.Add(audiobook);
+            await db.SaveChangesAsync();
+            var repository = new AudiobookRepository(db);
+
+            var snapshot = Assert.Single(await repository.GetByIdsWithFilesAsync([audiobook.Id]));
+
+            Assert.Equal(EntityState.Detached, db.Entry(snapshot).State);
+            Assert.All(snapshot.Files!, file => Assert.Equal(EntityState.Detached, db.Entry(file).State));
+        }
+
+        [Fact]
+        public async Task UpdateAsync_TrackedMetadataChange_DoesNotOverwriteNewerBasePathFromAnotherContext()
+        {
+            var databaseName = Guid.NewGuid().ToString();
+            var options = new DbContextOptionsBuilder<ListenArrDbContext>()
+                .UseInMemoryDatabase(databaseName)
+                .Options;
+            int audiobookId;
+
+            await using (var seed = new ListenArrDbContext(options))
+            {
+                var audiobook = new AudiobookBuilder()
+                    .WithTitle("Concurrent Update")
+                    .WithBasePath("/library/source")
+                    .Build();
+                seed.Audiobooks.Add(audiobook);
+                await seed.SaveChangesAsync();
+                audiobookId = audiobook.Id;
+            }
+
+            await using var metadataContext = new ListenArrDbContext(options);
+            var metadataRepository = new AudiobookRepository(metadataContext);
+            var staleMetadataEntity = await metadataRepository.GetByIdAsync(audiobookId);
+            Assert.NotNull(staleMetadataEntity);
+
+            await using (var moveContext = new ListenArrDbContext(options))
+            {
+                var movedAudiobook = await moveContext.Audiobooks.SingleAsync(candidate => candidate.Id == audiobookId);
+                movedAudiobook.BasePath = "/library/target";
+                await moveContext.SaveChangesAsync();
+            }
+
+            staleMetadataEntity!.Monitored = false;
+            await metadataRepository.UpdateAsync(staleMetadataEntity);
+
+            await using var verification = new ListenArrDbContext(options);
+            var persisted = await verification.Audiobooks.SingleAsync(candidate => candidate.Id == audiobookId);
+            Assert.Equal(FileUtils.NormalizeStoredPath("/library/target"), persisted.BasePath);
+            Assert.False(persisted.Monitored);
+        }
+
+        [Fact]
+        public async Task UpdateAsync_DetachedMetadataChange_DoesNotOverwriteNewerPathReferences()
+        {
+            var databaseName = Guid.NewGuid().ToString();
+            var options = new DbContextOptionsBuilder<ListenArrDbContext>()
+                .UseInMemoryDatabase(databaseName)
+                .Options;
+            Audiobook staleMetadataEntity;
+
+            await using (var seed = new ListenArrDbContext(options))
+            {
+                var audiobook = new AudiobookBuilder()
+                    .WithTitle("Detached Concurrent Update")
+                    .WithBasePath("/library/source")
+                    .Build();
+                audiobook.FilePath = "/library/source/book.m4b";
+                audiobook.FileSize = 100;
+                audiobook.ImageUrl = "/library/source/cover.jpg";
+                seed.Audiobooks.Add(audiobook);
+                await seed.SaveChangesAsync();
+                staleMetadataEntity = await seed.Audiobooks
+                    .AsNoTracking()
+                    .SingleAsync(candidate => candidate.Id == audiobook.Id);
+            }
+
+            await using (var moveContext = new ListenArrDbContext(options))
+            {
+                var movedAudiobook = await moveContext.Audiobooks
+                    .SingleAsync(candidate => candidate.Id == staleMetadataEntity.Id);
+                movedAudiobook.BasePath = "/library/target";
+                movedAudiobook.FilePath = "/library/target/book.m4b";
+                movedAudiobook.FileSize = 200;
+                movedAudiobook.ImageUrl = "/library/target/cover.jpg";
+                await moveContext.SaveChangesAsync();
+            }
+
+            staleMetadataEntity.Monitored = false;
+            await using (var metadataContext = new ListenArrDbContext(options))
+            {
+                var metadataRepository = new AudiobookRepository(metadataContext);
+                await metadataRepository.UpdateAsync(staleMetadataEntity);
+            }
+
+            await using var verification = new ListenArrDbContext(options);
+            var persisted = await verification.Audiobooks
+                .SingleAsync(candidate => candidate.Id == staleMetadataEntity.Id);
+            Assert.Equal(FileUtils.NormalizeStoredPath("/library/target"), persisted.BasePath);
+            Assert.Equal("/library/target/book.m4b", persisted.FilePath);
+            Assert.Equal(200, persisted.FileSize);
+            Assert.Equal("/library/target/cover.jpg", persisted.ImageUrl);
+            Assert.False(persisted.Monitored);
+        }
+
+        [Fact]
+        public async Task UpdateWithIdentifierReplaceAsync_DoesNotOverwriteNewerBasePath()
+        {
+            var databaseName = Guid.NewGuid().ToString();
+            var options = new DbContextOptionsBuilder<ListenArrDbContext>()
+                .UseInMemoryDatabase(databaseName)
+                .Options;
+            int audiobookId;
+
+            await using (var seed = new ListenArrDbContext(options))
+            {
+                var audiobook = new AudiobookBuilder()
+                    .WithTitle("Identifier Update")
+                    .WithBasePath("/library/source")
+                    .Build();
+                seed.Audiobooks.Add(audiobook);
+                await seed.SaveChangesAsync();
+                audiobookId = audiobook.Id;
+            }
+
+            await using var identifierContext = new ListenArrDbContext(options);
+            var repository = new AudiobookRepository(identifierContext);
+            var staleAudiobook = await repository.GetByIdAsync(audiobookId);
+            Assert.NotNull(staleAudiobook);
+
+            await using (var moveContext = new ListenArrDbContext(options))
+            {
+                var movedAudiobook = await moveContext.Audiobooks.SingleAsync(candidate => candidate.Id == audiobookId);
+                movedAudiobook.BasePath = "/library/target";
+                await moveContext.SaveChangesAsync();
+            }
+
+            await repository.UpdateWithIdentifierReplaceAsync(
+                staleAudiobook!,
+                [new AudiobookExternalIdentifier
+                {
+                    Type = AudiobookExternalIdentifierType.Asin,
+                    ValueRaw = "B012345678",
+                    ValueNormalized = "B012345678",
+                    IsPrimary = true,
+                    Source = AudiobookExternalIdentifierSource.Manual
+                }]);
+
+            await using var verification = new ListenArrDbContext(options);
+            var persisted = await verification.Audiobooks
+                .Include(audiobook => audiobook.ExternalIdentifiers)
+                .SingleAsync(candidate => candidate.Id == audiobookId);
+            Assert.Equal(FileUtils.NormalizeStoredPath("/library/target"), persisted.BasePath);
+            var identifier = Assert.Single(persisted.ExternalIdentifiers);
+            Assert.Equal("B012345678", identifier.ValueNormalized);
         }
 
         [Fact]

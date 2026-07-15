@@ -120,58 +120,13 @@ namespace Listenarr.Infrastructure.Persistence.Repositories
                 .ToList();
         }
 
-        public async Task<List<(int audiobookId, string original, string target)>> MigrateAudiobookPathsAsync(
-            string oldRootPath,
-            string newRootPath,
-            FileSystemPathSemantics sourceSemantics,
-            FileSystemPathSemantics targetSemantics,
-            CancellationToken ct = default)
+        public async Task<List<int>> GetAllAudiobookIdsAsync(CancellationToken ct = default)
         {
-            await using var ctx = await _dbFactory.CreateDbContextAsync();
-            var all = await ctx.Audiobooks.Where(a => a.BasePath != null).ToListAsync(ct);
-
-            var affected = all
-                .Where(a => FileSystemPathIdentity.IsSameOrInside(a.BasePath!, oldRootPath, sourceSemantics))
-                .ToList();
-
-            var moves = new List<(int audiobookId, string original, string target)>();
-            foreach (var a in affected)
-            {
-                var original = a.BasePath!;
-                if (!FileSystemPathIdentity.TryGetRelativePathWithinBase(
-                    oldRootPath,
-                    original,
-                    sourceSemantics,
-                    out var relativePath))
-                {
-                    throw new InvalidOperationException("An audiobook path escaped its source root during reassignment.");
-                }
-
-                var target = newRootPath;
-                if (relativePath.Length > 0
-                    && !FileSystemPathIdentity.TryResolveRelativePathWithinBase(
-                        newRootPath,
-                        FileSystemPathIdentity.ConvertRelativePathSyntax(
-                            relativePath,
-                            sourceSemantics.Syntax,
-                            targetSemantics.Syntax),
-                        targetSemantics,
-                        out target))
-                {
-                    throw new InvalidOperationException("An audiobook relative path is invalid for the target root.");
-                }
-
-                moves.Add((a.Id, original, target));
-                a.BasePath = target;
-            }
-
-            if (affected.Count > 0)
-            {
-                ctx.Audiobooks.UpdateRange(affected);
-                await ctx.SaveChangesAsync(ct);
-            }
-
-            return moves;
+            await using var ctx = await _dbFactory.CreateDbContextAsync(ct);
+            return await ctx.Audiobooks
+                .AsNoTracking()
+                .Select(audiobook => audiobook.Id)
+                .ToListAsync(ct);
         }
 
         public async Task ReassignAudiobooksAndRemoveAsync(
