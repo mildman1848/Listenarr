@@ -271,6 +271,8 @@ async function confirm() {
     .filter((preview) => selected.value.has(preview.audiobookId))
     .map((preview) => ({
       audiobookId: preview.audiobookId,
+      currentFolderPath: preview.currentFolderPath,
+      currentFolderSemantics: preview.currentFolderSemantics,
       newFolderPath: preview.folderChanged ? preview.newFolderPath : undefined,
       fileRenames: preview.fileRenames
         .filter((entry) => entry.changed)

@@ -101,6 +101,168 @@ public sealed class RootFolderReassignmentTransactionTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task ReassignAudiobooksAndRemoveAsync_CaseVariantsCollapseOnInsensitiveTarget_RollsBack()
+    {
+        var sourcePath = Path.Join(
+            Path.GetTempPath(),
+            $"root-reassign-case-source-{Guid.NewGuid():N}");
+        var targetPath = Path.Join(
+            Path.GetTempPath(),
+            $"root-reassign-case-target-{Guid.NewGuid():N}");
+        var upperBasePath = Path.Join(sourcePath, "Book");
+        var lowerBasePath = Path.Join(sourcePath, "book");
+        int sourceRootId;
+        int targetRootId;
+        await using (var db = await _factory.CreateDbContextAsync())
+        {
+            var sourceRoot = new RootFolder
+            {
+                Name = "Source",
+                Path = sourcePath,
+                CaseSensitivityMode = FileSystemCaseSensitivityMode.Sensitive
+            };
+            var targetRoot = new RootFolder
+            {
+                Name = "Target",
+                Path = targetPath,
+                CaseSensitivityMode = FileSystemCaseSensitivityMode.Insensitive
+            };
+            db.RootFolders.AddRange(sourceRoot, targetRoot);
+            db.Audiobooks.AddRange(
+                new Audiobook
+                {
+                    Title = "Upper",
+                    BasePath = upperBasePath,
+                    Files =
+                    [
+                        new AudiobookFile
+                        {
+                            Path = Path.Join(upperBasePath, "book.m4b")
+                        }
+                    ]
+                },
+                new Audiobook
+                {
+                    Title = "Lower",
+                    BasePath = lowerBasePath,
+                    Files =
+                    [
+                        new AudiobookFile
+                        {
+                            Path = Path.Join(lowerBasePath, "book.m4b")
+                        }
+                    ]
+                });
+            await db.SaveChangesAsync();
+            sourceRootId = sourceRoot.Id;
+            targetRootId = targetRoot.Id;
+        }
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            _repository.ReassignAudiobooksAndRemoveAsync(
+                sourceRootId,
+                targetRootId,
+                new FileSystemPathSemantics(
+                    FileSystemPathSyntax.Windows,
+                    FileSystemCaseSensitivity.Sensitive),
+                new FileSystemPathSemantics(
+                    FileSystemPathSyntax.Windows,
+                    FileSystemCaseSensitivity.Insensitive)));
+
+        Assert.Contains("same filesystem identity", exception.Message, StringComparison.OrdinalIgnoreCase);
+        await using var verification = await _factory.CreateDbContextAsync();
+        Assert.NotNull(await verification.RootFolders.FindAsync(sourceRootId));
+        Assert.NotNull(await verification.RootFolders.FindAsync(targetRootId));
+        var audiobooks = await verification.Audiobooks
+            .OrderBy(audiobook => audiobook.Title)
+            .ToListAsync();
+        Assert.Equal(lowerBasePath, audiobooks[0].BasePath);
+        Assert.Equal(upperBasePath, audiobooks[1].BasePath);
+    }
+
+    [Fact]
+    public async Task ReassignAudiobooksAndRemoveAsync_UnrelatedOwnershipWithoutBasePath_BlocksCollision()
+    {
+        var sourcePath = Path.Join(
+            Path.GetTempPath(),
+            $"root-reassign-owner-source-{Guid.NewGuid():N}");
+        var targetPath = Path.Join(
+            Path.GetTempPath(),
+            $"root-reassign-owner-target-{Guid.NewGuid():N}");
+        var sourceBasePath = Path.Join(sourcePath, "Book");
+        var targetFilePath = Path.Join(targetPath, "Book", "book.m4b");
+        int sourceRootId;
+        int targetRootId;
+        await using (var db = await _factory.CreateDbContextAsync())
+        {
+            var sourceRoot = new RootFolder
+            {
+                Name = "Source",
+                Path = sourcePath,
+                CaseSensitivityMode = FileSystemCaseSensitivityMode.Sensitive
+            };
+            var targetRoot = new RootFolder
+            {
+                Name = "Target",
+                Path = targetPath,
+                CaseSensitivityMode = FileSystemCaseSensitivityMode.Insensitive
+            };
+            var movingAudiobook = new Audiobook
+            {
+                Title = "Moving",
+                BasePath = sourceBasePath,
+                Files =
+                [
+                    new AudiobookFile
+                    {
+                        Path = Path.Join(sourceBasePath, "book.m4b")
+                    }
+                ]
+            };
+            var existingOwner = AudiobookFile.CreateUnresolved(targetFilePath);
+            existingOwner.ApplyPathIdentity(
+                targetFilePath,
+                AudiobookFilePathIdentity.CreateValid(
+                    targetFilePath,
+                    new FileSystemPathSemantics(
+                        FileSystemPathSyntax.Windows,
+                        FileSystemCaseSensitivity.Insensitive),
+                    FileSystemCaseSensitivityMode.Insensitive,
+                    targetPath));
+            var unrelatedAudiobook = new Audiobook
+            {
+                Title = "Unrelated",
+                BasePath = null,
+                Files = [existingOwner]
+            };
+            db.RootFolders.AddRange(sourceRoot, targetRoot);
+            db.Audiobooks.AddRange(movingAudiobook, unrelatedAudiobook);
+            await db.SaveChangesAsync();
+            sourceRootId = sourceRoot.Id;
+            targetRootId = targetRoot.Id;
+        }
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            _repository.ReassignAudiobooksAndRemoveAsync(
+                sourceRootId,
+                targetRootId,
+                new FileSystemPathSemantics(
+                    FileSystemPathSyntax.Windows,
+                    FileSystemCaseSensitivity.Sensitive),
+                new FileSystemPathSemantics(
+                    FileSystemPathSyntax.Windows,
+                    FileSystemCaseSensitivity.Insensitive)));
+
+        Assert.Contains("same filesystem identity", exception.Message, StringComparison.OrdinalIgnoreCase);
+        await using var verification = await _factory.CreateDbContextAsync();
+        Assert.NotNull(await verification.RootFolders.FindAsync(sourceRootId));
+        Assert.NotNull(await verification.RootFolders.FindAsync(targetRootId));
+        Assert.Equal(
+            sourceBasePath,
+            (await verification.Audiobooks.SingleAsync(audiobook => audiobook.Title == "Moving")).BasePath);
+    }
+
+    [Fact]
     public async Task ReassignAudiobooksAndRemoveAsync_DeleteConflictRollsBackPathRewrites()
     {
         var sourcePath = Path.Join(Path.GetTempPath(), $"root-reassign-rollback-source-{Guid.NewGuid():N}");

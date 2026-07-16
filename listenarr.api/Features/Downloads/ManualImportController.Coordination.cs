@@ -10,9 +10,11 @@ public partial class ManualImportController
         Func<Task> operation)
     {
         ArgumentNullException.ThrowIfNull(operation);
-        return _audiobookOperationCoordinator.ExecuteExclusiveAsync(
-            audiobookIds,
-            _ => operation());
+        return _filesystemMutationCoordinator.ExecuteExclusiveAsync(
+            globalToken => _audiobookOperationCoordinator.ExecuteExclusiveAsync(
+                audiobookIds,
+                _ => operation(),
+                globalToken));
     }
 
     /// <summary>

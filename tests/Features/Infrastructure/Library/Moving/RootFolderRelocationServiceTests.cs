@@ -461,6 +461,70 @@ public sealed class RootFolderRelocationServiceTests : IAsyncLifetime
         Assert.Equal(RootFolderRelocationStatus.Completed, result.Status);
     }
 
+    [Theory]
+    [InlineData(RootFolderRelocationMode.MetadataOnly)]
+    [InlineData(RootFolderRelocationMode.Relocate)]
+    public async Task CaseVariantsCollapseOnInsensitiveTarget_RollsBackBeforePublication(
+        RootFolderRelocationMode mode)
+    {
+        var source = Path.Join(Path.GetTempPath(), $"metadata-case-source-{Guid.NewGuid():N}");
+        var target = Path.Join(Path.GetTempPath(), $"metadata-case-target-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(source);
+        int rootId;
+        var upperBasePath = Path.Join(source, "Book");
+        var lowerBasePath = Path.Join(source, "book");
+        await using (var db = await _factory.CreateDbContextAsync())
+        {
+            var root = new RootFolder
+            {
+                Name = "Library",
+                Path = source,
+                CaseSensitivityMode = FileSystemCaseSensitivityMode.Sensitive
+            };
+            db.RootFolders.Add(root);
+            db.Audiobooks.AddRange(
+                new Audiobook
+                {
+                    Title = "Upper",
+                    BasePath = upperBasePath,
+                    Files = [new AudiobookFile { Path = Path.Join(upperBasePath, "book.m4b") }]
+                },
+                new Audiobook
+                {
+                    Title = "Lower",
+                    BasePath = lowerBasePath,
+                    Files = [new AudiobookFile { Path = Path.Join(lowerBasePath, "book.m4b") }]
+                });
+            await db.SaveChangesAsync();
+            rootId = root.Id;
+        }
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            CreateService().StartAsync(
+                rootId,
+                new RootFolderPathChangeCommand(
+                    target,
+                    mode,
+                    false,
+                    "Moved Library",
+                    false,
+                    FileSystemCaseSensitivityMode.Insensitive)));
+
+        Assert.Contains(
+            mode == RootFolderRelocationMode.Relocate
+                ? "same target folder"
+                : "same filesystem identity",
+            exception.Message,
+            StringComparison.OrdinalIgnoreCase);
+        await using var verification = await _factory.CreateDbContextAsync();
+        Assert.Equal(source, (await verification.RootFolders.SingleAsync()).Path);
+        var audiobooks = await verification.Audiobooks.OrderBy(audiobook => audiobook.Title).ToListAsync();
+        Assert.Equal(lowerBasePath, audiobooks[0].BasePath);
+        Assert.Equal(upperBasePath, audiobooks[1].BasePath);
+        Assert.Empty(await verification.MoveJobs.ToListAsync());
+        Assert.Empty(await verification.RootFolderRelocations.ToListAsync());
+    }
+
     [Fact]
     public async Task MetadataOnly_InvalidStoredAudiobookBasePathIsSkippedWithoutAbortingOtherUpdates()
     {

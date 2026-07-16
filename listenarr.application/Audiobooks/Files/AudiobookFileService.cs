@@ -23,7 +23,7 @@ using Microsoft.Extensions.Logging;
 
 namespace Listenarr.Application.Audiobooks.Files
 {
-    public class AudiobookFileService(
+    public partial class AudiobookFileService(
         IMemoryCache memoryCache,
         MetadataExtractionLimiter limiter,
         IAudiobookRepository audiobookRepository,
@@ -34,61 +34,58 @@ namespace Listenarr.Application.Audiobooks.Files
         IFfmpegService ffmpegService,
         IFileSystem fileSystem,
         IFileSystemSemanticsResolver semanticsResolver,
+        IAudiobookFilePathIdentityResolver filePathIdentityResolver,
         IRootFolderService rootFolderService,
         ILogger<AudiobookFileService> logger,
+        IFilesystemMutationCoordinator filesystemMutationCoordinator,
         IAudiobookOperationCoordinator audiobookOperationCoordinator) : IAudiobookFileService
     {
         public Task<bool> EnsureAudiobookFileAsync(
             Audiobook audiobook,
             string filePath,
-            string? source = "scan") =>
-            audiobookOperationCoordinator.ExecuteExclusiveAsync(
-                audiobook.Id,
-                async _ =>
-                {
-                    var currentAudiobook = await audiobookRepository.GetByIdSnapshotAsync(audiobook.Id);
-                    if (currentAudiobook == null)
+            string? source = "scan",
+            CancellationToken cancellationToken = default) =>
+            filesystemMutationCoordinator.ExecuteExclusiveAsync(
+                globalToken => audiobookOperationCoordinator.ExecuteExclusiveAsync(
+                    audiobook.Id,
+                    async token =>
                     {
-                        logger.LogDebug(
-                            "Skipping audiobook file registration because audiobook {AudiobookId} no longer exists",
-                            audiobook.Id);
-                        return false;
-                    }
+                        var currentAudiobook = await audiobookRepository.GetByIdSnapshotAsync(audiobook.Id, token);
+                        if (currentAudiobook == null)
+                        {
+                            logger.LogDebug(
+                                "Skipping audiobook file registration because audiobook {AudiobookId} no longer exists",
+                                audiobook.Id);
+                            return false;
+                        }
 
-                    return await EnsureAudiobookFileCoreAsync(currentAudiobook, filePath, source);
-                });
+                        return await EnsureAudiobookFileCoreAsync(
+                            currentAudiobook,
+                            filePath,
+                            source,
+                            token);
+                    },
+                    globalToken),
+                cancellationToken);
+
 
         private async Task<bool> EnsureAudiobookFileCoreAsync(
             Audiobook audiobook,
             string filePath,
-            string? source)
+            string? source,
+            CancellationToken cancellationToken)
         {
-            if (!fileSystem.FileExists(filePath))
-            {
-                return false;
-            }
-
             try
             {
+                if (!fileSystem.FileExists(filePath)
+                    || fileSystem.IsReparsePoint(filePath))
+                {
+                    return false;
+                }
+
                 if (!FileUtils.IsAudioFile(filePath))
                 {
                     logger.LogInformation("Skipping non-audio audiobook file registration for audiobook {AudiobookId}: {Path}", audiobook.Id, LogRedaction.SanitizeFilePath(filePath));
-                    return false;
-                }
-
-                // Check for existing
-                var exists = await audiobookFileRepository.ExistsAtPathAsync(audiobook.Id, filePath);
-                if (exists)
-                {
-                    logger.LogDebug("AudiobookFile already exists for audiobook {AudiobookId} at path {Path}", audiobook.Id, LogRedaction.SanitizeFilePath(filePath));
-                    return false;
-                }
-
-                // Skip if already registered to a different audiobook
-                var registeredElsewhere = await audiobookFileRepository.IsPathUsedByOtherAsync(audiobook.Id, filePath);
-                if (registeredElsewhere)
-                {
-                    logger.LogInformation("Skipping file {Path} for audiobook {AudiobookId} — already registered to another audiobook", LogRedaction.SanitizeFilePath(filePath), audiobook.Id);
                     return false;
                 }
 
@@ -96,19 +93,28 @@ namespace Listenarr.Application.Audiobooks.Files
                 // to only associate files in the same containing directory or BasePath.
                 try
                 {
-                    if (!string.IsNullOrWhiteSpace(audiobook.FilePath))
+                    if (!string.IsNullOrWhiteSpace(audiobook.FilePath)
+                        || !string.IsNullOrWhiteSpace(audiobook.BasePath))
                     {
-                        var existingDir = ResolveAbsolutePath(Path.GetDirectoryName(audiobook.FilePath));
+                        var normalizedBasePath = ResolveAbsolutePath(audiobook.BasePath);
+                        var existingDir = string.IsNullOrWhiteSpace(normalizedBasePath)
+                            ? ResolveStoredFileDirectory(audiobook)
+                            : string.Empty;
                         var candidateDir = ResolveAbsolutePath(Path.GetDirectoryName(filePath));
                         var candidateFull = ResolveAbsolutePath(filePath);
-                        var normalizedBasePath = ResolveAbsolutePath(audiobook.BasePath);
 
-                        if (!string.IsNullOrEmpty(existingDir)
-                            && !string.IsNullOrEmpty(candidateDir)
-                            && !string.IsNullOrEmpty(candidateFull))
+                        if (!string.IsNullOrEmpty(candidateDir)
+                            && !string.IsNullOrEmpty(candidateFull)
+                            && (!string.IsNullOrEmpty(existingDir)
+                                || !string.IsNullOrEmpty(normalizedBasePath)))
                         {
-                            var rootFolders = await GetRootFoldersForSemanticsAsync();
-                            var existingDirSemantics = await ResolveLibrarySemanticsAsync(existingDir, rootFolders);
+                            var rootFolders = await GetRootFoldersForSemanticsAsync(cancellationToken);
+                            var existingDirSemantics = string.IsNullOrWhiteSpace(existingDir)
+                                ? null
+                                : await ResolveLibrarySemanticsAsync(
+                                    existingDir,
+                                    rootFolders,
+                                    cancellationToken);
                             var isInExistingDir = existingDirSemantics != null
                                 && FileSystemPathIdentity.IsSameOrInside(
                                     candidateDir,
@@ -118,7 +124,10 @@ namespace Listenarr.Application.Audiobooks.Files
                             var isInBasePath = false;
                             if (!string.IsNullOrWhiteSpace(normalizedBasePath))
                             {
-                                var basePathSemantics = await ResolveLibrarySemanticsAsync(normalizedBasePath, rootFolders);
+                                var basePathSemantics = await ResolveLibrarySemanticsAsync(
+                                    normalizedBasePath,
+                                    rootFolders,
+                                    cancellationToken);
                                 isInBasePath = basePathSemantics != null
                                     && FileSystemPathIdentity.IsSameOrInside(
                                         candidateFull,
@@ -160,12 +169,38 @@ namespace Listenarr.Application.Audiobooks.Files
 
                                 return false;
                             }
+
+                            var allowedContainmentRoots = new[]
+                            {
+                                existingDir,
+                                normalizedBasePath
+                            };
+                            if (!fileSystem.TryValidateMutationTarget(
+                                    candidateFull,
+                                    allowedContainmentRoots,
+                                    out var validatedCandidate,
+                                    out var validationReason))
+                            {
+                                logger.LogWarning(
+                                    "Refusing audiobook file registration because its path did not resolve safely inside the audiobook folder. AudiobookId={AudiobookId} File={File} Reason={Reason}",
+                                    audiobook.Id,
+                                    LogRedaction.SanitizeFilePath(filePath),
+                                    validationReason);
+                                return false;
+                            }
+
+                            filePath = validatedCandidate;
                         }
                     }
                 }
                 catch (Exception exDir) when (exDir is not OperationCanceledException && exDir is not OutOfMemoryException && exDir is not StackOverflowException)
                 {
-                    logger.LogDebug(exDir, "Failed to verify audiobook folder containment for AudiobookId={AudiobookId} File={File}", audiobook.Id, LogRedaction.SanitizeFilePath(filePath));
+                    logger.LogWarning(
+                        exDir,
+                        "Refusing audiobook file registration because folder containment could not be verified. AudiobookId={AudiobookId} File={File}",
+                        audiobook.Id,
+                        LogRedaction.SanitizeFilePath(filePath));
+                    return false;
                 }
 
                 AudioMetadata? meta = null;
@@ -225,28 +260,35 @@ namespace Listenarr.Application.Audiobooks.Files
                 }
 
                 var fi = new FileInfo(filePath);
-                var fileRecord = new AudiobookFile
-                {
-                    AudiobookId = audiobook.Id,
-                    Path = filePath,
-                    Size = fi.Exists ? fi.Length : (long?)null,
-                    Source = source,
-                    CreatedAt = DateTime.UtcNow,
-                    DurationSeconds = meta?.Duration.TotalSeconds,
-                    Format = meta?.Format,
-                    Container = meta?.Container,
-                    Codec = meta?.Codec,
-                    Bitrate = meta?.BitRate,
-                    SampleRate = meta?.SampleRate,
-                    Channels = meta?.Channels
-                };
+                var fileRecord = AudiobookFile.CreateUnresolved(filePath);
+                fileRecord.AudiobookId = audiobook.Id;
+                fileRecord.Size = fi.Exists ? fi.Length : null;
+                fileRecord.Source = source;
+                fileRecord.CreatedAt = DateTime.UtcNow;
+                fileRecord.DurationSeconds = meta?.Duration.TotalSeconds;
+                fileRecord.Format = meta?.Format;
+                fileRecord.Container = meta?.Container;
+                fileRecord.Codec = meta?.Codec;
+                fileRecord.Bitrate = meta?.BitRate;
+                fileRecord.SampleRate = meta?.SampleRate;
+                fileRecord.Channels = meta?.Channels;
 
                 var attempts = 0;
                 while (true)
                 {
                     try
                     {
-                        await audiobookFileRepository.AddAsync(fileRecord);
+                        var claim = await ClaimAudiobookFileAsync(
+                            audiobook,
+                            fileRecord,
+                            filePath,
+                            cancellationToken);
+                        if (!claim.Created)
+                        {
+                            LogClaimRejection(audiobook.Id, filePath, claim);
+                            return false;
+                        }
+
                         logger.LogInformation("Created AudiobookFile for audiobook {AudiobookId}: {Path} Id={Id}", audiobook.Id, LogRedaction.SanitizeFilePath(filePath), fileRecord.Id);
 
                         // Add history entry and update audiobook backward-compat fields
@@ -277,11 +319,6 @@ namespace Listenarr.Application.Audiobooks.Files
 
                         return true;
                     }
-                    catch (UniqueConstraintViolationException)
-                    {
-                        logger.LogInformation("AudiobookFile insertion conflict detected (likely already created): {Path}", LogRedaction.SanitizeFilePath(filePath));
-                        return false;
-                    }
                     catch (PersistenceException dbEx)
                     {
                         attempts++;
@@ -290,7 +327,7 @@ namespace Listenarr.Application.Audiobooks.Files
                             logger.LogWarning(dbEx, "Failed to save AudiobookFile after {Attempts} attempts: {Path}", attempts, LogRedaction.SanitizeFilePath(filePath));
                             return false;
                         }
-                        await Task.Delay(100 * attempts);
+                        await Task.Delay(100 * attempts, cancellationToken);
                     }
                 }
             }
@@ -306,10 +343,35 @@ namespace Listenarr.Application.Audiobooks.Files
                 ? string.Empty
                 : FileSystemPathIdentity.ResolveNativeAbsolutePath(path);
 
-        private async Task<IReadOnlyList<RootFolder>> GetRootFoldersForSemanticsAsync()
+        private void LogClaimRejection(
+            int audiobookId,
+            string path,
+            AudiobookFileClaimResult claim)
+        {
+            var sanitizedPath = LogRedaction.SanitizeFilePath(path);
+            if (claim.Outcome == AudiobookFileClaimOutcome.AlreadyOwnedByAudiobook)
+            {
+                logger.LogDebug(
+                    "AudiobookFile already exists for audiobook {AudiobookId} at path {Path}",
+                    audiobookId,
+                    sanitizedPath);
+                return;
+            }
+
+            logger.LogWarning(
+                "Audiobook file ownership claim rejected for audiobook {AudiobookId} at {Path}: {Outcome}. {Reason}",
+                audiobookId,
+                sanitizedPath,
+                claim.Outcome,
+                claim.Reason);
+        }
+
+        private async Task<IReadOnlyList<RootFolder>> GetRootFoldersForSemanticsAsync(
+            CancellationToken cancellationToken)
         {
             try
             {
+                cancellationToken.ThrowIfCancellationRequested();
                 return await rootFolderService.GetAllAsync();
             }
             catch (Exception ex) when (ex is not OperationCanceledException && ex is not OutOfMemoryException && ex is not StackOverflowException)
@@ -321,8 +383,11 @@ namespace Listenarr.Application.Audiobooks.Files
 
         private async Task<FileSystemPathSemantics?> ResolveLibrarySemanticsAsync(
             string path,
-            IReadOnlyList<RootFolder> rootFolders)
+            IReadOnlyList<RootFolder> rootFolders,
+            CancellationToken cancellationToken)
         {
+            FileSystemPathSemantics? bestSemantics = null;
+            var bestRootLength = -1;
             foreach (var root in rootFolders)
             {
                 if (string.IsNullOrWhiteSpace(root.Path))
@@ -334,14 +399,24 @@ namespace Listenarr.Application.Audiobooks.Files
                 {
                     var rootResolution = await semanticsResolver.ResolveAsync(
                         root.Path,
-                        root.CaseSensitivityMode);
-                    if (rootResolution.State == PathIdentityState.Valid
-                        && FileSystemPathIdentity.IsSameOrInside(
+                        root.CaseSensitivityMode,
+                        cancellationToken);
+                    if (rootResolution.State != PathIdentityState.Valid
+                        || !FileSystemPathIdentity.IsSameOrInside(
                             path,
                             root.Path,
                             rootResolution.Semantics))
                     {
-                        return rootResolution.Semantics;
+                        continue;
+                    }
+
+                    var canonicalRoot = FileSystemPathIdentity.Canonicalize(
+                        root.Path,
+                        rootResolution.Semantics.Syntax);
+                    if (canonicalRoot.Length > bestRootLength)
+                    {
+                        bestSemantics = rootResolution.Semantics;
+                        bestRootLength = canonicalRoot.Length;
                     }
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException && ex is not OutOfMemoryException && ex is not StackOverflowException)
@@ -353,9 +428,16 @@ namespace Listenarr.Application.Audiobooks.Files
                 }
             }
 
+            if (bestSemantics.HasValue)
+            {
+                return bestSemantics.Value;
+            }
+
             try
             {
-                var resolution = await semanticsResolver.ResolveAsync(path);
+                var resolution = await semanticsResolver.ResolveAsync(
+                    path,
+                    cancellationToken: cancellationToken);
                 return resolution.State == PathIdentityState.Valid
                     ? resolution.Semantics
                     : null;

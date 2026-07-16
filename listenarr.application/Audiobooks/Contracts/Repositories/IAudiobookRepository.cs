@@ -32,6 +32,11 @@ namespace Listenarr.Application.Audiobooks.Contracts.Repositories
         Task<Audiobook?> GetByIsbnAsync(string isbn);
         Task<Audiobook?> GetByIdAsync(int id);
         Task<Audiobook?> GetByIdSnapshotAsync(int id, CancellationToken ct = default);
+        Task<bool> TryUpdateBasePathAsync(
+            int audiobookId,
+            string expectedBasePath,
+            string newBasePath,
+            CancellationToken ct = default);
         Task<string?> GetAuthorAsinByNameAsync(string name);
         Task<AuthorCacheEntry?> GetCachedAuthorByNameAsync(string name, string region);
         Task<AuthorCacheEntry?> GetCachedAuthorByAsinAsync(string asin, string region);
@@ -47,7 +52,8 @@ namespace Listenarr.Application.Audiobooks.Contracts.Repositories
             string targetBasePath,
             FileSystemPathSemantics sourceSemantics,
             FileSystemPathSemantics targetSemantics,
-            CancellationToken ct = default);
+            CancellationToken ct = default,
+            FileSystemCaseSensitivityMode targetCaseSensitivityMode = FileSystemCaseSensitivityMode.Auto);
         Task<bool> DeleteByIdAsync(int id);
         Task SaveChangesAsync(CancellationToken ct = default);
         Task<bool> UpdateWithIdentifierReplaceAsync(Audiobook audiobook, List<AudiobookExternalIdentifier> newIdentifiers, CancellationToken ct = default);

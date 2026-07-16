@@ -1117,10 +1117,18 @@ export interface FileRenamePreview {
   changed: boolean
 }
 
+export interface RenamePathSemanticsSnapshot {
+  syntax: 'Windows' | 'Unix'
+  caseSensitivity: 'Unknown' | 'Sensitive' | 'Insensitive'
+  requestedMode: 'Auto' | 'Sensitive' | 'Insensitive'
+  boundaryPath: string
+}
+
 export interface RenamePreview {
   audiobookId: number
   audiobookTitle?: string
   currentFolderPath?: string
+  currentFolderSemantics?: RenamePathSemanticsSnapshot
   newFolderPath?: string
   folderChanged: boolean
   fileRenames: FileRenamePreview[]
@@ -1135,6 +1143,8 @@ export interface FileRenameOperation {
 
 export interface RenameOperation {
   audiobookId: number
+  currentFolderPath?: string
+  currentFolderSemantics?: RenamePathSemanticsSnapshot
   newFolderPath?: string
   fileRenames: FileRenameOperation[]
 }
@@ -1148,12 +1158,14 @@ export interface FileRenameResultItem {
   previousPath?: string
   newPath?: string
   success: boolean
+  rolledBack: boolean
   error?: string
 }
 
 export interface RenameResult {
   audiobookId: number
   success: boolean
+  conflict: boolean
   error?: string
   renamedFiles: FileRenameResultItem[]
 }

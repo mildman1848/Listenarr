@@ -31,13 +31,17 @@ namespace Listenarr.Tests.Features.Application.Audiobooks.Files
             _services.AddSingleton(metadataMock.Object);
             Init();
 
-            var audiobook = new Audiobook { Title = "Test Book", Monitored = true };
+            // Use temp file and establish the authoritative audiobook folder first.
+            var tempFile = await FileService.GetTempFileAsync($"afs-test-{Guid.NewGuid()}.m4b");
+            var audiobook = new Audiobook
+            {
+                Title = "Test Book",
+                Monitored = true,
+                BasePath = Path.GetDirectoryName(tempFile)
+            };
             await _audiobookRepository.AddAsync(audiobook);
 
             var audiobookFileService = _provider.GetRequiredService<IAudiobookFileService>();
-
-            // Use temp file
-            var tempFile = await FileService.GetTempFileAsync($"afs-test-{Guid.NewGuid()}.m4b");
 
             // Act
             var created = await audiobookFileService.EnsureAudiobookFileAsync(audiobook, tempFile, "test");

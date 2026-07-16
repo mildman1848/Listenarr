@@ -101,6 +101,21 @@ Every completed move owns at most one database-unique `MoveScanHandoff`, includi
 
 `ScanQueueService` keeps move-handoff dispatch reservations private until `MarkDispatchedAsync` succeeds, so ordinary callers never receive an unpublished scan-job ID. `MoveScanHandoffRecoveryService` and immediate post-move dispatch use the same claim path. Before discovery, `ScanJobProcessor` verifies that the handoff target still matches the audiobook's current path identity; stale attempts terminate as `Superseded` without reading files or mutating metadata. Terminal handoff state is committed before in-memory queue state or client broadcasts are updated.
 
+## Audiobook File Ownership and Rename Coordination
+
+Audiobook file ownership is a database-enforced filesystem identity contract. `AudiobookFile.Path` remains a storage representation and may be absolute or relative to the owning audiobook's authoritative `BasePath`, but it cannot be mutated independently of its persisted canonical path, syntax, resolved case sensitivity, requested case-sensitivity mode, identity boundary, lookup key, ownership key, version, and state. All production creation flows use `IAudiobookFileService` and `IAudiobookFileRepository.ClaimAsync`; raw check-then-insert path equality is not an ownership decision. A filtered unique database index on valid ownership keys is the final concurrency authority, including simultaneous claims made under different audiobook operation locks.
+
+Legacy rows are reconciled in restart-safe batches after migrations. Resolvable unique rows become `Valid`; equivalent duplicate groups become `Conflict`; unavailable paths remain `Unavailable`. Conflict and unavailable rows are retained rather than reassigned or deleted. A new claim whose conservative lookup identity overlaps unresolved legacy ownership fails closed and requires operator resolution. Every rename, move, destination rewrite, relocation, or other path mutation updates the stored path and complete identity together.
+
+Filesystem-mutating and file-ownership-claiming flows, including move, scan, import, file registration, and rename execution, acquire locks in this order:
+
+```text
+global filesystem mutation coordinator
+→ ordered audiobook operation coordinator
+```
+
+Settings, configured roots, audiobook state, file paths, and filesystem identities are loaded after both boundaries are acquired. Rename requests carry the preview's expected current folder and each file's expected current path. Execution validates the complete operation plan, current root authorization, destination ownership, links and traversal defenses, and duplicate destinations before touching the filesystem. A stale folder, root, path, semantics, or ownership snapshot returns a conflict instead of regenerating the request against newer state. Completed file moves are rolled back on later failure when safe; if rollback cannot complete, the actual partial filesystem state is persisted best-effort rather than leaving database paths that knowingly describe nonexistent locations.
+
 ## Background Worker Ownership
 
 Hosted workers must have one clear owner for each state transition. Queue services can dedupe, persist, or expose job status, but they should not perform the durable state transition that belongs to a worker.

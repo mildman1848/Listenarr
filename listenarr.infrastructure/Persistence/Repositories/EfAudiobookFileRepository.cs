@@ -15,6 +15,7 @@
  * You should have received a copy of the GNU Affero General Public License
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
+using Listenarr.Domain.Common;
 using Microsoft.EntityFrameworkCore;
 
 namespace Listenarr.Infrastructure.Persistence.Repositories
@@ -51,11 +52,117 @@ namespace Listenarr.Infrastructure.Persistence.Repositories
                 .ToListAsync(ct);
         }
 
-        public async Task<AudiobookFile> AddAsync(AudiobookFile file, CancellationToken ct = default)
+        internal async Task<AudiobookFile> AddUnresolvedForTestingAsync(
+            AudiobookFile file,
+            CancellationToken cancellationToken = default)
         {
             _db.AudiobookFiles.Add(file);
-            await _db.SaveChangesAsync(ct);
+            await _db.SaveChangesAsync(cancellationToken);
             return file;
+        }
+
+        public async Task<AudiobookFileClaimResult> ClaimAsync(
+            AudiobookFile file,
+            CancellationToken ct = default)
+        {
+            ArgumentNullException.ThrowIfNull(file);
+            if (file.PathIdentityState != PathIdentityState.Valid
+                || string.IsNullOrWhiteSpace(file.PathIdentityLookupKey)
+                || string.IsNullOrWhiteSpace(file.PathOwnershipKey))
+            {
+                return new AudiobookFileClaimResult(
+                    AudiobookFileClaimOutcome.IdentityUnavailable,
+                    Reason: file.PathIdentityReason ?? "A valid filesystem identity is required before claiming an audiobook file.");
+            }
+
+            var ownership = await CheckOwnershipAsync(
+                file.AudiobookId,
+                file.Id == 0 ? null : file.Id,
+                ToIdentity(file),
+                ct);
+            var existingResult = ToClaimResult(ownership);
+            if (existingResult != null)
+            {
+                return existingResult;
+            }
+
+            _db.AudiobookFiles.Add(file);
+            try
+            {
+                await _db.SaveChangesAsync(ct);
+                return new AudiobookFileClaimResult(
+                    AudiobookFileClaimOutcome.Created,
+                    file);
+            }
+            catch (UniqueConstraintViolationException)
+            {
+                _db.Entry(file).State = EntityState.Detached;
+                var concurrentOwnership = await CheckOwnershipAsync(
+                    file.AudiobookId,
+                    null,
+                    ToIdentity(file),
+                    ct);
+                return ToClaimResult(concurrentOwnership)
+                    ?? new AudiobookFileClaimResult(
+                        AudiobookFileClaimOutcome.IdentityConflict,
+                        Reason: "The audiobook file ownership claim conflicted with another persistence operation.");
+            }
+        }
+
+        public async Task<AudiobookFileOwnershipCheckResult> CheckOwnershipAsync(
+            int audiobookId,
+            int? fileId,
+            AudiobookFilePathIdentity identity,
+            CancellationToken ct = default)
+        {
+            ArgumentNullException.ThrowIfNull(identity);
+            if (identity.State != PathIdentityState.Valid
+                || string.IsNullOrWhiteSpace(identity.OwnershipKey))
+            {
+                return new AudiobookFileOwnershipCheckResult(
+                    AudiobookFileOwnershipCheckOutcome.IdentityUnavailable,
+                    Reason: identity.Reason ?? "A valid filesystem identity is required.");
+            }
+
+            var unresolvedCandidates = await _db.AudiobookFiles
+                .AsNoTracking()
+                .Where(candidate => candidate.PathIdentityLookupKey == identity.LookupKey)
+                .Where(candidate => !fileId.HasValue || candidate.Id != fileId.Value)
+                .Where(candidate => candidate.PathIdentityState != PathIdentityState.Valid)
+                .OrderBy(candidate => candidate.Id)
+                .ToListAsync(ct);
+            var unresolved = unresolvedCandidates.FirstOrDefault(
+                candidate => UnresolvedIdentityOverlaps(candidate, identity));
+            if (unresolved != null)
+            {
+                var outcome = unresolved.PathIdentityState == PathIdentityState.Conflict
+                    ? AudiobookFileOwnershipCheckOutcome.IdentityConflict
+                    : AudiobookFileOwnershipCheckOutcome.IdentityUnavailable;
+                return new AudiobookFileOwnershipCheckResult(
+                    outcome,
+                    unresolved,
+                    unresolved.PathIdentityReason ?? "A legacy audiobook file identity requires operator resolution.");
+            }
+
+            var owner = await _db.AudiobookFiles
+                .AsNoTracking()
+                .Where(candidate => candidate.PathOwnershipKey == identity.OwnershipKey)
+                .Where(candidate => !fileId.HasValue || candidate.Id != fileId.Value)
+                .OrderBy(candidate => candidate.Id)
+                .FirstOrDefaultAsync(ct);
+            if (owner == null)
+            {
+                return new AudiobookFileOwnershipCheckResult(
+                    AudiobookFileOwnershipCheckOutcome.Available);
+            }
+
+            return owner.AudiobookId == audiobookId
+                ? new AudiobookFileOwnershipCheckResult(
+                    AudiobookFileOwnershipCheckOutcome.AlreadyOwnedByAudiobook,
+                    owner)
+                : new AudiobookFileOwnershipCheckResult(
+                    AudiobookFileOwnershipCheckOutcome.OwnedByOtherAudiobook,
+                    owner);
         }
 
         public async Task UpdateAsync(AudiobookFile file, CancellationToken ct = default)
@@ -72,13 +179,19 @@ namespace Listenarr.Infrastructure.Persistence.Repositories
                     return;
                 }
 
-                var preservedPath = existing.Path;
+                var existingEntry = _db.Entry(existing);
                 var preservedAudiobookId = existing.AudiobookId;
-                _db.Entry(existing).CurrentValues.SetValues(file);
+                var preservedValues = PathIdentityPropertyNames.ToDictionary(
+                    propertyName => propertyName,
+                    propertyName => existingEntry.Property(propertyName).CurrentValue);
+                existingEntry.CurrentValues.SetValues(file);
                 // Detached metadata updates cannot safely establish a new path or ownership.
                 // Move/rename workflows update those references under their coordinated contracts.
-                existing.Path = preservedPath;
                 existing.AudiobookId = preservedAudiobookId;
+                foreach (var pair in preservedValues)
+                {
+                    existingEntry.Property(pair.Key).CurrentValue = pair.Value;
+                }
             }
 
             await _db.SaveChangesAsync(ct);
@@ -99,16 +212,6 @@ namespace Listenarr.Infrastructure.Persistence.Repositories
                 _db.AudiobookFiles.Remove(file);
                 await _db.SaveChangesAsync(ct);
             }
-        }
-
-        public async Task<bool> ExistsAtPathAsync(int audiobookId, string path, CancellationToken ct = default)
-        {
-            return await _db.AudiobookFiles.AnyAsync(f => f.AudiobookId == audiobookId && f.Path == path, ct);
-        }
-
-        public async Task<bool> IsPathUsedByOtherAsync(int audiobookId, string path, CancellationToken ct = default)
-        {
-            return await _db.AudiobookFiles.AnyAsync(f => f.AudiobookId != audiobookId && f.Path == path, ct);
         }
 
         public async Task<List<string>> GetAllFilePathsAsync(CancellationToken ct = default)
@@ -162,5 +265,89 @@ namespace Listenarr.Infrastructure.Persistence.Repositories
                 .Select(g => new { AudiobookId = g.Key, Count = g.Count() })
                 .ToDictionaryAsync(r => r.AudiobookId, r => r.Count, ct);
         }
+
+        private static readonly string[] PathIdentityPropertyNames =
+        [
+            nameof(AudiobookFile.Path),
+            nameof(AudiobookFile.CanonicalPath),
+            nameof(AudiobookFile.PathSyntax),
+            nameof(AudiobookFile.PathCaseSensitivity),
+            nameof(AudiobookFile.PathCaseSensitivityMode),
+            nameof(AudiobookFile.PathIdentityBoundary),
+            nameof(AudiobookFile.PathIdentityLookupKey),
+            nameof(AudiobookFile.PathOwnershipKey),
+            nameof(AudiobookFile.PathIdentityVersion),
+            nameof(AudiobookFile.PathIdentityState),
+            nameof(AudiobookFile.PathIdentityReason)
+        ];
+
+        private static bool UnresolvedIdentityOverlaps(
+            AudiobookFile candidate,
+            AudiobookFilePathIdentity identity)
+        {
+            if (string.IsNullOrWhiteSpace(candidate.CanonicalPath)
+                || candidate.PathSyntax == null)
+            {
+                // The lookup key already matched, and the legacy row lacks enough
+                // authoritative detail to prove that the identities are distinct.
+                return true;
+            }
+
+            if (candidate.PathSyntax != identity.Syntax)
+            {
+                return false;
+            }
+
+            if (candidate.PathCaseSensitivity == FileSystemCaseSensitivity.Unknown)
+            {
+                return true;
+            }
+
+            var comparison = candidate.PathCaseSensitivity == FileSystemCaseSensitivity.Insensitive
+                || identity.CaseSensitivity == FileSystemCaseSensitivity.Insensitive
+                    ? StringComparison.OrdinalIgnoreCase
+                    : StringComparison.Ordinal;
+            return string.Equals(
+                candidate.CanonicalPath,
+                identity.CanonicalPath,
+                comparison);
+        }
+
+        private static AudiobookFilePathIdentity ToIdentity(AudiobookFile file) =>
+            new(
+                file.CanonicalPath!,
+                file.PathSyntax!.Value,
+                file.PathCaseSensitivity,
+                file.PathCaseSensitivityMode,
+                file.PathIdentityBoundary!,
+                file.PathIdentityLookupKey!,
+                file.PathOwnershipKey,
+                file.PathIdentityVersion,
+                file.PathIdentityState,
+                file.PathIdentityReason);
+
+        private static AudiobookFileClaimResult? ToClaimResult(
+            AudiobookFileOwnershipCheckResult ownership) =>
+            ownership.Outcome switch
+            {
+                AudiobookFileOwnershipCheckOutcome.Available => null,
+                AudiobookFileOwnershipCheckOutcome.AlreadyOwnedByAudiobook => new AudiobookFileClaimResult(
+                    AudiobookFileClaimOutcome.AlreadyOwnedByAudiobook,
+                    ownership.ExistingFile,
+                    ownership.Reason),
+                AudiobookFileOwnershipCheckOutcome.OwnedByOtherAudiobook => new AudiobookFileClaimResult(
+                    AudiobookFileClaimOutcome.OwnedByOtherAudiobook,
+                    ownership.ExistingFile,
+                    ownership.Reason),
+                AudiobookFileOwnershipCheckOutcome.IdentityConflict => new AudiobookFileClaimResult(
+                    AudiobookFileClaimOutcome.IdentityConflict,
+                    ownership.ExistingFile,
+                    ownership.Reason),
+                AudiobookFileOwnershipCheckOutcome.IdentityUnavailable => new AudiobookFileClaimResult(
+                    AudiobookFileClaimOutcome.IdentityUnavailable,
+                    ownership.ExistingFile,
+                    ownership.Reason),
+                _ => throw new ArgumentOutOfRangeException(nameof(ownership))
+            };
     }
 }

@@ -186,6 +186,16 @@ namespace Listenarr.Infrastructure.Library.Scanning
                     return;
                 }
 
+                if (!await ValidateScanRootSafetyAsync(
+                        scanRoot,
+                        job,
+                        audiobook,
+                        historyRepository,
+                        stoppingToken))
+                {
+                    return;
+                }
+
                 FileSystemPathSemantics semantics;
                 try
                 {
@@ -353,26 +363,20 @@ namespace Listenarr.Infrastructure.Library.Scanning
                     {
                         if (System.IO.File.Exists(audiobook.FilePath))
                         {
-                            var alreadyExists = await fileRepository.ExistsAtPathAsync(audiobook.Id, audiobook.FilePath);
-                            var existingFileRecord = alreadyExists ? new AudiobookFile() : null;
-
-                            if (existingFileRecord == null)
+                            try
                             {
-                                try
+                                using var afScope = _scopeFactory.CreateScope();
+                                var audioFileService = afScope.ServiceProvider.GetRequiredService<IAudiobookFileService>();
+                                var created = await audioFileService.EnsureAudiobookFileAsync(audiobook, audiobook.FilePath, "scan-legacy");
+                                if (created)
                                 {
-                                    using var afScope = _scopeFactory.CreateScope();
-                                    var audioFileService = afScope.ServiceProvider.GetRequiredService<IAudiobookFileService>();
-                                    var created = await audioFileService.EnsureAudiobookFileAsync(audiobook, audiobook.FilePath, "scan-legacy");
-                                    if (created)
-                                    {
-                                        _logger.LogInformation("Migrated legacy filePath to AudiobookFile record for audiobook {AudiobookId}: {Path}", audiobook.Id, LogRedaction.SanitizeFilePath(audiobook.FilePath));
-                                        createdFiles++;
-                                    }
+                                    _logger.LogInformation("Migrated legacy filePath to AudiobookFile record for audiobook {AudiobookId}: {Path}", audiobook.Id, LogRedaction.SanitizeFilePath(audiobook.FilePath));
+                                    createdFiles++;
                                 }
-                                catch (Exception ex) when (ex is not OperationCanceledException && ex is not OutOfMemoryException && ex is not StackOverflowException)
-                                {
-                                    _logger.LogWarning(ex, "Failed to migrate legacy filePath for audiobook {AudiobookId}: {Path}", audiobook.Id, LogRedaction.SanitizeFilePath(audiobook.FilePath));
-                                }
+                            }
+                            catch (Exception ex) when (ex is not OperationCanceledException && ex is not OutOfMemoryException && ex is not StackOverflowException)
+                            {
+                                _logger.LogWarning(ex, "Failed to migrate legacy filePath for audiobook {AudiobookId}: {Path}", audiobook.Id, LogRedaction.SanitizeFilePath(audiobook.FilePath));
                             }
                         }
                         else
@@ -454,43 +458,11 @@ namespace Listenarr.Infrastructure.Library.Scanning
             }
             catch (Exception ex) when (ex is not OperationCanceledException && ex is not OutOfMemoryException && ex is not StackOverflowException)
             {
-                _logger.LogError(ex, "Error processing scan job {JobId}", job.Id);
-                ScanTerminalDecision? terminalDecision = null;
-                try
-                {
-                    using var historyScope = _scopeFactory.CreateScope();
-                    var historyRepository = historyScope.ServiceProvider.GetRequiredService<IHistoryRepository>();
-                    var audiobookRepository = historyScope.ServiceProvider.GetRequiredService<IAudiobookRepository>();
-                    var audiobook = await audiobookRepository.GetByIdAsync(job.AudiobookId);
-                    terminalDecision = await RecordScanFailureHistoryAsync(
-                        historyRepository,
-                        job,
-                        audiobook,
-                        ex.Message,
-                        stoppingToken);
-                    ApplyTerminalStatus(job, terminalDecision);
-                }
-                catch (Exception historyException) when (historyException is not (OperationCanceledException or OutOfMemoryException or StackOverflowException))
-                {
-                    _logger.LogDebug(historyException, "Unable to record failed scan history for job {JobId}", job.Id);
-                }
-
-                if (terminalDecision == null)
-                {
-                    try { _queue.UpdateJobStatus(job.Id, "Failed", ex.Message); }
-                    catch (Exception caughtEx_9) when (WorkerExceptionClassifier.IsNonFatal(caughtEx_9))
-                    {
-                        _logger.LogDebug(caughtEx_9, "Unable to update failed scan job {JobId}", job.Id);
-                    }
-                }
-                var broadcastStatus = terminalDecision?.Status ?? "Failed";
-                var broadcastError = terminalDecision?.Error ?? ex.Message;
-                registerPostCompletionEffects(token => BroadcastFailedScanAsync(
+                await HandleUnexpectedScanFailureAsync(
                     job,
-                    broadcastStatus,
-                    broadcastError,
-                    token));
-                _metrics.Increment("worker.scan.job.failed");
+                    ex,
+                    registerPostCompletionEffects,
+                    stoppingToken);
             }
         }
 

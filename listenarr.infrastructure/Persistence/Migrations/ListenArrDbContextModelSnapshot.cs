@@ -393,6 +393,10 @@ namespace Listenarr.Infrastructure.Persistence.Migrations
                     b.Property<int?>("Bitrate")
                         .HasColumnType("INTEGER");
 
+                    b.Property<string>("CanonicalPath")
+                        .HasMaxLength(4096)
+                        .HasColumnType("TEXT");
+
                     b.Property<int?>("Channels")
                         .HasColumnType("INTEGER");
 
@@ -414,6 +418,44 @@ namespace Listenarr.Infrastructure.Persistence.Migrations
                     b.Property<string>("Path")
                         .HasColumnType("TEXT");
 
+                    b.Property<string>("PathCaseSensitivity")
+                        .IsRequired()
+                        .HasMaxLength(16)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("PathCaseSensitivityMode")
+                        .IsRequired()
+                        .HasMaxLength(16)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("PathIdentityBoundary")
+                        .HasMaxLength(4096)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("PathIdentityLookupKey")
+                        .HasMaxLength(160)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("PathIdentityReason")
+                        .HasMaxLength(1024)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("PathIdentityState")
+                        .IsRequired()
+                        .HasMaxLength(16)
+                        .HasColumnType("TEXT");
+
+                    b.Property<int>("PathIdentityVersion")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("PathOwnershipKey")
+                        .HasMaxLength(160)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("PathSyntax")
+                        .HasMaxLength(16)
+                        .HasColumnType("TEXT");
+
                     b.Property<int?>("SampleRate")
                         .HasColumnType("INTEGER");
 
@@ -426,6 +468,12 @@ namespace Listenarr.Infrastructure.Persistence.Migrations
                     b.HasKey("Id");
 
                     b.HasIndex("AudiobookId");
+
+                    b.HasIndex("PathIdentityLookupKey");
+
+                    b.HasIndex("PathOwnershipKey")
+                        .IsUnique()
+                        .HasFilter("\"PathOwnershipKey\" IS NOT NULL");
 
                     b.ToTable("AudiobookFiles");
                 });

@@ -120,7 +120,7 @@ namespace Listenarr.Tests.Features.Infrastructure.Repositories
 
             await using var verification = new ListenArrDbContext(options);
             var persisted = await verification.Audiobooks.SingleAsync(candidate => candidate.Id == audiobookId);
-            Assert.Equal(FileUtils.NormalizeStoredPath("/library/target"), persisted.BasePath);
+            Assert.Equal("/library/target", persisted.BasePath);
             Assert.False(persisted.Monitored);
         }
 
@@ -170,7 +170,7 @@ namespace Listenarr.Tests.Features.Infrastructure.Repositories
             await using var verification = new ListenArrDbContext(options);
             var persisted = await verification.Audiobooks
                 .SingleAsync(candidate => candidate.Id == staleMetadataEntity.Id);
-            Assert.Equal(FileUtils.NormalizeStoredPath("/library/target"), persisted.BasePath);
+            Assert.Equal("/library/target", persisted.BasePath);
             Assert.Equal("/library/target/book.m4b", persisted.FilePath);
             Assert.Equal(200, persisted.FileSize);
             Assert.Equal("/library/target/cover.jpg", persisted.ImageUrl);
@@ -224,7 +224,7 @@ namespace Listenarr.Tests.Features.Infrastructure.Repositories
             var persisted = await verification.Audiobooks
                 .Include(audiobook => audiobook.ExternalIdentifiers)
                 .SingleAsync(candidate => candidate.Id == audiobookId);
-            Assert.Equal(FileUtils.NormalizeStoredPath("/library/target"), persisted.BasePath);
+            Assert.Equal("/library/target", persisted.BasePath);
             var identifier = Assert.Single(persisted.ExternalIdentifiers);
             Assert.Equal("B012345678", identifier.ValueNormalized);
         }

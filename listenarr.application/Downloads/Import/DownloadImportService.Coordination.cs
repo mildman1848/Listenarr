@@ -9,21 +9,23 @@ public partial class DownloadImportService
         DownloadImportOptions? options = null)
     {
         ArgumentNullException.ThrowIfNull(audiobook);
-        return audiobookOperationCoordinator.ExecuteExclusiveAsync(
-            audiobook.Id,
-            async token =>
-            {
-                var currentAudiobook = await audiobookRepository.GetByIdSnapshotAsync(
-                    audiobook.Id,
-                    token)
-                    ?? throw new InvalidOperationException(
-                        $"Audiobook {audiobook.Id} no longer exists");
-                return await ImportDownloadFilesCoreAsync(
-                    currentAudiobook,
-                    files,
-                    token,
-                    options);
-            },
+        return filesystemMutationCoordinator.ExecuteExclusiveAsync(
+            globalToken => audiobookOperationCoordinator.ExecuteExclusiveAsync(
+                audiobook.Id,
+                async token =>
+                {
+                    var currentAudiobook = await audiobookRepository.GetByIdSnapshotAsync(
+                        audiobook.Id,
+                        token)
+                        ?? throw new InvalidOperationException(
+                            $"Audiobook {audiobook.Id} no longer exists");
+                    return await ImportDownloadFilesCoreAsync(
+                        currentAudiobook,
+                        files,
+                        token,
+                        options);
+                },
+                globalToken),
             ct);
     }
 }

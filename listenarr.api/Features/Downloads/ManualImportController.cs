@@ -34,8 +34,10 @@ public partial class ManualImportController : ControllerBase
     private readonly IScanQueueService _scanQueueService;
     private readonly IRootFolderService _rootFolderService;
     private readonly IFileMover _fileMover;
+    private readonly IAudiobookFileService _audiobookFileService;
     private readonly IFileSystem _fileSystem;
     private readonly IFileSystemSemanticsResolver _semanticsResolver;
+    private readonly IFilesystemMutationCoordinator _filesystemMutationCoordinator;
     private readonly IAudiobookOperationCoordinator _audiobookOperationCoordinator;
     private readonly ManualImportPathPlanner _pathPlanner;
     private readonly ManualImportCompanionImporter _companionImporter;
@@ -49,8 +51,10 @@ public partial class ManualImportController : ControllerBase
         IScanQueueService scanQueueService,
         IRootFolderService rootFolderService,
         IFileMover fileMover,
+        IAudiobookFileService audiobookFileService,
         IFileSystem fileSystem,
         IFileSystemSemanticsResolver semanticsResolver,
+        IFilesystemMutationCoordinator filesystemMutationCoordinator,
         IAudiobookOperationCoordinator audiobookOperationCoordinator,
         ManualImportPathPlanner? pathPlanner = null,
         ManualImportCompanionImporter? companionImporter = null)
@@ -63,8 +67,10 @@ public partial class ManualImportController : ControllerBase
         _scanQueueService = scanQueueService;
         _rootFolderService = rootFolderService;
         _fileMover = fileMover;
+        _audiobookFileService = audiobookFileService;
         _fileSystem = fileSystem;
         _semanticsResolver = semanticsResolver;
+        _filesystemMutationCoordinator = filesystemMutationCoordinator ?? throw new ArgumentNullException(nameof(filesystemMutationCoordinator));
         _audiobookOperationCoordinator = audiobookOperationCoordinator ?? throw new ArgumentNullException(nameof(audiobookOperationCoordinator));
         _pathPlanner = pathPlanner ?? new ManualImportPathPlanner(fileNamingService);
         _companionImporter = companionImporter ?? new ManualImportCompanionImporter(
@@ -340,6 +346,34 @@ public partial class ManualImportController : ControllerBase
             var destinationReservation = await destinationTracker.PlanUniqueAsync(destinationPath);
             destinationPath = destinationReservation.Path;
 
+            if (action != FileAction.None)
+            {
+                var ownership = await _audiobookFileService.CheckAudiobookFileOwnershipAsync(
+                    audiobook,
+                    destinationPath,
+                    Path.GetDirectoryName(destinationPath));
+                if (ownership.Outcome is not (
+                        AudiobookFileOwnershipCheckOutcome.Available or
+                        AudiobookFileOwnershipCheckOutcome.AlreadyOwnedByAudiobook))
+                {
+                    _logger.LogWarning(
+                        "Blocked manual import because destination ownership is unavailable. Audiobook {AudiobookId}, Source {Source}, Destination {Destination}, Outcome {Outcome}, Reason {Reason}",
+                        audiobook.Id,
+                        item.FullPath,
+                        destinationPath,
+                        ownership.Outcome,
+                        ownership.Reason);
+                    return new ManualImportResultDto
+                    {
+                        Success = false,
+                        Error = ownership.Reason ?? "Destination ownership is unavailable.",
+                        SourcePath = item.FullPath,
+                        DestinationPath = destinationPath,
+                        Audiobook = audiobook
+                    };
+                }
+            }
+
             var success = await _fileMover.PerformActionOn(action, item.FullPath, destinationPath);
             if (success)
             {
@@ -363,55 +397,6 @@ public partial class ManualImportController : ControllerBase
             _logger.LogError(ex, "Error importing file {FilePath}", item.FullPath);
             return ManualImportResultDto.FailureResult(ex.Message, item.FullPath);
         }
-    }
-
-    private Task<FileSystemPathSemantics> ResolveDestinationSemanticsAsync(string? basePath)
-    {
-        if (string.IsNullOrWhiteSpace(basePath))
-        {
-            throw new InvalidOperationException("Destination base path is unavailable.");
-        }
-
-        return ResolvePathSemanticsAsync(
-            basePath,
-            "Destination filesystem identity is unavailable.");
-    }
-
-    private async Task<FileSystemPathSemantics> ResolvePathSemanticsAsync(
-        string path,
-        string defaultReason)
-    {
-        var resolution = await _semanticsResolver.ResolveAsync(path);
-        if (resolution.State != PathIdentityState.Valid)
-        {
-            throw new InvalidOperationException(resolution.Reason ?? defaultReason);
-        }
-
-        return resolution.Semantics;
-    }
-
-    private async Task<bool> IsInsideAnyConfiguredRootAsync(
-        string path,
-        IEnumerable<RootFolder> rootFolders)
-    {
-        foreach (var rootFolder in rootFolders)
-        {
-            if (string.IsNullOrWhiteSpace(rootFolder.Path))
-            {
-                continue;
-            }
-
-            var resolution = await _semanticsResolver.ResolveAsync(
-                rootFolder.Path,
-                rootFolder.CaseSensitivityMode);
-            if (resolution.State == PathIdentityState.Valid
-                && FileSystemPathIdentity.IsSameOrInside(path, rootFolder.Path, resolution.Semantics))
-            {
-                return true;
-            }
-        }
-
-        return false;
     }
 
     private static string FormatSize(long bytes)

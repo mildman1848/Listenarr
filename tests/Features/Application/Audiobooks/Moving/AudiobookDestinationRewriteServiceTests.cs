@@ -92,6 +92,112 @@ public sealed class AudiobookDestinationRewriteServiceTests
     }
 
     [Fact]
+    public async Task RewriteDestinationAsync_NestedRootUsesMostSpecificSemantics()
+    {
+        var outerRoot = Path.Join(Path.GetTempPath(), $"listenarr-outer-{Guid.NewGuid():N}");
+        var innerRoot = Path.Join(outerRoot, "Sensitive Library");
+        var sourcePath = Path.Join(innerRoot, "Author", "Old Title");
+        var destinationPath = Path.Join(innerRoot, "Author", "New Title");
+        var syntax = FileSystemPathSemantics.CurrentHostDefault.Syntax;
+        var outerSemantics = new FileSystemPathSemantics(
+            syntax,
+            FileSystemCaseSensitivity.Insensitive);
+        var innerSemantics = new FileSystemPathSemantics(
+            syntax,
+            FileSystemCaseSensitivity.Sensitive);
+        var repository = new Mock<IAudiobookRepository>(MockBehavior.Strict);
+        var settings = new Mock<IConfigurationService>(MockBehavior.Strict);
+        var rootFolders = new Mock<IRootFolderService>(MockBehavior.Strict);
+        var fileSystem = new Mock<IFileSystem>(MockBehavior.Strict);
+        var semanticsResolver = new Mock<IFileSystemSemanticsResolver>(MockBehavior.Strict);
+        var relocationService = new Mock<IRootFolderRelocationService>(MockBehavior.Strict);
+
+        settings.Setup(service => service.GetApplicationSettingsAsync())
+            .ReturnsAsync(new ApplicationSettings { OutputPath = outerRoot });
+        rootFolders.Setup(service => service.GetAllAsync())
+            .ReturnsAsync([
+                new RootFolder
+                {
+                    Id = 1,
+                    Name = "A Outer",
+                    Path = outerRoot,
+                    CaseSensitivityMode = FileSystemCaseSensitivityMode.Insensitive
+                },
+                new RootFolder
+                {
+                    Id = 2,
+                    Name = "Z Inner",
+                    Path = innerRoot,
+                    CaseSensitivityMode = FileSystemCaseSensitivityMode.Sensitive
+                }
+            ]);
+        semanticsResolver.Setup(service => service.ResolveAsync(
+                outerRoot,
+                FileSystemCaseSensitivityMode.Auto,
+                It.IsAny<CancellationToken>()))
+            .Returns(new ValueTask<FileSystemSemanticsResolution>(
+                new FileSystemSemanticsResolution(outerSemantics, PathIdentityState.Valid, outerRoot)));
+        semanticsResolver.Setup(service => service.ResolveAsync(
+                outerRoot,
+                FileSystemCaseSensitivityMode.Insensitive,
+                It.IsAny<CancellationToken>()))
+            .Returns(new ValueTask<FileSystemSemanticsResolution>(
+                new FileSystemSemanticsResolution(outerSemantics, PathIdentityState.Valid, outerRoot)));
+        semanticsResolver.Setup(service => service.ResolveAsync(
+                innerRoot,
+                FileSystemCaseSensitivityMode.Sensitive,
+                It.IsAny<CancellationToken>()))
+            .Returns(new ValueTask<FileSystemSemanticsResolution>(
+                new FileSystemSemanticsResolution(innerSemantics, PathIdentityState.Valid, innerRoot)));
+        string normalizedTarget = destinationPath;
+        string validationReason = string.Empty;
+        fileSystem.Setup(service => service.TryValidateMutationTarget(
+                destinationPath,
+                It.IsAny<IEnumerable<string?>>(),
+                out normalizedTarget,
+                out validationReason))
+            .Returns(true);
+        repository.Setup(repo => repo.GetByIdAsync(86))
+            .ReturnsAsync(new Audiobook
+            {
+                Id = 86,
+                Title = "Old Title",
+                BasePath = sourcePath
+            });
+        relocationService.Setup(service => service.IsBoundaryProtectedAsync(
+                It.IsAny<string>(),
+                It.IsAny<FileSystemPathSemantics>(),
+                It.IsAny<CancellationToken>()))
+            .ReturnsAsync(false);
+        repository.Setup(repo => repo.RewritePathReferencesAsync(
+                86,
+                sourcePath,
+                destinationPath,
+                innerSemantics,
+                innerSemantics,
+                It.IsAny<CancellationToken>(),
+                FileSystemCaseSensitivityMode.Sensitive))
+            .ReturnsAsync(true);
+
+        using var operationCoordinator = new AudiobookOperationCoordinator();
+        var service = new AudiobookDestinationRewriteService(
+            repository.Object,
+            settings.Object,
+            rootFolders.Object,
+            fileSystem.Object,
+            semanticsResolver.Object,
+            Mock.Of<ILogger<AudiobookDestinationRewriteService>>(),
+            relocationService.Object,
+            new FilesystemMutationCoordinator(),
+            operationCoordinator);
+
+        var result = await service.RewriteDestinationAsync(86, destinationPath, sourcePath);
+
+        Assert.Equal(destinationPath, result.DestinationPath);
+        repository.VerifyAll();
+    }
+
+    [Fact]
     public async Task RewriteDestinationAsync_UpdatesMetadataWithoutSourceFilesystemAccess()
     {
         var rootPath = Path.Join(Path.GetTempPath(), $"listenarr-root-{Guid.NewGuid():N}");

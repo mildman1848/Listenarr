@@ -35,7 +35,7 @@ public sealed class AudiobookPathReferenceRewriterTests
             sourceSemantics,
             targetSemantics);
 
-        Assert.Equal(FileUtils.NormalizeStoredPath("/library/Book"), audiobook.BasePath);
+        Assert.Equal("/library/Book", audiobook.BasePath);
         Assert.Equal("/library/Book/book.m4b", audiobook.FilePath);
         Assert.Equal("https://example.test/cover.jpg", audiobook.ImageUrl);
         Assert.Equal("/library/Book/disc-1/chapter.mp3", audiobook.Files![0].Path);
@@ -62,7 +62,7 @@ public sealed class AudiobookPathReferenceRewriterTests
             semantics,
             semantics);
 
-        Assert.Equal(FileUtils.NormalizeStoredPath("/target/Book"), audiobook.BasePath);
+        Assert.Equal("/target/Book", audiobook.BasePath);
         Assert.Equal("/library/Book/book.m4b", audiobook.FilePath);
     }
 
@@ -98,6 +98,46 @@ public sealed class AudiobookPathReferenceRewriterTests
     }
 
     [Fact]
+    public void Rewrite_RecoveryRefreshesIdentityWhenStoredPathAlreadyUsesTarget()
+    {
+        var semantics = new FileSystemPathSemantics(
+            FileSystemPathSyntax.Unix,
+            FileSystemCaseSensitivity.Sensitive);
+        var sourceIdentity = AudiobookFilePathIdentity.CreateValid(
+            "/library/Book/book.m4b",
+            semantics,
+            FileSystemCaseSensitivityMode.Sensitive,
+            "/library/Book");
+        var file = AudiobookFile.CreateUnresolved("/target/Book/book.m4b");
+        file.ApplyPathIdentity(file.Path!, sourceIdentity);
+        var audiobook = new Audiobook
+        {
+            BasePath = "/target/Book",
+            FilePath = "/target/Book/book.m4b",
+            Files = [file]
+        };
+        var expectedIdentity = AudiobookFilePathIdentity.CreateValid(
+            "/target/Book/book.m4b",
+            semantics,
+            FileSystemCaseSensitivityMode.Sensitive,
+            "/target/Book");
+
+        AudiobookPathReferenceRewriter.Rewrite(
+            audiobook,
+            "/library/Book",
+            "/target/Book",
+            semantics,
+            semantics,
+            FileSystemCaseSensitivityMode.Sensitive);
+
+        Assert.Equal("/target/Book/book.m4b", file.Path);
+        Assert.Equal(expectedIdentity.CanonicalPath, file.CanonicalPath);
+        Assert.Equal(expectedIdentity.OwnershipKey, file.PathOwnershipKey);
+        Assert.Equal(FileSystemCaseSensitivityMode.Sensitive, file.PathCaseSensitivityMode);
+        Assert.Equal(PathIdentityState.Valid, file.PathIdentityState);
+    }
+
+    [Fact]
     public void Rewrite_MapsSourceRootReferencesToTargetRoot()
     {
         var audiobook = new Audiobook
@@ -121,7 +161,7 @@ public sealed class AudiobookPathReferenceRewriterTests
             semantics,
             semantics);
 
-        Assert.Equal(FileUtils.NormalizeStoredPath("/target/Book"), audiobook.BasePath);
+        Assert.Equal("/target/Book", audiobook.BasePath);
         Assert.Equal("/target/Book", audiobook.FilePath);
         Assert.Equal("/target/Book", audiobook.ImageUrl);
         Assert.Equal("/target/Book", audiobook.Files![0].Path);

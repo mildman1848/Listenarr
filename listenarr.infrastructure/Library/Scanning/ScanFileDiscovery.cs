@@ -73,7 +73,8 @@ internal static class ScanFileDiscovery
                 {
                     try
                     {
-                        if (FileUtils.IsAudioFile(file))
+                        if ((File.GetAttributes(file) & FileAttributes.ReparsePoint) == 0
+                            && FileUtils.IsAudioFile(file))
                         {
                             candidates.Add(file);
                         }
@@ -86,7 +87,28 @@ internal static class ScanFileDiscovery
 
                 foreach (var child in Directory.EnumerateDirectories(normalizedDirectory))
                 {
-                    directories.Push(child);
+                    try
+                    {
+                        if ((File.GetAttributes(child) & FileAttributes.ReparsePoint) == 0)
+                        {
+                            directories.Push(child);
+                        }
+                        else
+                        {
+                            logger.LogWarning(
+                                "Skipped linked directory while scanning job {JobId}: {Dir}",
+                                jobId,
+                                child);
+                        }
+                    }
+                    catch (Exception exception) when (exception is not (OperationCanceledException or OutOfMemoryException or StackOverflowException))
+                    {
+                        logger.LogWarning(
+                            exception,
+                            "Skipped directory whose link status could not be verified for scan job {JobId}: {Dir}",
+                            jobId,
+                            child);
+                    }
                 }
             }
             catch (IOException exception)

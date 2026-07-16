@@ -6,7 +6,8 @@ public sealed record FileSystemSemanticsResolution(
     FileSystemPathSemantics Semantics,
     PathIdentityState State,
     string BoundaryPath,
-    string? Reason = null);
+    string? Reason = null,
+    string? CanonicalPath = null);
 
 public interface IFileSystemSemanticsResolver
 {

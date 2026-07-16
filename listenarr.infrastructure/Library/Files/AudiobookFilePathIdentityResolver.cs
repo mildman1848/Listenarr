@@ -1,0 +1,204 @@
+using Listenarr.Domain.Common;
+
+namespace Listenarr.Infrastructure.Library.Files;
+
+public sealed class AudiobookFilePathIdentityResolver(
+    IRootFolderRepository rootFolderRepository,
+    IFileSystemSemanticsResolver semanticsResolver) : IAudiobookFilePathIdentityResolver
+{
+    private readonly object _rootFoldersSync = new();
+    private Task<List<RootFolder>>? _rootFoldersTask;
+
+    public async ValueTask<AudiobookFilePathIdentity> ResolveAsync(
+        Audiobook audiobook,
+        string path,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(audiobook);
+        ArgumentException.ThrowIfNullOrWhiteSpace(path);
+        cancellationToken.ThrowIfCancellationRequested();
+
+        var absolutePath = ResolveAbsolutePath(audiobook, path, out var syntax);
+        var canonicalPath = FileSystemPathIdentity.Canonicalize(absolutePath, syntax);
+        var rootMatch = await FindAuthoritativeRootAsync(
+            canonicalPath,
+            syntax,
+            cancellationToken);
+        var requestedMode = rootMatch?.Root.CaseSensitivityMode
+            ?? FileSystemCaseSensitivityMode.Auto;
+        var resolution = rootMatch?.Resolution
+            ?? await semanticsResolver.ResolveAsync(
+                absolutePath,
+                requestedMode,
+                cancellationToken);
+        var boundaryPath = CanonicalizeBoundary(
+            resolution.BoundaryPath,
+            canonicalPath,
+            resolution.Semantics);
+
+        if (resolution.State != PathIdentityState.Valid
+            || resolution.Semantics.CaseSensitivity == FileSystemCaseSensitivity.Unknown)
+        {
+            return AudiobookFilePathIdentity.CreateUnavailable(
+                canonicalPath,
+                syntax,
+                requestedMode,
+                boundaryPath,
+                resolution.Reason ?? "Filesystem identity is unavailable.");
+        }
+
+        if (resolution.Semantics.Syntax != syntax)
+        {
+            return AudiobookFilePathIdentity.CreateUnavailable(
+                canonicalPath,
+                syntax,
+                requestedMode,
+                boundaryPath,
+                "Resolved filesystem syntax does not match the audiobook file path syntax.");
+        }
+
+        var snapshot = PathIdentitySnapshot.FromResolution(
+            resolution.Semantics,
+            requestedMode,
+            boundaryPath,
+            canonicalPath);
+        return AudiobookFilePathIdentity.CreateValid(
+            canonicalPath,
+            snapshot.Semantics,
+            snapshot.RequestedMode,
+            snapshot.BoundaryPath);
+    }
+
+    private async Task<RootMatch?> FindAuthoritativeRootAsync(
+        string canonicalPath,
+        FileSystemPathSyntax syntax,
+        CancellationToken cancellationToken)
+    {
+        var roots = await GetRootFoldersAsync();
+        RootMatch? best = null;
+        foreach (var root in roots.Where(candidate => !string.IsNullOrWhiteSpace(candidate.Path)))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!FileSystemPathIdentity.TryDetectAbsoluteSyntax(root.Path, out var rootSyntax)
+                || rootSyntax != syntax)
+            {
+                continue;
+            }
+
+            FileSystemSemanticsResolution resolution;
+            if (root.PathIdentityState == PathIdentityState.Valid
+                && root.ResolvedCaseSensitivity != FileSystemCaseSensitivity.Unknown)
+            {
+                resolution = new FileSystemSemanticsResolution(
+                    new FileSystemPathSemantics(rootSyntax, root.ResolvedCaseSensitivity),
+                    PathIdentityState.Valid,
+                    FileSystemPathIdentity.Canonicalize(root.Path, rootSyntax));
+            }
+            else
+            {
+                resolution = await semanticsResolver.ResolveAsync(
+                    root.Path,
+                    root.CaseSensitivityMode,
+                    cancellationToken);
+            }
+
+            if (resolution.State != PathIdentityState.Valid
+                || resolution.Semantics.Syntax != syntax
+                || !FileSystemPathIdentity.IsSameOrInside(
+                    canonicalPath,
+                    root.Path,
+                    resolution.Semantics))
+            {
+                continue;
+            }
+
+            var canonicalRoot = FileSystemPathIdentity.Canonicalize(root.Path, rootSyntax);
+            if (best == null || canonicalRoot.Length > best.CanonicalRootLength)
+            {
+                best = new RootMatch(root, resolution, canonicalRoot.Length);
+            }
+        }
+
+        return best;
+    }
+
+    private Task<List<RootFolder>> GetRootFoldersAsync()
+    {
+        lock (_rootFoldersSync)
+        {
+            return _rootFoldersTask ??= rootFolderRepository.GetAllAsync();
+        }
+    }
+
+    private static string ResolveAbsolutePath(
+        Audiobook audiobook,
+        string path,
+        out FileSystemPathSyntax syntax)
+    {
+        if (FileSystemPathIdentity.TryDetectAbsoluteSyntax(path, out syntax))
+        {
+            return FileSystemPathIdentity.Canonicalize(path, syntax);
+        }
+
+        if (string.IsNullOrWhiteSpace(audiobook.BasePath)
+            || !FileSystemPathIdentity.TryDetectAbsoluteSyntax(audiobook.BasePath, out syntax))
+        {
+            throw new InvalidOperationException(
+                "A relative audiobook file path requires an authoritative absolute audiobook base path.");
+        }
+
+        var containmentSemantics = new FileSystemPathSemantics(
+            syntax,
+            FileSystemCaseSensitivity.Sensitive);
+        if (!FileSystemPathIdentity.TryResolveRelativePathWithinBase(
+                audiobook.BasePath,
+                path,
+                containmentSemantics,
+                out var resolvedPath))
+        {
+            throw new InvalidOperationException(
+                "The relative audiobook file path could not be resolved safely within the audiobook base path.");
+        }
+
+        return resolvedPath;
+    }
+
+    private static string CanonicalizeBoundary(
+        string boundaryPath,
+        string canonicalPath,
+        FileSystemPathSemantics semantics)
+    {
+        try
+        {
+            if (FileSystemPathIdentity.TryDetectAbsoluteSyntax(boundaryPath, out var boundarySyntax)
+                && boundarySyntax == semantics.Syntax)
+            {
+                var canonicalBoundary = FileSystemPathIdentity.Canonicalize(
+                    boundaryPath,
+                    semantics.Syntax);
+                var containmentSemantics = semantics.CaseSensitivity == FileSystemCaseSensitivity.Unknown
+                    ? new FileSystemPathSemantics(
+                        semantics.Syntax,
+                        FileSystemCaseSensitivity.Sensitive)
+                    : semantics;
+                if (FileSystemPathIdentity.IsSameOrInside(
+                        canonicalPath,
+                        canonicalBoundary,
+                        containmentSemantics))
+                {
+                    return canonicalBoundary;
+                }
+            }
+        }
+        catch (ArgumentException)
+        {
+        }
+
+        return canonicalPath;
+    }
+
+    private sealed record RootMatch(
+        RootFolder Root,
+        FileSystemSemanticsResolution Resolution,
+        int CanonicalRootLength);
+}

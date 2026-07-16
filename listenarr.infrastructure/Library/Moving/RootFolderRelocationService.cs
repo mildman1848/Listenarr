@@ -218,6 +218,17 @@ public sealed partial class RootFolderRelocationService(
                 $"Active move job {conflictingMoveJob.Id} overlaps this root folder relocation; wait for it to finish before starting the relocation.");
         }
 
+        if (sourceResolution != null
+            && command.Mode == RootFolderRelocationMode.Relocate)
+        {
+            RejectDuplicateRelocationTargets(
+                affected,
+                root.Path,
+                targetPath,
+                sourceResolution.Semantics,
+                targetResolution.Semantics);
+        }
+
         var now = timeProvider.GetUtcNow();
         var nowUtc = now.UtcDateTime;
 
@@ -256,7 +267,8 @@ public sealed partial class RootFolderRelocationService(
                         sourceBasePath,
                         destinationBasePath,
                         sourceSemantics,
-                        targetResolution.Semantics);
+                        targetResolution.Semantics,
+                        command.TargetCaseSensitivityMode);
                     completed++;
                 }
                 catch (InvalidOperationException ex)
@@ -270,6 +282,7 @@ public sealed partial class RootFolderRelocationService(
                 }
             }
 
+            RejectDuplicateAudiobookFileOwnership(db);
             ApplyRootMetadata(root, command, targetPath, targetResolution, targetIdentityKey);
             if (command.DesiredIsDefault)
             {

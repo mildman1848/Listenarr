@@ -21,7 +21,8 @@ public partial class AudiobookRepository
         string targetBasePath,
         FileSystemPathSemantics sourceSemantics,
         FileSystemPathSemantics targetSemantics,
-        CancellationToken ct = default)
+        CancellationToken ct = default,
+        FileSystemCaseSensitivityMode targetCaseSensitivityMode = FileSystemCaseSensitivityMode.Auto)
     {
         try
         {
@@ -38,7 +39,8 @@ public partial class AudiobookRepository
                 sourceBasePath,
                 targetBasePath,
                 sourceSemantics,
-                targetSemantics);
+                targetSemantics,
+                targetCaseSensitivityMode);
             await _db.SaveChangesAsync(ct);
             return true;
         }

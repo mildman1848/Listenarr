@@ -53,6 +53,69 @@ namespace Listenarr.Tests.Features.Infrastructure.Library.Scanning
         }
 
         [Fact]
+        public async Task ProcessJobAsync_LinkedChildDirectory_DoesNotImportOutsideFiles()
+        {
+            if (OperatingSystem.IsWindows())
+            {
+                return;
+            }
+
+            var basePath = FileService.GetTempDirectory("scan-processor-link-root");
+            var outsidePath = FileService.GetTempDirectory("scan-processor-link-outside");
+            await FileService.GetFileAsync(outsidePath, "Linked Book.m4b", "outside");
+            Directory.CreateSymbolicLink(Path.Join(basePath, "linked"), outsidePath);
+
+            var audiobook = await _audiobookRepository.AddAsync(new AudiobookBuilder()
+                .WithTitle("Linked Book")
+                .WithBasePath(basePath)
+                .Build());
+            var (queue, job) = await CreateQueuedScanJobAsync(audiobook);
+
+            await _provider.GetRequiredService<IScanJobProcessor>()
+                .ProcessJobAsync(job, CancellationToken.None);
+
+            Assert.True(queue.TryGetJob(job.Id, out var updatedJob));
+            Assert.Equal("Completed", updatedJob!.Status);
+            Assert.Empty(await _audiobookFileRepository.GetByAudiobookIdAsync(audiobook.Id));
+            var persistedAudiobook = await _audiobookRepository.GetByIdAsync(audiobook.Id);
+            Assert.Equal(basePath, persistedAudiobook!.BasePath);
+        }
+
+        [Fact]
+        public async Task ProcessJobAsync_LinkedScanRoot_FailsWithoutDeletingTrackedFiles()
+        {
+            if (OperatingSystem.IsWindows())
+            {
+                return;
+            }
+
+            var actualRoot = FileService.GetTempDirectory("scan-processor-linked-root-target");
+            var linkParent = FileService.GetTempDirectory("scan-processor-linked-root-parent");
+            var linkedRoot = Path.Join(linkParent, "linked-root");
+            Directory.CreateSymbolicLink(linkedRoot, actualRoot);
+            var trackedPath = Path.Join(linkedRoot, "Tracked Book.m4b");
+            await File.WriteAllTextAsync(Path.Join(actualRoot, "Tracked Book.m4b"), "audio");
+
+            var audiobook = await _audiobookRepository.AddAsync(new AudiobookBuilder()
+                .WithTitle("Tracked Book")
+                .WithBasePath(linkedRoot)
+                .Build());
+            await _audiobookFileRepository.AddAsync(new AudiobookFileBuilder()
+                .WithAudiobook(audiobook)
+                .WithPath(trackedPath)
+                .Build());
+            var (queue, job) = await CreateQueuedScanJobAsync(audiobook);
+
+            await _provider.GetRequiredService<IScanJobProcessor>()
+                .ProcessJobAsync(job, CancellationToken.None);
+
+            Assert.True(queue.TryGetJob(job.Id, out var updatedJob));
+            Assert.Equal("Failed", updatedJob!.Status);
+            Assert.Equal("Scan path is a symbolic link or reparse point.", updatedJob.Error);
+            Assert.Single(await _audiobookFileRepository.GetByAudiobookIdAsync(audiobook.Id));
+        }
+
+        [Fact]
         public async Task ProcessJobAsync_BroadcastFailure_DoesNotChangeDurableCompletion()
         {
             var failingProxy = new Mock<IClientProxy>();
@@ -336,6 +399,7 @@ namespace Listenarr.Tests.Features.Infrastructure.Library.Scanning
                 _provider.GetRequiredService<IHubContext<DownloadHub>>(),
                 _provider.GetRequiredService<IAppMetricsService>(),
                 _provider.GetRequiredService<IFileSystemSemanticsResolver>(),
+                _provider.GetRequiredService<IFilesystemMutationCoordinator>(),
                 _provider.GetRequiredService<IAudiobookOperationCoordinator>());
 
             await processor.ProcessJobAsync(job, CancellationToken.None);

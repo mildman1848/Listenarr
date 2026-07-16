@@ -24,7 +24,15 @@ public static class ListenarrStartupTasks
 {
     public static async Task RunListenarrStartupTasksAsync(this WebApplication app)
     {
+        await app.ReconcileAudiobookFileIdentitiesAsync();
         await app.WarnIfAuthenticationDisabledAsync();
+    }
+
+    private static async Task ReconcileAudiobookFileIdentitiesAsync(this WebApplication app)
+    {
+        using var scope = app.Services.CreateScope();
+        var reconciler = scope.ServiceProvider.GetRequiredService<IAudiobookFileIdentityReconciler>();
+        await reconciler.ReconcileAsync();
     }
 
     private static async Task WarnIfAuthenticationDisabledAsync(this WebApplication app)

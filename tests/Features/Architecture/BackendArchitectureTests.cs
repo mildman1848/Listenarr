@@ -69,16 +69,51 @@ public sealed class BackendArchitectureTests
     {
         Type[] serviceTypes =
         [
+            typeof(AudiobookFileService),
             typeof(AudiobookDestinationRewriteService),
+            typeof(DownloadImportService),
             typeof(LibraryAddService),
             typeof(LibraryAddWorkflow),
+            typeof(LibraryManualScanWorkflow),
             typeof(LibraryMoveWorkflow),
+            typeof(ManualImportController),
+            typeof(MoveJobProcessor),
             typeof(MoveQueueService),
+            typeof(RenameService),
             typeof(RootFolderService),
-            typeof(RootFolderRelocationService)
+            typeof(RootFolderRelocationService),
+            typeof(ScanJobProcessor)
         ];
 
         AssertRequiredConstructorParameter<IFilesystemMutationCoordinator>(serviceTypes);
+    }
+
+    [Fact]
+    public void AudiobookFileOwnership_CannotBypassIdentityClaimContract()
+    {
+        var pathProperty = typeof(AudiobookFile).GetProperty(nameof(AudiobookFile.Path));
+        Assert.NotNull(pathProperty);
+        Assert.NotNull(pathProperty!.SetMethod);
+        Assert.False(pathProperty.SetMethod!.IsPublic);
+
+        var repositoryMethods = typeof(IAudiobookFileRepository)
+            .GetMethods()
+            .Select(method => method.Name)
+            .ToHashSet(StringComparer.Ordinal);
+        Assert.DoesNotContain("AddAsync", repositoryMethods);
+        Assert.DoesNotContain("ExistsAtPathAsync", repositoryMethods);
+        Assert.DoesNotContain("IsPathUsedByOtherAsync", repositoryMethods);
+        Assert.Contains(nameof(IAudiobookFileRepository.ClaimAsync), repositoryMethods);
+        Assert.Contains(nameof(IAudiobookFileRepository.CheckOwnershipAsync), repositoryMethods);
+    }
+
+    [Fact]
+    public void RenameService_RequiresOwnershipAndGlobalMutationContracts()
+    {
+        AssertRequiredConstructorParameter<IAudiobookFileRepository>([typeof(RenameService)]);
+        AssertRequiredConstructorParameter<IAudiobookFilePathIdentityResolver>([typeof(RenameService)]);
+        AssertRequiredConstructorParameter<IFilesystemMutationCoordinator>([typeof(RenameService)]);
+        AssertRequiredConstructorParameter<IAudiobookOperationCoordinator>([typeof(RenameService)]);
     }
 
     [Fact]

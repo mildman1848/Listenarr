@@ -19,7 +19,14 @@ import { flushPromises, mount } from '@vue/test-utils'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import RenamePreviewModal from '@/components/domain/organize/RenamePreviewModal.vue'
 import { apiService } from '@/services/api'
-import type { RenamePreview } from '@/types'
+import type { RenamePathSemanticsSnapshot, RenamePreview } from '@/types'
+
+const currentFolderSemantics: RenamePathSemanticsSnapshot = {
+  syntax: 'Windows',
+  caseSensitivity: 'Insensitive',
+  requestedMode: 'Auto',
+  boundaryPath: 'D:\\test\\Author\\Alchemised',
+}
 
 describe('RenamePreviewModal', () => {
   beforeEach(() => {
@@ -32,6 +39,7 @@ describe('RenamePreviewModal', () => {
         audiobookId: 7,
         audiobookTitle: 'Alchemised',
         currentFolderPath: 'D:\\test\\Author\\Alchemised',
+        currentFolderSemantics,
         newFolderPath: 'D:\\test\\Author\\Alchemised test',
         folderChanged: true,
         hasChanges: true,
@@ -68,5 +76,67 @@ describe('RenamePreviewModal', () => {
     expect(wrapper.text()).toContain('Current')
     expect(wrapper.text()).toContain('New')
     expect(wrapper.find('.btn.btn-primary').text()).toContain('Organize 1')
+  })
+
+  it('sends expected current state and displays stale-preview conflicts as failures', async () => {
+    vi.mocked(apiService.previewRename).mockResolvedValue([
+      {
+        audiobookId: 7,
+        audiobookTitle: 'Alchemised',
+        currentFolderPath: 'D:\\test\\Author\\Alchemised',
+        currentFolderSemantics,
+        newFolderPath: 'D:\\test\\Author\\Alchemised test',
+        folderChanged: true,
+        hasChanges: true,
+        fileRenames: [
+          {
+            fileId: 71,
+            currentPath: 'D:\\test\\Author\\Alchemised\\Alchemised.m4b',
+            newPath: 'D:\\test\\Author\\Alchemised test\\Alchemised test.m4b',
+            currentFilename: 'Alchemised.m4b',
+            newFilename: 'Alchemised test.m4b',
+            changed: true,
+          },
+        ],
+      },
+    ] satisfies RenamePreview[])
+    vi.mocked(apiService.executeRename).mockResolvedValue([
+      {
+        audiobookId: 7,
+        success: false,
+        conflict: true,
+        error: 'The audiobook folder changed after the organize preview was generated.',
+        renamedFiles: [],
+      },
+    ])
+
+    const wrapper = mount(RenamePreviewModal, {
+      props: {
+        visible: true,
+        audiobookIds: [7],
+      },
+    })
+    await flushPromises()
+
+    await wrapper.find('.btn.btn-primary').trigger('click')
+    await flushPromises()
+
+    expect(apiService.executeRename).toHaveBeenCalledWith([
+      {
+        audiobookId: 7,
+        currentFolderPath: 'D:\\test\\Author\\Alchemised',
+        currentFolderSemantics,
+        newFolderPath: 'D:\\test\\Author\\Alchemised test',
+        fileRenames: [
+          {
+            fileId: 71,
+            currentPath: 'D:\\test\\Author\\Alchemised\\Alchemised.m4b',
+            newPath: 'D:\\test\\Author\\Alchemised test\\Alchemised test.m4b',
+          },
+        ],
+      },
+    ])
+    expect(wrapper.find('.result-row.error').exists()).toBe(true)
+    expect(wrapper.text()).toContain('folder changed after the organize preview')
   })
 })

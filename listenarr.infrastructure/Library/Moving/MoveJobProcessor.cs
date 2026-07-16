@@ -32,6 +32,7 @@ internal partial class MoveJobProcessor(
     IMoveCleanupBoundaryResolver cleanupBoundaryResolver,
     IMoveScanHandoffStore moveScanHandoffStore,
     TimeProvider timeProvider,
+    IFilesystemMutationCoordinator filesystemMutationCoordinator,
     IAudiobookOperationCoordinator audiobookOperationCoordinator,
     IAudiobookUpdatePublisher? audiobookUpdatePublisher = null) : IMoveJobProcessor, IMoveJobProcessorPhases
 {
@@ -65,9 +66,11 @@ internal partial class MoveJobProcessor(
         job.Status = MoveJobStatus.Running;
         job.Error = null;
 
-        await audiobookOperationCoordinator.ExecuteExclusiveAsync(
-            job.AudiobookId,
-            token => ProcessJobCoreAsync(job, RegisterPostCommit, token),
+        await filesystemMutationCoordinator.ExecuteExclusiveAsync(
+            globalToken => audiobookOperationCoordinator.ExecuteExclusiveAsync(
+                job.AudiobookId,
+                token => ProcessJobCoreAsync(job, RegisterPostCommit, token),
+                globalToken),
             stoppingToken);
 
         if (postCommit == null)

@@ -74,6 +74,48 @@ namespace Listenarr.Tests.Features.Application.Downloads.Import
         }
 
         [Fact]
+        public async Task ImportDownloadFilesAsync_NestedRootUsesMostSpecificDestinationSemantics()
+        {
+            var outerRoot = FileService.GetTempDirectory("download-import-semantics-outer");
+            var innerRoot = Path.Join(outerRoot, "Sensitive Library");
+            var bookPath = Path.Join(innerRoot, "Book");
+            Directory.CreateDirectory(bookPath);
+            await _rootFolderRepository.AddAsync(new RootFolderBuilder()
+                .WithName("A Outer")
+                .WithPath(outerRoot)
+                .WithCaseSensitivityMode(FileSystemCaseSensitivityMode.Insensitive)
+                .Build());
+            await _rootFolderRepository.AddAsync(new RootFolderBuilder()
+                .WithName("Z Inner")
+                .WithPath(innerRoot)
+                .WithCaseSensitivityMode(FileSystemCaseSensitivityMode.Sensitive)
+                .Build());
+            await _applicationSettingsRepository.SaveAsync(new ApplicationSettingsBuilder()
+                .WithMetadataProcessing()
+                .WithMoveFileOnCompleted()
+                .WithFileNamingPattern("{Title}")
+                .WithMultiFileNamingPattern("{Title}")
+                .Build());
+            var sourceFile = await FileService.GetTempFileAsync("nested-semantics.mp3");
+            var audiobook = await _audiobookRepository.AddAsync(new AudiobookBuilder()
+                .WithTitle("Nested Semantics")
+                .WithBasePath(bookPath)
+                .Build());
+            var resolver = new RecordingSemanticsResolver(
+                _provider.GetRequiredService<IFileSystemSemanticsResolver>());
+            var service = ActivatorUtilities.CreateInstance<DownloadImportService>(
+                _provider,
+                resolver);
+
+            await service.ImportDownloadFilesAsync(audiobook, [sourceFile]);
+
+            Assert.Contains(
+                resolver.Calls,
+                call => string.Equals(call.Path, bookPath, StringComparison.Ordinal)
+                    && call.Mode == FileSystemCaseSensitivityMode.Sensitive);
+        }
+
+        [Fact]
         public async Task ImportDownloadFilesAsync_StaleAudiobookArgument_UsesCurrentPersistedBasePath()
         {
             var oldBasePath = FileService.GetTempDirectory("download-import-stale-old");
@@ -269,7 +311,9 @@ namespace Listenarr.Tests.Features.Application.Downloads.Import
             var downloadImportService = _provider.GetRequiredService<IDownloadImportService>();
             await downloadImportService.ImportDownloadFilesAsync(audiobook, [zipPath]);
 
-            var expected = Path.Join(audiobook.BasePath, "audio.mp3");
+            var storedAudiobook = await _audiobookRepository.GetByIdAsync(audiobook.Id);
+            Assert.NotNull(storedAudiobook);
+            var expected = Path.Join(storedAudiobook!.BasePath, "audio.mp3");
             var files = await _audiobookFileRepository.GetAllAsync();
             Assert.Single(files);
             var file = files.First();
@@ -510,6 +554,54 @@ namespace Listenarr.Tests.Features.Application.Downloads.Import
         }
 
         [Fact]
+        public async Task ImportDownloadFilesAsync_DestinationOwnedByOtherAudiobook_DoesNotMoveFile()
+        {
+            var fileMover = new Mock<IFileMover>(MockBehavior.Strict);
+            var fileService = new Mock<IAudiobookFileService>(MockBehavior.Strict);
+            fileService.Setup(service => service.CheckAudiobookFileOwnershipAsync(
+                    It.IsAny<Audiobook>(),
+                    It.IsAny<string>(),
+                    It.IsAny<string?>(),
+                    It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new AudiobookFileOwnershipCheckResult(
+                    AudiobookFileOwnershipCheckOutcome.OwnedByOtherAudiobook,
+                    Reason: "Reserved by another audiobook."));
+            Init(builder => builder
+                .WithSingleton<IFileMover>(fileMover.Object)
+                .WithSingleton<IAudiobookFileService>(fileService.Object));
+
+            var outputDirectory = FileService.GetTempDirectory("download-import-owned-destination");
+            var sourceDirectory = FileService.GetTempDirectory("download-import-owned-source");
+            var sourceFile = await FileService.GetFileAsync(sourceDirectory, "source.mp3", "audio");
+            var audiobook = await _audiobookRepository.AddAsync(new AudiobookBuilder()
+                .WithTitle("Owned Destination")
+                .WithBasePath(outputDirectory)
+                .Build());
+            await _applicationSettingsRepository.SaveAsync(new ApplicationSettingsBuilder()
+                .WithOutputPath(outputDirectory)
+                .WithCopyFileOnCompleted()
+                .WithoutMetadataProcessing()
+                .WithFolderNamingPattern("")
+                .WithFileNamingPattern("{Title}")
+                .WithMultiFileNamingPattern("{Title}")
+                .Build());
+
+            var result = Assert.Single(await _provider
+                .GetRequiredService<IDownloadImportService>()
+                .ImportDownloadFilesAsync(audiobook, [sourceFile]));
+
+            Assert.False(result.Success);
+            Assert.True(File.Exists(sourceFile));
+            Assert.False(File.Exists(Path.Join(outputDirectory, "Owned Destination.mp3")));
+            fileMover.Verify(
+                mover => mover.PerformActionOn(
+                    It.IsAny<FileAction>(),
+                    It.IsAny<string>(),
+                    It.IsAny<string>()),
+                Times.Never);
+        }
+
+        [Fact]
         public async Task ImportDownloadFilesAsync_FailedMove_DoesNotReserveDestinationForLaterFiles()
         {
             var attemptedDestinations = new List<string>();
@@ -593,6 +685,21 @@ namespace Listenarr.Tests.Features.Application.Downloads.Import
             var importedFiles = Directory.EnumerateFiles(outputDirectory, "*.*", SearchOption.AllDirectories)
                 .ToList();
             Assert.Empty(importedFiles);
+        }
+
+        private sealed class RecordingSemanticsResolver(
+            IFileSystemSemanticsResolver inner) : IFileSystemSemanticsResolver
+        {
+            public List<(string Path, FileSystemCaseSensitivityMode Mode)> Calls { get; } = [];
+
+            public ValueTask<FileSystemSemanticsResolution> ResolveAsync(
+                string path,
+                FileSystemCaseSensitivityMode mode = FileSystemCaseSensitivityMode.Auto,
+                CancellationToken cancellationToken = default)
+            {
+                Calls.Add((path, mode));
+                return inner.ResolveAsync(path, mode, cancellationToken);
+            }
         }
     }
 }

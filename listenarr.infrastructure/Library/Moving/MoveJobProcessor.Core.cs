@@ -342,6 +342,9 @@ internal partial class MoveJobProcessor
             using (var rewriteScope = scopeFactory.CreateScope())
             {
                 var rewriteRepository = rewriteScope.ServiceProvider.GetRequiredService<IAudiobookRepository>();
+                var targetCaseSensitivityMode = job.TryGetTargetIdentity(out var targetIdentity)
+                    ? targetIdentity.RequestedMode
+                    : FileSystemCaseSensitivityMode.Auto;
                 await MovedAudiobookPathRewriter.RewriteAsync(
                     audiobook.Id,
                     source,
@@ -350,7 +353,8 @@ internal partial class MoveJobProcessor
                     moveRequest.TargetSemantics,
                     rewriteRepository,
                     logger,
-                    stoppingToken);
+                    stoppingToken,
+                    targetCaseSensitivityMode);
             }
 
             using var currentAudiobookScope = scopeFactory.CreateScope();

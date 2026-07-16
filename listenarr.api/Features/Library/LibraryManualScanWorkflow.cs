@@ -31,6 +31,7 @@ namespace Listenarr.Api.Features.Library
         private readonly LibraryScanQueueWorkflow _scanQueueWorkflow;
         private readonly IFileSystem _fileSystem;
         private readonly IFileSystemSemanticsResolver _semanticsResolver;
+        private readonly IFilesystemMutationCoordinator _filesystemMutationCoordinator;
         private readonly IAudiobookOperationCoordinator _audiobookOperationCoordinator;
         private readonly ILogger<LibraryManualScanWorkflow> _logger;
 
@@ -41,6 +42,7 @@ namespace Listenarr.Api.Features.Library
             LibraryScanQueueWorkflow scanQueueWorkflow,
             IFileSystem fileSystem,
             IFileSystemSemanticsResolver semanticsResolver,
+            IFilesystemMutationCoordinator filesystemMutationCoordinator,
             IAudiobookOperationCoordinator audiobookOperationCoordinator,
             ILogger<LibraryManualScanWorkflow> logger,
             INotificationService? notificationService = null)
@@ -51,15 +53,18 @@ namespace Listenarr.Api.Features.Library
             _scanQueueWorkflow = scanQueueWorkflow;
             _fileSystem = fileSystem;
             _semanticsResolver = semanticsResolver;
+            _filesystemMutationCoordinator = filesystemMutationCoordinator ?? throw new ArgumentNullException(nameof(filesystemMutationCoordinator));
             _audiobookOperationCoordinator = audiobookOperationCoordinator ?? throw new ArgumentNullException(nameof(audiobookOperationCoordinator));
             _logger = logger;
             _notificationService = notificationService;
         }
 
         public Task<IActionResult> ScanAsync(int id, LibraryController.ScanRequest? request) =>
-            _audiobookOperationCoordinator.ExecuteExclusiveAsync(
-                id,
-                _ => ScanCoreAsync(id, request));
+            _filesystemMutationCoordinator.ExecuteExclusiveAsync(
+                globalToken => _audiobookOperationCoordinator.ExecuteExclusiveAsync(
+                    id,
+                    _ => ScanCoreAsync(id, request),
+                    globalToken));
 
         private async Task<IActionResult> ScanCoreAsync(int id, LibraryController.ScanRequest? request)
         {
@@ -107,26 +112,22 @@ namespace Listenarr.Api.Features.Library
 
             using var scope = _scopeFactory.CreateScope();
             var metadataService = scope.ServiceProvider.GetRequiredService<IMetadataService>();
+            var audioFileService = scope.ServiceProvider.GetRequiredService<IAudiobookFileService>();
             var audioFileRepository = scope.ServiceProvider.GetRequiredService<IAudiobookFileRepository>();
             var historyRepository = scope.ServiceProvider.GetRequiredService<IHistoryRepository>();
 
-            var existingFilesList = await audioFileRepository.GetByAudiobookIdAsync(audiobook.Id);
             var basePathSemantics = await ResolveRequiredFilesystemSemanticsAsync(basePath);
-            var relativePathComparer = basePathSemantics.Comparer;
+            if (!string.IsNullOrEmpty(basePath))
+            {
+                audiobook.BasePath = basePath;
+                await _repo.UpdateAsync(audiobook);
+            }
 
             foreach (var filePath in foundFiles)
             {
                 try
                 {
                     var relativePath = Path.GetRelativePath(basePath, filePath);
-
-                    var existing = existingFilesList.FirstOrDefault(f =>
-                        f.Path != null && relativePathComparer.Equals(f.Path, relativePath));
-                    if (existing != null)
-                    {
-                        _logger.LogInformation("Skipping existing AudiobookFile for audiobook {AudiobookId}: {Path}", audiobook.Id, relativePath);
-                        continue;
-                    }
 
                     AudioMetadata? meta = null;
                     try
@@ -138,33 +139,38 @@ namespace Listenarr.Api.Features.Library
                         _logger.LogWarning(mex, "Failed to extract metadata for file {File}", filePath);
                     }
 
-                    var fileRecord = new AudiobookFile
-                    {
-                        AudiobookId = audiobook.Id,
-                        Path = relativePath,
-                        Size = _fileSystem.GetFileLength(filePath),
-                        Source = "scan",
-                        CreatedAt = DateTime.UtcNow,
-                        DurationSeconds = meta?.Duration.TotalSeconds,
-                        Format = meta?.Format,
-                        Bitrate = meta?.BitRate,
-                        SampleRate = meta?.SampleRate,
-                        Channels = meta?.Channels
-                    };
+                    var fileRecord = AudiobookFile.CreateUnresolved(relativePath);
+                    fileRecord.AudiobookId = audiobook.Id;
+                    fileRecord.Size = _fileSystem.GetFileLength(filePath);
+                    fileRecord.Source = "scan";
+                    fileRecord.CreatedAt = DateTime.UtcNow;
+                    fileRecord.DurationSeconds = meta?.Duration.TotalSeconds;
+                    fileRecord.Format = meta?.Format;
+                    fileRecord.Bitrate = meta?.BitRate;
+                    fileRecord.SampleRate = meta?.SampleRate;
+                    fileRecord.Channels = meta?.Channels;
 
-                    await audioFileRepository.AddAsync(fileRecord);
-                    created.Add(fileRecord);
+                    var claim = await audioFileService.ClaimAudiobookFileAsync(
+                        audiobook,
+                        fileRecord,
+                        filePath);
+                    if (claim.Created)
+                    {
+                        created.Add(fileRecord);
+                    }
+                    else
+                    {
+                        _logger.LogInformation(
+                            "Skipping audiobook file claim for audiobook {AudiobookId}: {Path}. Outcome={Outcome}",
+                            audiobook.Id,
+                            relativePath,
+                            claim.Outcome);
+                    }
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException && ex is not OutOfMemoryException && ex is not StackOverflowException)
                 {
                     _logger.LogWarning(ex, "Failed to create AudiobookFile for {File}", filePath);
                 }
-            }
-
-            if (!string.IsNullOrEmpty(basePath))
-            {
-                audiobook.BasePath = basePath;
-                await _repo.UpdateAsync(audiobook);
             }
 
             foreach (var historyEntry in created.Select(fileRecord => new History
@@ -220,6 +226,11 @@ namespace Listenarr.Api.Features.Library
                         {
                             try
                             {
+                                if (_fileSystem.IsReparsePoint(file))
+                                {
+                                    continue;
+                                }
+
                                 var ext = Path.GetExtension(file);
                                 if (!exts.Contains(ext, StringComparer.OrdinalIgnoreCase)) continue;
                                 var fname = Path.GetFileNameWithoutExtension(file);
@@ -241,7 +252,10 @@ namespace Listenarr.Api.Features.Library
 
                         foreach (var sub in _fileSystem.EnumerateDirectories(normalizedDir))
                         {
-                            dirs.Push(sub);
+                            if (!_fileSystem.IsReparsePoint(sub))
+                            {
+                                dirs.Push(sub);
+                            }
                         }
                     }
                     catch (IOException ioEx)
@@ -295,11 +309,44 @@ namespace Listenarr.Api.Features.Library
                 var allExistingFiles = await audioFileRepository.GetByAudiobookIdAsync(audiobook.Id);
 
                 var foundSet = new HashSet<string>(
-                    foundFiles.Select(f => Path.GetRelativePath(basePath, f)),
+                    foundFiles.Select(file => FileSystemPathIdentity.Canonicalize(
+                        file,
+                        basePathSemantics.Syntax)),
                     basePathSemantics.Comparer);
-                var toRemove = allExistingFiles
-                    .Where(f => f.Path != null && FileUtils.IsAudioFile(f.Path) && !foundSet.Contains(f.Path))
-                    .ToList();
+                var toRemove = new List<AudiobookFile>();
+                foreach (var existingFile in allExistingFiles
+                    .Where(file => !string.IsNullOrWhiteSpace(file.Path))
+                    .Where(file => FileUtils.IsAudioFile(file.Path!)))
+                {
+                    string fullPath;
+                    if (FileSystemPathIdentity.TryDetectAbsoluteSyntax(
+                            existingFile.Path!,
+                            out var pathSyntax))
+                    {
+                        if (pathSyntax != basePathSemantics.Syntax)
+                        {
+                            continue;
+                        }
+
+                        fullPath = FileSystemPathIdentity.Canonicalize(
+                            existingFile.Path!,
+                            basePathSemantics.Syntax);
+                    }
+                    else if (!FileSystemPathIdentity.TryResolveRelativePathWithinBase(
+                                 basePath,
+                                 existingFile.Path!,
+                                 basePathSemantics,
+                                 out fullPath))
+                    {
+                        // Retain malformed or ambiguous legacy rows for operator resolution.
+                        continue;
+                    }
+
+                    if (!foundSet.Contains(fullPath))
+                    {
+                        toRemove.Add(existingFile);
+                    }
+                }
 
                 foreach (var rem in toRemove)
                 {
@@ -350,25 +397,20 @@ namespace Listenarr.Api.Features.Library
                 {
                     if (_fileSystem.FileExists(audiobook.FilePath))
                     {
-                        var existingFileRecord = await audioFileRepository.ExistsAtPathAsync(audiobook.Id, audiobook.FilePath!);
-
-                        if (!existingFileRecord)
+                        try
                         {
-                            try
+                            using var afScope = _scopeFactory.CreateScope();
+                            var audioFileService = afScope.ServiceProvider.GetRequiredService<IAudiobookFileService>();
+                            var migrated = await audioFileService.EnsureAudiobookFileAsync(audiobook, audiobook.FilePath, "scan-legacy");
+                            if (migrated)
                             {
-                                using var afScope = _scopeFactory.CreateScope();
-                                var audioFileService = afScope.ServiceProvider.GetRequiredService<IAudiobookFileService>();
-                                var migrated = await audioFileService.EnsureAudiobookFileAsync(audiobook, audiobook.FilePath, "scan-legacy");
-                                if (migrated)
-                                {
-                                    _logger.LogInformation("Migrated legacy filePath to AudiobookFile record for audiobook {AudiobookId}: {Path}", audiobook.Id, audiobook.FilePath);
-                                    created.Add(new AudiobookFile { Path = audiobook.FilePath });
-                                }
+                                _logger.LogInformation("Migrated legacy filePath to AudiobookFile record for audiobook {AudiobookId}: {Path}", audiobook.Id, audiobook.FilePath);
+                                created.Add(AudiobookFile.CreateUnresolved(audiobook.FilePath));
                             }
-                            catch (Exception ex) when (ex is not OperationCanceledException && ex is not OutOfMemoryException && ex is not StackOverflowException)
-                            {
-                                _logger.LogWarning(ex, "Failed to migrate legacy filePath for audiobook {AudiobookId}: {Path}", audiobook.Id, audiobook.FilePath);
-                            }
+                        }
+                        catch (Exception ex) when (ex is not OperationCanceledException && ex is not OutOfMemoryException && ex is not StackOverflowException)
+                        {
+                            _logger.LogWarning(ex, "Failed to migrate legacy filePath for audiobook {AudiobookId}: {Path}", audiobook.Id, audiobook.FilePath);
                         }
                     }
                     else

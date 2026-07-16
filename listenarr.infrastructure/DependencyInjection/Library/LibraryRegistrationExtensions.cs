@@ -9,6 +9,7 @@
  */
 using Listenarr.Application.Audiobooks.RootFolders;
 using Listenarr.Infrastructure.Library.Realtime;
+using Listenarr.Infrastructure.Persistence;
 using Listenarr.Infrastructure.Persistence.Repositories;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
@@ -26,6 +27,8 @@ internal static class LibraryRegistrationExtensions
         services.AddSingleton<IRootFolderRelocationService, RootFolderRelocationService>();
         services.AddSingleton<IMoveCleanupBoundaryResolver, MoveCleanupBoundaryResolver>();
         services.AddSingleton<IMoveQueueService, MoveQueueService>();
+        services.AddScoped<IAudiobookFilePathIdentityResolver, AudiobookFilePathIdentityResolver>();
+        services.AddScoped<IAudiobookFileIdentityReconciler, AudiobookFileIdentityReconciler>();
         services.AddScoped<IAudiobookFileService, AudiobookFileService>();
         services.AddScoped<IAuthorCatalogService, AuthorCatalogService>();
         services.AddScoped<ISeriesCatalogService, SeriesCatalogService>();

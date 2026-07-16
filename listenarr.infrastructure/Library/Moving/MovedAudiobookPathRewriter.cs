@@ -17,7 +17,8 @@ internal static class MovedAudiobookPathRewriter
         FileSystemPathSemantics targetSemantics,
         IAudiobookRepository audiobookRepository,
         ILogger logger,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        FileSystemCaseSensitivityMode targetCaseSensitivityMode = FileSystemCaseSensitivityMode.Auto)
     {
         ArgumentNullException.ThrowIfNull(audiobookRepository);
         ArgumentNullException.ThrowIfNull(logger);
@@ -31,11 +32,21 @@ internal static class MovedAudiobookPathRewriter
                 target,
                 sourceSemantics,
                 targetSemantics,
-                cancellationToken);
+                cancellationToken,
+                targetCaseSensitivityMode);
         }
         catch (AudiobookPathRewriteException exception)
         {
             throw new MoveNeedsAttentionException(exception.Message);
+        }
+        catch (UniqueConstraintViolationException exception)
+        {
+            logger.LogWarning(
+                exception,
+                "Moved audiobook {AudiobookId} could not publish file ownership identities",
+                audiobookId);
+            throw new MoveNeedsAttentionException(
+                "The moved audiobook file identity conflicts with an existing ownership record.");
         }
 
         if (!rewritten)

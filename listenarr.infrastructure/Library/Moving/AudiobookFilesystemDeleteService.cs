@@ -108,6 +108,8 @@ namespace Listenarr.Infrastructure.Library.Moving
 
             try
             {
+                FileSystemPathSemantics? bestSemantics = null;
+                var bestRootLength = -1;
                 foreach (var root in await _rootFolderService.GetAllAsync())
                 {
                     if (string.IsNullOrWhiteSpace(root.Path))
@@ -118,14 +120,28 @@ namespace Listenarr.Infrastructure.Library.Moving
                     var rootResolution = await _semanticsResolver.ResolveAsync(
                         root.Path,
                         root.CaseSensitivityMode);
-                    if (rootResolution.State == PathIdentityState.Valid
-                        && FileSystemPathIdentity.IsSameOrInside(
+                    if (rootResolution.State != PathIdentityState.Valid
+                        || !FileSystemPathIdentity.IsSameOrInside(
                             boundaryPath,
                             root.Path,
                             rootResolution.Semantics))
                     {
-                        return rootResolution.Semantics;
+                        continue;
                     }
+
+                    var canonicalRoot = FileSystemPathIdentity.Canonicalize(
+                        root.Path,
+                        rootResolution.Semantics.Syntax);
+                    if (canonicalRoot.Length > bestRootLength)
+                    {
+                        bestSemantics = rootResolution.Semantics;
+                        bestRootLength = canonicalRoot.Length;
+                    }
+                }
+
+                if (bestSemantics.HasValue)
+                {
+                    return bestSemantics.Value;
                 }
             }
             catch (Exception exception) when (exception is not (OperationCanceledException or OutOfMemoryException or StackOverflowException))

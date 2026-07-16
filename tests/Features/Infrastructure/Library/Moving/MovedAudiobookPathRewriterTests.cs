@@ -30,4 +30,33 @@ public sealed class MovedAudiobookPathRewriterTests
 
         Assert.Contains("could not be mapped", exception.Message, StringComparison.OrdinalIgnoreCase);
     }
+
+    [Fact]
+    public async Task RewriteAsync_OwnershipConstraintConflict_RequiresOperatorAttention()
+    {
+        var repository = new Mock<IAudiobookRepository>();
+        repository.Setup(candidate => candidate.RewritePathReferencesAsync(
+                42,
+                It.IsAny<string>(),
+                It.IsAny<string>(),
+                It.IsAny<FileSystemPathSemantics>(),
+                It.IsAny<FileSystemPathSemantics>(),
+                It.IsAny<CancellationToken>()))
+            .ThrowsAsync(new UniqueConstraintViolationException(
+                "Ownership conflict.",
+                new InvalidOperationException("UNIQUE constraint failed.")));
+
+        var exception = await Assert.ThrowsAsync<MoveNeedsAttentionException>(() =>
+            MovedAudiobookPathRewriter.RewriteAsync(
+                42,
+                Path.GetFullPath("source"),
+                Path.GetFullPath("target"),
+                FileSystemPathSemantics.CurrentHostDefault,
+                FileSystemPathSemantics.CurrentHostDefault,
+                repository.Object,
+                Mock.Of<ILogger>(),
+                CancellationToken.None));
+
+        Assert.Contains("ownership", exception.Message, StringComparison.OrdinalIgnoreCase);
+    }
 }

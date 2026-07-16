@@ -4,6 +4,61 @@ namespace Listenarr.Infrastructure.Persistence.Repositories;
 
 public partial class AudiobookRepository
 {
+    public async Task<bool> TryUpdateBasePathAsync(
+        int audiobookId,
+        string expectedBasePath,
+        string newBasePath,
+        CancellationToken ct = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(expectedBasePath);
+        ArgumentException.ThrowIfNullOrWhiteSpace(newBasePath);
+
+        if (_db.Database.IsRelational())
+        {
+            var affected = await _db.Audiobooks
+                .Where(audiobook => audiobook.Id == audiobookId
+                    && audiobook.BasePath == expectedBasePath)
+                .ExecuteUpdateAsync(
+                    updates => updates.SetProperty(
+                        audiobook => audiobook.BasePath,
+                        newBasePath),
+                    ct);
+            if (affected == 1)
+            {
+                SynchronizeTrackedBasePath(audiobookId, newBasePath);
+                return true;
+            }
+
+            return false;
+        }
+
+        var currentBasePath = await _db.Audiobooks
+            .AsNoTracking()
+            .Where(audiobook => audiobook.Id == audiobookId)
+            .Select(audiobook => audiobook.BasePath)
+            .SingleOrDefaultAsync(ct);
+        if (!string.Equals(currentBasePath, expectedBasePath, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        var entry = _db.ChangeTracker.Entries<Audiobook>()
+            .FirstOrDefault(candidate => candidate.Entity.Id == audiobookId);
+        if (entry == null)
+        {
+            entry = _db.Attach(new Audiobook
+            {
+                Id = audiobookId,
+                BasePath = expectedBasePath
+            });
+        }
+
+        entry.Property(audiobook => audiobook.BasePath).CurrentValue = newBasePath;
+        entry.Property(audiobook => audiobook.BasePath).IsModified = true;
+        await _db.SaveChangesAsync(ct);
+        return true;
+    }
+
     public async Task<bool> UpdateAsync(Audiobook audiobook)
     {
         ArgumentNullException.ThrowIfNull(audiobook);
@@ -37,6 +92,21 @@ public partial class AudiobookRepository
         // completed move from another DbContext.
         await _db.SaveChangesAsync();
         return true;
+    }
+
+    private void SynchronizeTrackedBasePath(int audiobookId, string newBasePath)
+    {
+        var trackedEntry = _db.ChangeTracker.Entries<Audiobook>()
+            .FirstOrDefault(entry => entry.Entity.Id == audiobookId);
+        if (trackedEntry == null)
+        {
+            return;
+        }
+
+        var property = trackedEntry.Property(audiobook => audiobook.BasePath);
+        property.CurrentValue = newBasePath;
+        property.OriginalValue = newBasePath;
+        property.IsModified = false;
     }
 
     public async Task<bool> UpdateWithIdentifierReplaceAsync(

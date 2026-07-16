@@ -12,7 +12,8 @@ internal static class AudiobookPathReferenceRewriter
         string? sourceBasePath,
         string targetBasePath,
         FileSystemPathSemantics sourceSemantics,
-        FileSystemPathSemantics targetSemantics)
+        FileSystemPathSemantics targetSemantics,
+        FileSystemCaseSensitivityMode targetCaseSensitivityMode = FileSystemCaseSensitivityMode.Auto)
     {
         ArgumentNullException.ThrowIfNull(audiobook);
         ArgumentException.ThrowIfNullOrWhiteSpace(targetBasePath);
@@ -26,7 +27,7 @@ internal static class AudiobookPathReferenceRewriter
 
         var filePath = audiobook.FilePath;
         var imageUrl = audiobook.ImageUrl;
-        var rewrittenFiles = new List<(AudiobookFile File, string? Path)>();
+        var rewrittenFiles = new List<(AudiobookFile File, string Path, AudiobookFilePathIdentity Identity)>();
 
         if (!string.IsNullOrWhiteSpace(sourceBasePath))
         {
@@ -45,12 +46,38 @@ internal static class AudiobookPathReferenceRewriter
 
             foreach (var file in audiobook.Files ?? [])
             {
-                rewrittenFiles.Add((file, RewriteAbsoluteReference(
+                var rewrittenPath = RewriteAbsoluteReference(
                     file.Path,
                     sourceBasePath,
                     targetBasePath,
                     sourceSemantics,
-                    targetSemantics)));
+                    targetSemantics);
+                if (string.IsNullOrWhiteSpace(rewrittenPath))
+                {
+                    throw new AudiobookPathRewriteException(
+                        "A tracked audiobook file path is missing and cannot be rewritten.");
+                }
+
+                var isRelative = !FileSystemPathIdentity.TryDetectAbsoluteSyntax(
+                    file.Path ?? string.Empty,
+                    out _);
+                var isAlreadyUnderTarget = IsSameOrInside(
+                    rewrittenPath,
+                    targetBasePath,
+                    targetSemantics);
+                if (isRelative
+                    || !StoredPathsMatch(file.Path!, rewrittenPath)
+                    || isAlreadyUnderTarget)
+                {
+                    rewrittenFiles.Add((
+                        file,
+                        rewrittenPath,
+                        CreateTargetIdentity(
+                            rewrittenPath,
+                            targetBasePath,
+                            targetSemantics,
+                            targetCaseSensitivityMode)));
+                }
             }
         }
 
@@ -58,9 +85,9 @@ internal static class AudiobookPathReferenceRewriter
         // one bad stored value cannot leave the audiobook half-rebased.
         audiobook.FilePath = filePath;
         audiobook.ImageUrl = imageUrl;
-        foreach (var (file, path) in rewrittenFiles)
+        foreach (var (file, path, identity) in rewrittenFiles)
         {
-            file.Path = path;
+            file.ApplyPathIdentity(path, identity);
         }
 
         audiobook.BasePath = targetBasePath;
@@ -105,6 +132,22 @@ internal static class AudiobookPathReferenceRewriter
             currentPath,
             FileUtils.NormalizeStoredPath(expectedPath),
             StringComparison.Ordinal);
+
+    private static bool IsSameOrInside(
+        string path,
+        string basePath,
+        FileSystemPathSemantics semantics)
+    {
+        try
+        {
+            return FileSystemPathIdentity.IsSameOrInside(path, basePath, semantics);
+        }
+        catch (Exception exception) when (exception is
+            ArgumentException or NotSupportedException or PathTooLongException or System.Security.SecurityException)
+        {
+            return false;
+        }
+    }
 
     private static bool PathsMatch(
         string path,
@@ -181,6 +224,42 @@ internal static class AudiobookPathReferenceRewriter
         }
 
         return rewrittenPath;
+    }
+
+    private static AudiobookFilePathIdentity CreateTargetIdentity(
+        string storedPath,
+        string targetBasePath,
+        FileSystemPathSemantics targetSemantics,
+        FileSystemCaseSensitivityMode targetCaseSensitivityMode)
+    {
+        string absolutePath;
+        if (FileSystemPathIdentity.TryDetectAbsoluteSyntax(storedPath, out var syntax))
+        {
+            if (syntax != targetSemantics.Syntax)
+            {
+                throw new AudiobookPathRewriteException(
+                    "A rewritten audiobook file path uses a different filesystem syntax than the target root.");
+            }
+
+            absolutePath = FileSystemPathIdentity.Canonicalize(
+                storedPath,
+                targetSemantics.Syntax);
+        }
+        else if (!FileSystemPathIdentity.TryResolveRelativePathWithinBase(
+                     targetBasePath,
+                     storedPath,
+                     targetSemantics,
+                     out absolutePath))
+        {
+            throw new AudiobookPathRewriteException(
+                "A relative audiobook file path could not be resolved within the target base path.");
+        }
+
+        return AudiobookFilePathIdentity.CreateValid(
+            absolutePath,
+            targetSemantics,
+            targetCaseSensitivityMode,
+            targetBasePath);
     }
 
     private static bool IsRemoteUri(string value) =>

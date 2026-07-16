@@ -205,6 +205,50 @@ public static partial class FileSystemPathIdentity
         return $"v{version}:{scope}:{sensitivity}:{digest}";
     }
 
+    public static string CreateLookupKey(
+        string scope,
+        string path,
+        FileSystemPathSyntax syntax,
+        int version = 1)
+    {
+        if (version < 1)
+        {
+            throw new ArgumentOutOfRangeException(nameof(version));
+        }
+
+        ArgumentException.ThrowIfNullOrWhiteSpace(scope);
+        var canonical = Canonicalize(path, syntax).ToUpperInvariant();
+        var digest = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(canonical)));
+        var syntaxToken = syntax == FileSystemPathSyntax.Windows ? "w" : "u";
+        return $"v{version}:{scope}:lookup:{syntaxToken}:{digest}";
+    }
+
+    public static bool TryDetectAbsoluteSyntax(
+        string path,
+        out FileSystemPathSyntax syntax)
+    {
+        syntax = default;
+        if (string.IsNullOrWhiteSpace(path))
+        {
+            return false;
+        }
+
+        if (WindowsDrivePattern.IsMatch(path)
+            || path.StartsWith("\\\\", StringComparison.Ordinal))
+        {
+            syntax = FileSystemPathSyntax.Windows;
+            return true;
+        }
+
+        if (path.StartsWith("/", StringComparison.Ordinal))
+        {
+            syntax = FileSystemPathSyntax.Unix;
+            return true;
+        }
+
+        return false;
+    }
+
     public static bool TryResolveRelativePathWithinBase(
         string basePath,
         string relativePath,

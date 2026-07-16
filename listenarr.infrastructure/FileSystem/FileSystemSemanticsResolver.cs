@@ -24,7 +24,7 @@ public sealed class FileSystemSemanticsResolver : IFileSystemSemanticsResolver
         var syntax = OperatingSystem.IsWindows()
             ? FileSystemPathSyntax.Windows
             : FileSystemPathSyntax.Unix;
-        var fullPath = Path.GetFullPath(path);
+        var fullPath = FileUtils.NormalizeStoredPath(path);
 
         if (mode != FileSystemCaseSensitivityMode.Auto)
         {
@@ -34,7 +34,8 @@ public sealed class FileSystemSemanticsResolver : IFileSystemSemanticsResolver
             return ValueTask.FromResult(new FileSystemSemanticsResolution(
                 new FileSystemPathSemantics(syntax, explicitSensitivity),
                 PathIdentityState.Valid,
-                FindExistingBoundary(fullPath) ?? Path.GetPathRoot(fullPath) ?? fullPath));
+                FindExistingBoundary(fullPath) ?? Path.GetPathRoot(fullPath) ?? fullPath,
+                CanonicalPath: fullPath));
         }
 
         var boundary = FindExistingBoundary(fullPath);
@@ -45,7 +46,7 @@ public sealed class FileSystemSemanticsResolver : IFileSystemSemanticsResolver
 
         if (_cache.TryGetValue(boundary, out var cached))
         {
-            return ValueTask.FromResult(cached);
+            return ValueTask.FromResult(cached with { CanonicalPath = fullPath });
         }
 
         // Probe inside the boundary whose semantics were requested. Looking up the
@@ -57,7 +58,7 @@ public sealed class FileSystemSemanticsResolver : IFileSystemSemanticsResolver
             _cache[boundary] = resolved;
         }
 
-        return ValueTask.FromResult(resolved);
+        return ValueTask.FromResult(resolved with { CanonicalPath = fullPath });
     }
 
     private static FileSystemSemanticsResolution Probe(
@@ -127,7 +128,8 @@ public sealed class FileSystemSemanticsResolver : IFileSystemSemanticsResolver
             new FileSystemPathSemantics(syntax, FileSystemCaseSensitivity.Unknown),
             PathIdentityState.Unavailable,
             boundary,
-            reason);
+            reason,
+            boundary);
     }
 
     private static void TryDeleteProbe(string path)

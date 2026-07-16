@@ -79,11 +79,32 @@ namespace Listenarr.Tests.Features.Api.Features.Downloads
             return scanMock;
         }
 
-        public ManualImportController GetController(Audiobook book, ApplicationSettings settings, Mock<IAudiobookRepository> repoMock = null, Mock<IScanQueueService> scanMock = null, IFileMover fileMover = null)
+        public ManualImportController GetController(
+            Audiobook book,
+            ApplicationSettings settings,
+            Mock<IAudiobookRepository> repoMock = null,
+            Mock<IScanQueueService> scanMock = null,
+            IFileMover fileMover = null,
+            IAudiobookFileService audiobookFileService = null,
+            IReadOnlyList<RootFolder> rootFolders = null,
+            IFileSystemSemanticsResolver semanticsResolver = null)
         {
             repoMock ??= GetRepoMock(book);
             scanMock ??= GetScanMock();
             fileMover ??= new FileMover(Mock.Of<Microsoft.Extensions.Logging.ILogger<FileMover>>());
+            if (audiobookFileService == null)
+            {
+                var audiobookFileServiceMock = new Mock<IAudiobookFileService>();
+                audiobookFileServiceMock
+                    .Setup(service => service.CheckAudiobookFileOwnershipAsync(
+                        It.IsAny<Audiobook>(),
+                        It.IsAny<string>(),
+                        It.IsAny<string>(),
+                        It.IsAny<CancellationToken>()))
+                    .ReturnsAsync(new AudiobookFileOwnershipCheckResult(
+                        AudiobookFileOwnershipCheckOutcome.Available));
+                audiobookFileService = audiobookFileServiceMock.Object;
+            }
 
             var metadataMock = new Mock<IMetadataService>();
             metadataMock.Setup(m => m.ExtractFileMetadataAsync(It.IsAny<string>()))
@@ -111,7 +132,9 @@ namespace Listenarr.Tests.Features.Api.Features.Downloads
             configMock.Setup(c => c.GetApplicationSettingsAsync()).ReturnsAsync(settings);
 
             var rootFolderMock = new Mock<IRootFolderService>();
-            rootFolderMock.Setup(r => r.GetAllAsync()).ReturnsAsync(new System.Collections.Generic.List<RootFolder>());
+            rootFolderMock.Setup(r => r.GetAllAsync()).ReturnsAsync(
+                rootFolders?.ToList() ?? []);
+            semanticsResolver ??= new FileSystemSemanticsResolver();
 
             return new ManualImportController(
                 Mock.Of<Microsoft.Extensions.Logging.ILogger<ManualImportController>>(),
@@ -122,8 +145,10 @@ namespace Listenarr.Tests.Features.Api.Features.Downloads
                 scanMock.Object,
                 rootFolderMock.Object,
                 fileMover,
+                audiobookFileService,
                 new LocalFileSystem(),
-                new FileSystemSemanticsResolver(),
+                semanticsResolver,
+                new FilesystemMutationCoordinator(),
                 _operationCoordinator
             );
         }
@@ -164,6 +189,138 @@ namespace Listenarr.Tests.Features.Api.Features.Downloads
             Assert.Contains(diskFiles, f => f.Equals("Batch Book.mp3", StringComparison.OrdinalIgnoreCase) || f.StartsWith("Batch Book"));
             // Expect at least two files (the second should be suffixed)
             Assert.True(diskFiles.Count >= 2, "Expected at least two files in destination (one suffixed for the collision)");
+        }
+
+        [Fact]
+        public async Task InteractiveManualImport_NestedRootUsesMostSpecificDestinationSemantics()
+        {
+            var outerRoot = CreateTempDirectory("listenarr-manual-semantics-outer");
+            var innerRoot = Path.Join(outerRoot, "Sensitive Library");
+            var bookPath = Path.Join(innerRoot, "Book");
+            Directory.CreateDirectory(bookPath);
+            var sourceDir = CreateTempDirectory("listenarr-manual-semantics-source");
+            var sourceFile = Path.Join(sourceDir, "chapter.mp3");
+            await File.WriteAllTextAsync(sourceFile, "audio");
+            var roots = new List<RootFolder>
+            {
+                new()
+                {
+                    Id = 1,
+                    Name = "A Outer",
+                    Path = outerRoot,
+                    CaseSensitivityMode = FileSystemCaseSensitivityMode.Insensitive
+                },
+                new()
+                {
+                    Id = 2,
+                    Name = "Z Inner",
+                    Path = innerRoot,
+                    CaseSensitivityMode = FileSystemCaseSensitivityMode.Sensitive
+                }
+            };
+            var resolver = new RecordingSemanticsResolver(new FileSystemSemanticsResolver());
+            var book = new Audiobook
+            {
+                Id = 44,
+                Title = "Semantics Book",
+                BasePath = bookPath
+            };
+            var controller = GetController(
+                book,
+                new ApplicationSettings
+                {
+                    OutputPath = outerRoot,
+                    FolderNamingPattern = "",
+                    FileNamingPattern = "{Title}"
+                },
+                rootFolders: roots,
+                semanticsResolver: resolver);
+            var request = new ManualImportRequestDto
+            {
+                Path = sourceDir,
+                Mode = "interactive",
+                Action = FileAction.None,
+                Items =
+                [
+                    new ManualImportItemDto
+                    {
+                        FullPath = sourceFile,
+                        MatchedAudiobookId = book.Id
+                    }
+                ]
+            };
+
+            await controller.Start(request);
+
+            Assert.Contains(
+                resolver.Calls,
+                call => string.Equals(call.Path, bookPath, StringComparison.Ordinal)
+                    && call.Mode == FileSystemCaseSensitivityMode.Sensitive);
+        }
+
+        [Fact]
+        public async Task InteractiveManualImport_OwnershipConflict_DoesNotMutateFilesystem()
+        {
+            var destinationRoot = CreateTempDirectory("listenarr-manual-owner-conflict-dest");
+            var sourceDir = CreateTempDirectory("listenarr-manual-owner-conflict-src");
+            var sourceFile = Path.Join(sourceDir, "chapter.mp3");
+            await File.WriteAllTextAsync(sourceFile, "source");
+
+            var book = new Audiobook
+            {
+                Id = 43,
+                Title = "Owned Destination",
+                BasePath = destinationRoot
+            };
+            var fileMover = new Mock<IFileMover>(MockBehavior.Strict);
+            var audiobookFileService = new Mock<IAudiobookFileService>(MockBehavior.Strict);
+            audiobookFileService
+                .Setup(service => service.CheckAudiobookFileOwnershipAsync(
+                    book,
+                    It.IsAny<string>(),
+                    It.IsAny<string>(),
+                    It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new AudiobookFileOwnershipCheckResult(
+                    AudiobookFileOwnershipCheckOutcome.OwnedByOtherAudiobook,
+                    Reason: "The destination belongs to another audiobook."));
+
+            var controller = GetController(
+                book,
+                new ApplicationSettings
+                {
+                    OutputPath = destinationRoot,
+                    FolderNamingPattern = "",
+                    FileNamingPattern = "{Title}"
+                },
+                fileMover: fileMover.Object,
+                audiobookFileService: audiobookFileService.Object);
+            var request = new ManualImportRequestDto
+            {
+                Path = sourceDir,
+                Mode = "interactive",
+                Action = FileAction.Copy,
+                Items =
+                [
+                    new ManualImportItemDto
+                    {
+                        FullPath = sourceFile,
+                        MatchedAudiobookId = book.Id
+                    }
+                ]
+            };
+
+            var action = await controller.Start(request);
+
+            Assert.IsType<Microsoft.AspNetCore.Mvc.OkObjectResult>(action.Result);
+            Assert.True(File.Exists(sourceFile));
+            Assert.Empty(Directory.GetFiles(destinationRoot, "*", SearchOption.AllDirectories));
+            fileMover.Verify(
+                mover => mover.PerformActionOn(
+                    It.IsAny<FileAction>(),
+                    It.IsAny<string>(),
+                    It.IsAny<string>()),
+                Times.Never);
+            audiobookFileService.VerifyAll();
         }
 
         [Fact]
@@ -524,6 +681,21 @@ namespace Listenarr.Tests.Features.Api.Features.Downloads
             Assert.DoesNotContain("Jack of Shadows-02.mp3", srcFiles);
             Assert.DoesNotContain("Jack of Shadows-03.mp3", srcFiles);
             Assert.DoesNotContain("Jack of Shadows-01 (1).mp3", srcFiles, StringComparer.OrdinalIgnoreCase);
+        }
+
+        private sealed class RecordingSemanticsResolver(
+            IFileSystemSemanticsResolver inner) : IFileSystemSemanticsResolver
+        {
+            public List<(string Path, FileSystemCaseSensitivityMode Mode)> Calls { get; } = [];
+
+            public ValueTask<FileSystemSemanticsResolution> ResolveAsync(
+                string path,
+                FileSystemCaseSensitivityMode mode = FileSystemCaseSensitivityMode.Auto,
+                CancellationToken cancellationToken = default)
+            {
+                Calls.Add((path, mode));
+                return inner.ResolveAsync(path, mode, cancellationToken);
+            }
         }
     }
 }

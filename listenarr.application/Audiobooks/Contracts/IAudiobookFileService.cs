@@ -12,7 +12,24 @@ namespace Listenarr.Application.Audiobooks.Contracts
         /// <param name="audiobook">The audiobook</param>
         /// <param name="filePath">Path to the audio file</param>
         /// <param name="source">Optional source identifier (e.g., "scan", "import")</param>
-        /// <returns>True if the audiobook is associated with an audiobook file, false otherwise</returns>
-        Task<bool> EnsureAudiobookFileAsync(Audiobook audiobook, string filePath, string? source = "scan");
+        /// <param name="cancellationToken">Cancellation token.</param>
+        /// <returns>True when a new ownership row was created; false when the file was already owned or could not be claimed.</returns>
+        Task<bool> EnsureAudiobookFileAsync(
+            Audiobook audiobook,
+            string filePath,
+            string? source = "scan",
+            CancellationToken cancellationToken = default);
+
+        Task<AudiobookFileOwnershipCheckResult> CheckAudiobookFileOwnershipAsync(
+            Audiobook audiobook,
+            string plannedPhysicalPath,
+            string? plannedBasePath = null,
+            CancellationToken cancellationToken = default);
+
+        Task<AudiobookFileClaimResult> ClaimAudiobookFileAsync(
+            Audiobook audiobook,
+            AudiobookFile file,
+            string physicalPath,
+            CancellationToken cancellationToken = default);
     }
 }

@@ -132,7 +132,8 @@ public sealed class AudiobookDestinationRewriteService : IAudiobookDestinationRe
             destination.Path,
             sourceSemantics,
             destination.TargetBoundary.Semantics,
-            cancellationToken);
+            cancellationToken,
+            destination.TargetBoundary.CaseSensitivityMode);
         if (!rewritten)
         {
             throw new ApplicationNotFoundException("audiobook_not_found", "Audiobook not found");
@@ -384,26 +385,32 @@ public sealed class AudiobookDestinationRewriteService : IAudiobookDestinationRe
 
     private static MoveRootBoundary? FindAllowedMoveRoot(
         string path,
-        IReadOnlyCollection<MoveRootBoundary> allowedRoots)
-    {
-        foreach (var root in allowedRoots)
-        {
-            try
-            {
-                if (FileSystemPathIdentity.IsSameOrInside(path, root.Path, root.Semantics))
-                {
-                    return root;
-                }
-            }
-            catch (Exception exception) when (exception is
-                ArgumentException or NotSupportedException or PathTooLongException or System.Security.SecurityException)
-            {
-                // Invalid legacy audiobook paths are repaired by the rewrite path below rather
-                // than being treated as a configured filesystem boundary.
-            }
-        }
+        IReadOnlyCollection<MoveRootBoundary> allowedRoots) =>
+        allowedRoots
+            .Where(root => IsInsideAllowedMoveRoot(path, root))
+            .OrderByDescending(root => FileSystemPathIdentity.Canonicalize(
+                root.Path,
+                root.Semantics.Syntax).Length)
+            .FirstOrDefault();
 
-        return null;
+    private static bool IsInsideAllowedMoveRoot(
+        string path,
+        MoveRootBoundary root)
+    {
+        try
+        {
+            return FileSystemPathIdentity.IsSameOrInside(
+                path,
+                root.Path,
+                root.Semantics);
+        }
+        catch (Exception exception) when (exception is
+            ArgumentException or NotSupportedException or PathTooLongException or System.Security.SecurityException)
+        {
+            // Invalid legacy audiobook paths are repaired by the rewrite path below rather
+            // than being treated as a configured filesystem boundary.
+            return false;
+        }
     }
 
     private sealed record MoveRootBoundary(

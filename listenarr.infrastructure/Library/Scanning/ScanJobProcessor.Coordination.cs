@@ -16,6 +16,7 @@ public partial class ScanJobProcessor
     private readonly IFileSystemSemanticsResolver _semanticsResolver;
     private readonly IMoveScanHandoffStore? _moveScanHandoffStore;
     private readonly TimeProvider _timeProvider;
+    private readonly IFilesystemMutationCoordinator _filesystemMutationCoordinator;
     private readonly IAudiobookOperationCoordinator _audiobookOperationCoordinator;
     private readonly IAudiobookUpdatePublisher? _audiobookUpdatePublisher;
 
@@ -26,6 +27,7 @@ public partial class ScanJobProcessor
         IHubContext<DownloadHub> hubContext,
         IAppMetricsService metrics,
         IFileSystemSemanticsResolver semanticsResolver,
+        IFilesystemMutationCoordinator filesystemMutationCoordinator,
         IAudiobookOperationCoordinator audiobookOperationCoordinator,
         IMoveScanHandoffStore? moveScanHandoffStore = null,
         TimeProvider? timeProvider = null,
@@ -39,6 +41,7 @@ public partial class ScanJobProcessor
         _semanticsResolver = semanticsResolver;
         _moveScanHandoffStore = moveScanHandoffStore;
         _timeProvider = timeProvider ?? TimeProvider.System;
+        _filesystemMutationCoordinator = filesystemMutationCoordinator ?? throw new ArgumentNullException(nameof(filesystemMutationCoordinator));
         _audiobookOperationCoordinator = audiobookOperationCoordinator ?? throw new ArgumentNullException(nameof(audiobookOperationCoordinator));
         _audiobookUpdatePublisher = audiobookUpdatePublisher;
     }
@@ -62,9 +65,11 @@ public partial class ScanJobProcessor
         void RegisterPostCompletionEffects(Func<CancellationToken, Task> effects) =>
             postCompletionEffects.Add(effects);
 
-        await _audiobookOperationCoordinator.ExecuteExclusiveAsync(
-            job.AudiobookId,
-            token => ProcessJobCoreAsync(job, RegisterPostCompletionEffects, token),
+        await _filesystemMutationCoordinator.ExecuteExclusiveAsync(
+            globalToken => _audiobookOperationCoordinator.ExecuteExclusiveAsync(
+                job.AudiobookId,
+                token => ProcessJobCoreAsync(job, RegisterPostCompletionEffects, token),
+                globalToken),
             cancellationToken);
 
         foreach (var effect in postCompletionEffects)

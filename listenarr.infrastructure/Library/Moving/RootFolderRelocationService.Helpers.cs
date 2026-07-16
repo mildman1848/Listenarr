@@ -385,7 +385,8 @@ public sealed partial class RootFolderRelocationService
                     sourceBasePath,
                     destinationBasePath,
                     sourceResolution.Semantics,
-                    targetSemantics);
+                    targetSemantics,
+                    relocation.TargetCaseSensitivityMode);
                 relocation.SkippedItems.Remove(skippedItem);
                 db.RootFolderRelocationSkippedItems.Remove(skippedItem);
                 resolvedCount++;

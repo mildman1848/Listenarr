@@ -240,6 +240,8 @@ namespace Listenarr.Infrastructure.Metadata.Jobs
             IRootFolderService rootFolderService,
             CancellationToken cancellationToken)
         {
+            FileSystemPathSemantics? bestSemantics = null;
+            var bestRootLength = -1;
             foreach (var root in await rootFolderService.GetAllAsync())
             {
                 cancellationToken.ThrowIfCancellationRequested();
@@ -252,14 +254,28 @@ namespace Listenarr.Infrastructure.Metadata.Jobs
                     root.Path,
                     root.CaseSensitivityMode,
                     cancellationToken);
-                if (rootResolution.State == PathIdentityState.Valid
-                    && FileSystemPathIdentity.IsSameOrInside(
+                if (rootResolution.State != PathIdentityState.Valid
+                    || !FileSystemPathIdentity.IsSameOrInside(
                         path,
                         root.Path,
                         rootResolution.Semantics))
                 {
-                    return rootResolution.Semantics;
+                    continue;
                 }
+
+                var canonicalRoot = FileSystemPathIdentity.Canonicalize(
+                    root.Path,
+                    rootResolution.Semantics.Syntax);
+                if (canonicalRoot.Length > bestRootLength)
+                {
+                    bestSemantics = rootResolution.Semantics;
+                    bestRootLength = canonicalRoot.Length;
+                }
+            }
+
+            if (bestSemantics.HasValue)
+            {
+                return bestSemantics.Value;
             }
 
             var resolution = await semanticsResolver.ResolveAsync(path, cancellationToken: cancellationToken);

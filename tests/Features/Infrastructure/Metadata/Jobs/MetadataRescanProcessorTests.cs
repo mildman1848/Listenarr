@@ -126,5 +126,47 @@ namespace Listenarr.Tests.Features.Infrastructure.Metadata.Jobs
                 Assert.Equal(audiobookPath, updated?.FilePath);
             }
         }
+
+        [Fact]
+        public async Task RunCycleAsync_NestedRootUsesMostSpecificSemanticsForLegacyPathCleanup()
+        {
+            var outerRoot = FileService.GetTempDirectory("metadata-rescan-nested-outer");
+            var innerRoot = Path.Join(outerRoot, "Sensitive Library");
+            Directory.CreateDirectory(innerRoot);
+            await _rootFolderRepository.AddAsync(new RootFolderBuilder()
+                .WithName("A Outer")
+                .WithPath(outerRoot)
+                .WithCaseSensitivityMode(FileSystemCaseSensitivityMode.Insensitive)
+                .Build());
+            await _rootFolderRepository.AddAsync(new RootFolderBuilder()
+                .WithName("Z Inner")
+                .WithPath(innerRoot)
+                .WithCaseSensitivityMode(FileSystemCaseSensitivityMode.Sensitive)
+                .Build());
+            var audiobookPath = Path.Join(innerRoot, "CaseBook", "book.txt");
+            var filePath = Path.Join(innerRoot, "casebook", "book.txt");
+            var audiobook = await _audiobookRepository.AddAsync(new AudiobookBuilder()
+                .WithTitle("Nested Case Book")
+                .WithFilePath(audiobookPath)
+                .Build());
+            var file = await _audiobookFileRepository.AddAsync(new AudiobookFileBuilder()
+                .WithAudiobook(audiobook)
+                .WithPath(filePath)
+                .Build());
+
+            var processor = new MetadataRescanProcessor(
+                _provider.GetRequiredService<IServiceScopeFactory>(),
+                _provider.GetRequiredService<IAudiobookOperationCoordinator>(),
+                NullLogger<MetadataRescanProcessor>.Instance);
+            await processor.RunCycleAsync(CancellationToken.None);
+
+            using var verificationScope = _provider.CreateScope();
+            var verificationAudiobooks = verificationScope.ServiceProvider.GetRequiredService<IAudiobookRepository>();
+            var verificationFiles = verificationScope.ServiceProvider.GetRequiredService<IAudiobookFileRepository>();
+            var updated = await verificationAudiobooks.GetByIdAsync(audiobook.Id);
+            var removed = await verificationFiles.GetByIdAsync(file.Id);
+            Assert.Null(removed);
+            Assert.Equal(audiobookPath, updated?.FilePath);
+        }
     }
 }

@@ -181,11 +181,11 @@ namespace Listenarr.Infrastructure.Persistence.Repositories
 
             var audiobooks = await ctx.Audiobooks
                 .Include(audiobook => audiobook.Files)
-                .Where(audiobook => audiobook.BasePath != null)
                 .ToListAsync(ct);
             var plannedRewrites = new List<(Audiobook Audiobook, string SourceBasePath, string TargetBasePath)>();
             foreach (var audiobook in audiobooks.Where(audiobook =>
-                FileSystemPathIdentity.IsSameOrInside(
+                !string.IsNullOrWhiteSpace(audiobook.BasePath)
+                && FileSystemPathIdentity.IsSameOrInside(
                     audiobook.BasePath!,
                     sourceRoot.Path,
                     sourceSemantics)))
@@ -235,9 +235,13 @@ namespace Listenarr.Infrastructure.Persistence.Repositories
                     rewrite.SourceBasePath,
                     rewrite.TargetBasePath,
                     sourceSemantics,
-                    targetSemantics);
+                    targetSemantics,
+                    targetRoot.CaseSensitivityMode);
             }
 
+            AudiobookFileOwnershipValidator.RejectDuplicateValidOwnership(
+                ctx.ChangeTracker.Entries<AudiobookFile>().Select(entry => entry.Entity),
+                "The root reassignment would assign the same filesystem identity to multiple audiobook files.");
             ctx.RootFolders.Remove(sourceRoot);
             await ctx.SaveChangesAsync(ct);
             if (transaction != null)

@@ -312,6 +312,50 @@ namespace Listenarr.Tests.Features.Api.Features.Library
         }
 
         [Fact]
+        public async Task FilesystemDelete_NestedRootUsesMostSpecificSemantics()
+        {
+            if (OperatingSystem.IsWindows())
+            {
+                return;
+            }
+
+            var outerRoot = FileService.GetTempDirectory("listenarr-delete-nested-outer");
+            var innerRoot = Path.Join(outerRoot, "Sensitive Library");
+            var bookFolder = Path.Join(innerRoot, "CaseBook");
+            var audioPath = Path.Join(bookFolder, "book.mp3");
+            Directory.CreateDirectory(bookFolder);
+            await File.WriteAllTextAsync(audioPath, "audio");
+            await _rootFolderRepository.AddAsync(new RootFolderBuilder()
+                .WithName("A Outer")
+                .WithPath(outerRoot)
+                .WithCaseSensitivityMode(FileSystemCaseSensitivityMode.Insensitive)
+                .Build());
+            await _rootFolderRepository.AddAsync(new RootFolderBuilder()
+                .WithName("Z Inner")
+                .WithPath(innerRoot)
+                .WithCaseSensitivityMode(FileSystemCaseSensitivityMode.Sensitive)
+                .Build());
+            var audiobook = await _audiobookRepository.AddAsync(new AudiobookBuilder()
+                .WithId(903)
+                .WithTitle("Nested Case Book")
+                .WithBasePath(bookFolder)
+                .WithFilePath(audioPath)
+                .Build());
+            await _audiobookRepository.AddAsync(new AudiobookBuilder()
+                .WithId(904)
+                .WithTitle("Other Nested Case Book")
+                .WithBasePath(Path.Join(innerRoot, "casebook"))
+                .Build());
+
+            var service = _provider.GetRequiredService<IAudiobookFilesystemDeleteService>();
+            var result = await service.DeleteAsync(audiobook, deleteFolder: true);
+
+            Assert.True(result.DeletedFolder, string.Join("; ", result.Warnings));
+            Assert.False(Directory.Exists(bookFolder));
+            Assert.False(File.Exists(audioPath));
+        }
+
+        [Fact]
         public async Task FilesystemDelete_RefusesWhenSemanticsCannotBeResolved()
         {
             var resolver = new Mock<IFileSystemSemanticsResolver>();

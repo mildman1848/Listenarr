@@ -1,0 +1,153 @@
+using Listenarr.Domain.Common;
+using Microsoft.Extensions.Logging;
+
+namespace Listenarr.Application.Audiobooks.Files;
+
+public partial class AudiobookFileService
+{
+    private async Task<AuthorizedClaimPath> ResolveAuthorizedClaimPathAsync(
+        Audiobook audiobook,
+        string physicalPath,
+        CancellationToken cancellationToken,
+        bool requireExistingFile = true)
+    {
+        try
+        {
+            var fileExists = fileSystem.FileExists(physicalPath);
+            if ((requireExistingFile && !fileExists)
+                || fileSystem.IsReparsePoint(physicalPath))
+            {
+                return AuthorizedClaimPath.Failed(
+                    "The audiobook file does not exist or is a linked filesystem entry.");
+            }
+
+            if (!FileUtils.IsAudioFile(physicalPath))
+            {
+                return AuthorizedClaimPath.Failed(
+                    "The claimed audiobook file is not a supported audio file.");
+            }
+
+            var candidatePath = ResolveAbsolutePath(physicalPath);
+            var basePath = ResolveAbsolutePath(audiobook.BasePath);
+            var existingDirectory = string.IsNullOrWhiteSpace(basePath)
+                ? ResolveStoredFileDirectory(audiobook)
+                : string.Empty;
+            var hasAuthorizationBoundary = !string.IsNullOrWhiteSpace(existingDirectory)
+                || !string.IsNullOrWhiteSpace(basePath);
+            if (!hasAuthorizationBoundary)
+            {
+                return AuthorizedClaimPath.Failed(
+                    "The audiobook has no authoritative folder for file ownership.");
+            }
+
+            var rootFolders = await GetRootFoldersForSemanticsAsync(cancellationToken);
+            var authorized = false;
+            if (!string.IsNullOrWhiteSpace(existingDirectory))
+            {
+                var existingSemantics = await ResolveLibrarySemanticsAsync(
+                    existingDirectory,
+                    rootFolders,
+                    cancellationToken);
+                authorized = existingSemantics != null
+                    && FileSystemPathIdentity.IsSameOrInside(
+                        candidatePath,
+                        existingDirectory,
+                        existingSemantics.Value);
+            }
+
+            if (!authorized && !string.IsNullOrWhiteSpace(basePath))
+            {
+                var baseSemantics = await ResolveLibrarySemanticsAsync(
+                    basePath,
+                    rootFolders,
+                    cancellationToken);
+                authorized = baseSemantics != null
+                    && FileSystemPathIdentity.IsSameOrInside(
+                        candidatePath,
+                        basePath,
+                        baseSemantics.Value);
+            }
+
+            if (!authorized)
+            {
+                return AuthorizedClaimPath.Failed(
+                    "The audiobook file is outside the authoritative audiobook folder.");
+            }
+
+            if (!fileSystem.TryValidateMutationTarget(
+                    candidatePath,
+                    [existingDirectory, basePath],
+                    out var validatedPath,
+                    out var reason))
+            {
+                return AuthorizedClaimPath.Failed(
+                    reason ?? "The audiobook file path did not resolve safely inside the audiobook folder.");
+            }
+
+            return new AuthorizedClaimPath(validatedPath);
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException
+            && exception is not OutOfMemoryException
+            && exception is not StackOverflowException)
+        {
+            logger.LogWarning(
+                exception,
+                "Audiobook file ownership authorization failed for audiobook {AudiobookId} at {Path}",
+                audiobook.Id,
+                LogRedaction.SanitizeFilePath(physicalPath));
+            return AuthorizedClaimPath.Failed(
+                "The audiobook file path could not be authorized safely.");
+        }
+    }
+
+    private static string ResolveStoredFileDirectory(Audiobook audiobook)
+    {
+        if (string.IsNullOrWhiteSpace(audiobook.FilePath))
+        {
+            return string.Empty;
+        }
+
+        if (FileSystemPathIdentity.TryDetectAbsoluteSyntax(
+                audiobook.FilePath,
+                out var absoluteSyntax))
+        {
+            if (!IsNativeSyntax(absoluteSyntax))
+            {
+                return string.Empty;
+            }
+
+            return ResolveAbsolutePath(Path.GetDirectoryName(audiobook.FilePath));
+        }
+
+        if (string.IsNullOrWhiteSpace(audiobook.BasePath)
+            || !FileSystemPathIdentity.TryDetectAbsoluteSyntax(
+                audiobook.BasePath,
+                out var baseSyntax)
+            || !IsNativeSyntax(baseSyntax)
+            || !FileSystemPathIdentity.TryResolveRelativePathWithinBase(
+                audiobook.BasePath,
+                audiobook.FilePath,
+                new FileSystemPathSemantics(
+                    baseSyntax,
+                    FileSystemCaseSensitivity.Sensitive),
+                out var absoluteFilePath))
+        {
+            return string.Empty;
+        }
+
+        return ResolveAbsolutePath(Path.GetDirectoryName(absoluteFilePath));
+    }
+
+    private static bool IsNativeSyntax(FileSystemPathSyntax syntax) =>
+        OperatingSystem.IsWindows()
+            ? syntax == FileSystemPathSyntax.Windows
+            : syntax == FileSystemPathSyntax.Unix;
+
+    private sealed record AuthorizedClaimPath(
+        string? Path,
+        string? Reason = null)
+    {
+        public static AuthorizedClaimPath Failed(string reason) =>
+            new(null, reason);
+    }
+}
