@@ -103,14 +103,11 @@ public sealed class RootFolderReassignmentTransactionTests : IAsyncLifetime
     [Fact]
     public async Task ReassignAudiobooksAndRemoveAsync_CaseVariantsCollapseOnInsensitiveTarget_RollsBack()
     {
-        var sourcePath = Path.Join(
-            Path.GetTempPath(),
-            $"root-reassign-case-source-{Guid.NewGuid():N}");
-        var targetPath = Path.Join(
-            Path.GetTempPath(),
-            $"root-reassign-case-target-{Guid.NewGuid():N}");
-        var upperBasePath = Path.Join(sourcePath, "Book");
-        var lowerBasePath = Path.Join(sourcePath, "book");
+        var identity = Guid.NewGuid().ToString("N");
+        var sourcePath = $@"C:\root-reassign-case-source-{identity}";
+        var targetPath = $@"C:\root-reassign-case-target-{identity}";
+        var upperBasePath = $@"{sourcePath}\Book";
+        var lowerBasePath = $@"{sourcePath}\book";
         int sourceRootId;
         int targetRootId;
         await using (var db = await _factory.CreateDbContextAsync())
@@ -137,7 +134,7 @@ public sealed class RootFolderReassignmentTransactionTests : IAsyncLifetime
                     [
                         new AudiobookFile
                         {
-                            Path = Path.Join(upperBasePath, "book.m4b")
+                            Path = $@"{upperBasePath}\book.m4b"
                         }
                     ]
                 },
@@ -149,7 +146,7 @@ public sealed class RootFolderReassignmentTransactionTests : IAsyncLifetime
                     [
                         new AudiobookFile
                         {
-                            Path = Path.Join(lowerBasePath, "book.m4b")
+                            Path = $@"{lowerBasePath}\book.m4b"
                         }
                     ]
                 });
@@ -183,14 +180,11 @@ public sealed class RootFolderReassignmentTransactionTests : IAsyncLifetime
     [Fact]
     public async Task ReassignAudiobooksAndRemoveAsync_UnrelatedOwnershipWithoutBasePath_BlocksCollision()
     {
-        var sourcePath = Path.Join(
-            Path.GetTempPath(),
-            $"root-reassign-owner-source-{Guid.NewGuid():N}");
-        var targetPath = Path.Join(
-            Path.GetTempPath(),
-            $"root-reassign-owner-target-{Guid.NewGuid():N}");
-        var sourceBasePath = Path.Join(sourcePath, "Book");
-        var targetFilePath = Path.Join(targetPath, "Book", "book.m4b");
+        var identity = Guid.NewGuid().ToString("N");
+        var sourcePath = $@"C:\root-reassign-owner-source-{identity}";
+        var targetPath = $@"C:\root-reassign-owner-target-{identity}";
+        var sourceBasePath = $@"{sourcePath}\Book";
+        var targetFilePath = $@"{targetPath}\Book\book.m4b";
         int sourceRootId;
         int targetRootId;
         await using (var db = await _factory.CreateDbContextAsync())
@@ -215,7 +209,7 @@ public sealed class RootFolderReassignmentTransactionTests : IAsyncLifetime
                 [
                     new AudiobookFile
                     {
-                        Path = Path.Join(sourceBasePath, "book.m4b")
+                        Path = $@"{sourceBasePath}\book.m4b"
                     }
                 ]
             };

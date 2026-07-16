@@ -109,30 +109,31 @@ namespace Listenarr.Application.Audiobooks.Files
                                 || !string.IsNullOrEmpty(normalizedBasePath)))
                         {
                             var rootFolders = await GetRootFoldersForSemanticsAsync(cancellationToken);
-                            var existingDirSemantics = string.IsNullOrWhiteSpace(existingDir)
+                            var existingDirResolution = string.IsNullOrWhiteSpace(existingDir)
                                 ? null
-                                : await ResolveLibrarySemanticsAsync(
+                                : await ResolveLibraryPathSemanticsAsync(
                                     existingDir,
                                     rootFolders,
                                     cancellationToken);
-                            var isInExistingDir = existingDirSemantics != null
+                            var isInExistingDir = existingDirResolution != null
                                 && FileSystemPathIdentity.IsSameOrInside(
                                     candidateDir,
                                     existingDir,
-                                    existingDirSemantics.Value);
+                                    existingDirResolution.Semantics);
 
+                            LibraryPathSemanticsResolution? basePathResolution = null;
                             var isInBasePath = false;
                             if (!string.IsNullOrWhiteSpace(normalizedBasePath))
                             {
-                                var basePathSemantics = await ResolveLibrarySemanticsAsync(
+                                basePathResolution = await ResolveLibraryPathSemanticsAsync(
                                     normalizedBasePath,
                                     rootFolders,
                                     cancellationToken);
-                                isInBasePath = basePathSemantics != null
+                                isInBasePath = basePathResolution != null
                                     && FileSystemPathIdentity.IsSameOrInside(
                                         candidateFull,
                                         normalizedBasePath,
-                                        basePathSemantics.Value);
+                                        basePathResolution.Semantics);
                             }
 
                             if (!isInExistingDir && !isInBasePath)
@@ -170,11 +171,22 @@ namespace Listenarr.Application.Audiobooks.Files
                                 return false;
                             }
 
-                            var allowedContainmentRoots = new[]
+                            var allowedContainmentRoots = new List<string?>();
+                            if (isInExistingDir)
                             {
-                                existingDir,
-                                normalizedBasePath
-                            };
+                                allowedContainmentRoots.Add(ResolvePhysicalSafetyRoot(
+                                    candidateFull,
+                                    existingDir,
+                                    existingDirResolution!));
+                            }
+
+                            if (isInBasePath)
+                            {
+                                allowedContainmentRoots.Add(ResolvePhysicalSafetyRoot(
+                                    candidateFull,
+                                    normalizedBasePath,
+                                    basePathResolution!));
+                            }
                             if (!fileSystem.TryValidateMutationTarget(
                                     candidateFull,
                                     allowedContainmentRoots,
@@ -366,90 +378,5 @@ namespace Listenarr.Application.Audiobooks.Files
                 claim.Reason);
         }
 
-        private async Task<IReadOnlyList<RootFolder>> GetRootFoldersForSemanticsAsync(
-            CancellationToken cancellationToken)
-        {
-            try
-            {
-                cancellationToken.ThrowIfCancellationRequested();
-                return await rootFolderService.GetAllAsync();
-            }
-            catch (Exception ex) when (ex is not OperationCanceledException && ex is not OutOfMemoryException && ex is not StackOverflowException)
-            {
-                logger.LogDebug(ex, "Failed to load root folders while resolving audiobook file path semantics");
-                return Array.Empty<RootFolder>();
-            }
-        }
-
-        private async Task<FileSystemPathSemantics?> ResolveLibrarySemanticsAsync(
-            string path,
-            IReadOnlyList<RootFolder> rootFolders,
-            CancellationToken cancellationToken)
-        {
-            FileSystemPathSemantics? bestSemantics = null;
-            var bestRootLength = -1;
-            foreach (var root in rootFolders)
-            {
-                if (string.IsNullOrWhiteSpace(root.Path))
-                {
-                    continue;
-                }
-
-                try
-                {
-                    var rootResolution = await semanticsResolver.ResolveAsync(
-                        root.Path,
-                        root.CaseSensitivityMode,
-                        cancellationToken);
-                    if (rootResolution.State != PathIdentityState.Valid
-                        || !FileSystemPathIdentity.IsSameOrInside(
-                            path,
-                            root.Path,
-                            rootResolution.Semantics))
-                    {
-                        continue;
-                    }
-
-                    var canonicalRoot = FileSystemPathIdentity.Canonicalize(
-                        root.Path,
-                        rootResolution.Semantics.Syntax);
-                    if (canonicalRoot.Length > bestRootLength)
-                    {
-                        bestSemantics = rootResolution.Semantics;
-                        bestRootLength = canonicalRoot.Length;
-                    }
-                }
-                catch (Exception ex) when (ex is not OperationCanceledException && ex is not OutOfMemoryException && ex is not StackOverflowException)
-                {
-                    logger.LogDebug(
-                        ex,
-                        "Failed to resolve configured root folder semantics for {RootPath}",
-                        LogRedaction.SanitizeFilePath(root.Path));
-                }
-            }
-
-            if (bestSemantics.HasValue)
-            {
-                return bestSemantics.Value;
-            }
-
-            try
-            {
-                var resolution = await semanticsResolver.ResolveAsync(
-                    path,
-                    cancellationToken: cancellationToken);
-                return resolution.State == PathIdentityState.Valid
-                    ? resolution.Semantics
-                    : null;
-            }
-            catch (Exception ex) when (ex is not OperationCanceledException && ex is not OutOfMemoryException && ex is not StackOverflowException)
-            {
-                logger.LogDebug(
-                    ex,
-                    "Failed to resolve audiobook file path semantics for {Path}",
-                    LogRedaction.SanitizeFilePath(path));
-                return null;
-            }
-        }
     }
 }

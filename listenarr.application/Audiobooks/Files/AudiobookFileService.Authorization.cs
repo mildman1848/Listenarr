@@ -41,31 +41,46 @@ public partial class AudiobookFileService
             }
 
             var rootFolders = await GetRootFoldersForSemanticsAsync(cancellationToken);
+            var allowedSafetyRoots = new List<string?>();
             var authorized = false;
             if (!string.IsNullOrWhiteSpace(existingDirectory))
             {
-                var existingSemantics = await ResolveLibrarySemanticsAsync(
+                var existingResolution = await ResolveLibraryPathSemanticsAsync(
                     existingDirectory,
                     rootFolders,
                     cancellationToken);
-                authorized = existingSemantics != null
+                authorized = existingResolution != null
                     && FileSystemPathIdentity.IsSameOrInside(
                         candidatePath,
                         existingDirectory,
-                        existingSemantics.Value);
+                        existingResolution.Semantics);
+                if (authorized)
+                {
+                    allowedSafetyRoots.Add(ResolvePhysicalSafetyRoot(
+                        candidatePath,
+                        existingDirectory,
+                        existingResolution!));
+                }
             }
 
             if (!authorized && !string.IsNullOrWhiteSpace(basePath))
             {
-                var baseSemantics = await ResolveLibrarySemanticsAsync(
+                var baseResolution = await ResolveLibraryPathSemanticsAsync(
                     basePath,
                     rootFolders,
                     cancellationToken);
-                authorized = baseSemantics != null
+                authorized = baseResolution != null
                     && FileSystemPathIdentity.IsSameOrInside(
                         candidatePath,
                         basePath,
-                        baseSemantics.Value);
+                        baseResolution.Semantics);
+                if (authorized)
+                {
+                    allowedSafetyRoots.Add(ResolvePhysicalSafetyRoot(
+                        candidatePath,
+                        basePath,
+                        baseResolution!));
+                }
             }
 
             if (!authorized)
@@ -76,7 +91,7 @@ public partial class AudiobookFileService
 
             if (!fileSystem.TryValidateMutationTarget(
                     candidatePath,
-                    [existingDirectory, basePath],
+                    allowedSafetyRoots,
                     out var validatedPath,
                     out var reason))
             {
