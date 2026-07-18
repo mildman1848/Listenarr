@@ -74,7 +74,8 @@ public partial class ScanQueueService
             Path = original.Path,
             PathIdentity = original.PathIdentity,
             CorrelationId = original.CorrelationId,
-            DownloadId = original.DownloadId
+            DownloadId = original.DownloadId,
+            IsAuthoritativeScope = original.IsAuthoritativeScope
         };
         return await EnqueueJobAsync(
             replacement,
@@ -114,6 +115,11 @@ public partial class ScanQueueService
 
     private static bool PathsMatch(ScanJob left, ScanJob right)
     {
+        if (left.IsAuthoritativeScope != right.IsAuthoritativeScope)
+        {
+            return false;
+        }
+
         if (left.Path == null || right.Path == null)
         {
             return left.Path == null && right.Path == null;
@@ -140,22 +146,6 @@ public partial class ScanQueueService
             left.Path,
             right.Path,
             identity.Value.Semantics);
-    }
-
-    private async Task<PathIdentitySnapshot> ResolvePathIdentityAsync(string path)
-    {
-        var resolution = await _semanticsResolver.ResolveAsync(path);
-        if (resolution.State != PathIdentityState.Valid)
-        {
-            throw new InvalidOperationException(
-                resolution.Reason ?? "Scan filesystem identity is unavailable.");
-        }
-
-        return PathIdentitySnapshot.FromResolution(
-            resolution.Semantics,
-            FileSystemCaseSensitivityMode.Auto,
-            resolution.BoundaryPath,
-            path);
     }
 
     private void UpdateJobStatusCore(Guid id, string status, string? error)
@@ -185,7 +175,8 @@ public partial class ScanQueueService
         CorrelationId = job.CorrelationId,
         DownloadId = job.DownloadId,
         MoveScanHandoffId = job.MoveScanHandoffId,
-        MoveScanAttemptGeneration = job.MoveScanAttemptGeneration
+        MoveScanAttemptGeneration = job.MoveScanAttemptGeneration,
+        IsAuthoritativeScope = job.IsAuthoritativeScope
     };
 
     private static bool IsActive(string status) =>

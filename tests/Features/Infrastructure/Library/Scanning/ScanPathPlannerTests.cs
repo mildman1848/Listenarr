@@ -15,6 +15,34 @@ namespace Listenarr.Tests.Features.Infrastructure.Library.Scanning
     public class ScanPathPlannerTests
     {
         [Fact]
+        public void CalculateBasePath_DoesNotClimbAboveNestedBookBoundary()
+        {
+            var root = Path.Join(
+                Path.GetTempPath(),
+                "listenarr-scan-path-" + Guid.NewGuid().ToString("N"));
+            var book = Path.Join(root, "Author", "Book");
+            var first = Path.Join(book, "CD1", "01.mp3");
+            var second = Path.Join(book, "CD2", "02.mp3");
+            Directory.CreateDirectory(Path.GetDirectoryName(first)!);
+            Directory.CreateDirectory(Path.GetDirectoryName(second)!);
+            File.WriteAllText(first, "audio");
+            File.WriteAllText(second, "audio");
+
+            try
+            {
+                var result = ScanPathPlanner.CalculateBasePath(
+                    [first, second],
+                    FileSystemPathSemantics.CurrentHostDefault);
+
+                Assert.Equal(book, result);
+            }
+            finally
+            {
+                Directory.Delete(root, recursive: true);
+            }
+        }
+
+        [Fact]
         public void CalculateBasePath_DedupesCaseOnlyDirectoriesUsingResolvedSemantics()
         {
             var root = Path.Join(Path.GetTempPath(), "listenarr-scan-path-" + Guid.NewGuid().ToString("N"));

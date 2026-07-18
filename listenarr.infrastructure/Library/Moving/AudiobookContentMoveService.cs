@@ -156,10 +156,12 @@ internal sealed partial class AudiobookContentMoveService(
         var persistedManifest = await LoadManifestAsync(
             request.JobId,
             cancellationToken);
-        if (recoveryMarker != null && persistedManifest.Count == 0)
+        if (persistedManifest.Count == 0)
         {
             throw new MoveNeedsAttentionException(
-                "A move recovery marker exists without a persisted manifest; destination ownership cannot be proven.");
+                recoveryMarker != null
+                    ? "A move recovery marker exists without a persisted tracked-file manifest; destination ownership cannot be proven."
+                    : "The move job has no persisted tracked-file source manifest and cannot infer ownership from BasePath.");
         }
 
         var resumingDirectCopy = recoveryStage == CopyStartedStage && persistedManifest.Count > 0;
@@ -197,7 +199,17 @@ internal sealed partial class AudiobookContentMoveService(
             targetStructuralSpine,
             target,
             sourceSemantics);
-        var validatedSourceEntries = ValidateSourceTreeForMove(
+        await ValidatePersistedSourceManifestAsync(
+            source,
+            target,
+            targetInsideSource,
+            persistedManifest,
+            sourceSemantics,
+            cancellationToken);
+        // Foreign ordinary content may coexist with the tracked-file manifest, but
+        // links, reparse points, and stale Listenarr recovery artifacts anywhere in
+        // the source tree still invalidate mutation authority.
+        _ = ValidateSourceTreeForMove(
             source,
             target,
             targetInsideSource,
@@ -215,26 +227,7 @@ internal sealed partial class AudiobookContentMoveService(
             throw new MoveNeedsAttentionException(tempReason);
         }
 
-        var manifest = persistedManifest.Count > 0
-            ? persistedManifest
-            : await LoadOrCreateManifestAsync(
-                request.JobId,
-                request.LeaseToken,
-                validatedSourceEntries,
-                cancellationToken);
-        if (persistedManifest.Count > 0)
-        {
-            var currentManifest = await BuildManifestAsync(
-                request.JobId,
-                validatedSourceEntries,
-                cancellationToken,
-                includeRootProofWhenEmpty: true);
-            if (!ManifestMatches(persistedManifest, currentManifest, sourceSemantics))
-            {
-                throw new MoveNeedsAttentionException(
-                    "Source content changed after the move manifest was persisted.");
-            }
-        }
+        var manifest = persistedManifest;
         ValidateTargetManifest(target, manifest, targetSemantics);
         await UpdateJobPhaseAsync(
             request.JobId,
@@ -250,7 +243,22 @@ internal sealed partial class AudiobookContentMoveService(
 
         try
         {
-            var atomicResult = ownedSourceDirectories.Count == 0
+            var sourceTreeIsExclusive = ownedSourceDirectories.Count == 0
+                && await SourceTreeExactlyMatchesManifestAsync(
+                    request.JobId,
+                    source,
+                    target,
+                    targetInsideSource,
+                    manifest,
+                    sourceSemantics,
+                    sourceRecoveryMarker == null
+                        ? null
+                        : sourceRecoveryMarkerPath,
+                    targetScaffolding.Select(directory => directory.Path).ToList(),
+                    targetStructuralSpine,
+                    ownedSourceMarkerPaths,
+                    cancellationToken);
+            var atomicResult = sourceTreeIsExclusive
                 ? await TryMoveByAtomicRenameAsync(
                     request,
                     source,
@@ -411,7 +419,7 @@ internal sealed partial class AudiobookContentMoveService(
                 request.TargetDirectoryOwnership,
                 request.SourceCleanupBoundary,
                 cancellationToken);
-            VerifySourceCleanupState(request, source, target);
+            VerifySourceCleanupState(request, source, target, manifest);
             await UpdateJobPhaseAsync(request.JobId, request.LeaseToken, MoveJobPhase.Finalizing, cancellationToken);
             await EnsureMutationAuthorizedAsync(request, source, target, cancellationToken);
             await WriteRecoveryMarkerAsync(

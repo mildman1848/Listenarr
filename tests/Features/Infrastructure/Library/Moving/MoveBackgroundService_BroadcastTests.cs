@@ -83,7 +83,12 @@ namespace Listenarr.Tests.Features.Infrastructure.Library.Moving
             await bg.StartAsync(CancellationToken.None);
 
             // Enqueue move
-            var jobId = await moveQueue.EnqueueMoveAsync(ab.Id, dst, src);
+            var jobId = await moveQueue.EnqueueMoveAsync(
+                await MoveJobTestFactory.CreateCommandAsync(
+                    _provider,
+                    ab.Id,
+                    src,
+                    dst));
 
             // Durable completion is committed before optional client broadcasts. Wait for
             // both states so stopping the worker cannot race the post-completion effects.

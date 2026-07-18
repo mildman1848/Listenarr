@@ -95,7 +95,6 @@ internal sealed partial class AudiobookContentMoveService
                 "Completed move artifacts cannot be cleaned before source cleanup completes.");
         }
 
-        VerifySourceCleanupState(request, result.Source, result.Target);
         var manifest = await LoadManifestAsync(request.JobId, cancellationToken);
         if (manifest.Count == 0)
         {
@@ -128,7 +127,11 @@ internal sealed partial class AudiobookContentMoveService
             manifest,
             request.TargetSemantics,
             cancellationToken);
-        VerifySourceCleanupState(request, result.Source, result.Target);
+        VerifySourceCleanupState(
+            request,
+            result.Source,
+            result.Target,
+            manifest);
 
         if (!File.Exists(result.RecoveryMarkerPath))
         {
@@ -182,7 +185,11 @@ internal sealed partial class AudiobookContentMoveService
         faultInjector?.OnCompletedArtifactCleanup(
             request.JobId,
             CompletedArtifactCleanupFaultPoint.BeforeRecoveryMarkerDelete);
-        VerifySourceCleanupState(request, result.Source, result.Target);
+        VerifySourceCleanupState(
+            request,
+            result.Source,
+            result.Target,
+            manifest);
         await EnsureLeaseOwnedAsync(request.JobId, request.LeaseToken, cancellationToken);
         ValidateMoveTargetRoot(result.Target);
         var finalTempOwnership = await TryValidatePublishedTempOwnershipAsync(
@@ -214,7 +221,11 @@ internal sealed partial class AudiobookContentMoveService
             result.Source,
             result.Target,
             cancellationToken);
-        VerifySourceCleanupState(request, result.Source, result.Target);
+        VerifySourceCleanupState(
+            request,
+            result.Source,
+            result.Target,
+            manifest);
         ValidateMoveTargetRoot(result.Target);
         ValidateExistingDestinationContents(
             result.Source,

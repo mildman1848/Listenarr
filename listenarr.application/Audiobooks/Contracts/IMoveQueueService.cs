@@ -23,6 +23,7 @@ namespace Listenarr.Application.Audiobooks.Contracts
         int AudiobookId,
         string SourcePath,
         PathIdentitySnapshot SourceIdentity,
+        IReadOnlyList<MoveSourceManifestEntry> SourceEntries,
         string TargetPath,
         PathIdentitySnapshot TargetIdentity,
         bool DeleteEmptySource = true,
@@ -49,12 +50,6 @@ namespace Listenarr.Application.Audiobooks.Contracts
         Task<Guid> EnqueueMoveAsync(
             MoveEnqueueCommand command,
             CancellationToken cancellationToken = default);
-        Task<Guid> EnqueueMoveAsync(
-            int audiobookId,
-            string requestedPath,
-            string? sourcePath = null,
-            bool deleteEmptySource = true,
-            string? sourceCleanupBoundary = null);
         Task<Guid?> RequeueMoveAsync(
             Guid jobId,
             CancellationToken cancellationToken = default);

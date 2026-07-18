@@ -11,19 +11,8 @@ public sealed class ScanBackgroundServiceTests
     [Fact]
     public async Task ExecuteAsync_ProcessorFailure_ContinuesWithLaterJobs()
     {
-        var resolver = new Mock<IFileSystemSemanticsResolver>();
-        resolver.Setup(service => service.ResolveAsync(
-                It.IsAny<string>(),
-                It.IsAny<FileSystemCaseSensitivityMode>(),
-                It.IsAny<CancellationToken>()))
-            .Returns<string, FileSystemCaseSensitivityMode, CancellationToken>((path, _, _) =>
-                ValueTask.FromResult(new FileSystemSemanticsResolution(
-                    FileSystemPathSemantics.CurrentHostDefault,
-                    PathIdentityState.Valid,
-                    path)));
         var queue = new ScanQueueService(
-            NullLogger<ScanQueueService>.Instance,
-            resolver.Object);
+            NullLogger<ScanQueueService>.Instance);
         var historyRepository = new Mock<IHistoryRepository>();
         var audiobookRepository = new Mock<IAudiobookRepository>();
         var services = new ServiceCollection()

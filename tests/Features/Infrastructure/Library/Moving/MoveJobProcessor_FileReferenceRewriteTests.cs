@@ -9,6 +9,98 @@ namespace Listenarr.Tests.Features.Infrastructure.Library.Moving
         private const string LeaseOwner = "test-worker";
 
         [Fact]
+        public async Task ProcessJobAsync_BroadBasePath_MovesOnlyTrackedBookAndRewritesReferences()
+        {
+            var libraryRoot = FileService.GetTempDirectory(
+                "move-processor-broad-base-root");
+            var authorPath = Path.Join(libraryRoot, "Shared Author");
+            var source = Path.Join(authorPath, "Book One");
+            var sibling = Path.Join(authorPath, "Book Two");
+            Directory.CreateDirectory(source);
+            Directory.CreateDirectory(sibling);
+            var sourceFile = await FileService.GetFileAsync(
+                source,
+                "Book One.m4b",
+                "owned audio");
+            var siblingFile = await FileService.GetFileAsync(
+                sibling,
+                "Book Two.m4b",
+                "foreign audio");
+            var target = Path.Join(
+                FileService.GetTempPath(),
+                $"move-processor-broad-base-dst-{Guid.NewGuid():N}");
+            var audiobook = await _audiobookRepository.AddAsync(new Audiobook
+            {
+                Title = "Book One",
+                BasePath = authorPath
+            });
+            await AddTrackedFileAsync(audiobook, sourceFile, libraryRoot);
+
+            var (queue, job) = await EnqueueProductionManifestMoveAsync(
+                audiobook,
+                target);
+            await _provider.GetRequiredService<IMoveJobProcessor>()
+                .ProcessJobAsync(job, CancellationToken.None);
+
+            var completed = await queue.GetJobAsync(job.Id);
+            Assert.NotNull(completed);
+            Assert.True(
+                completed!.Status == MoveJobStatus.Completed,
+                completed.Error ?? $"Unexpected status: {completed.Status}");
+            Assert.False(Directory.Exists(source));
+            Assert.Equal("foreign audio", await File.ReadAllTextAsync(siblingFile));
+            Assert.Equal(
+                "owned audio",
+                await File.ReadAllTextAsync(Path.Join(target, "Book One.m4b")));
+            var persisted = await _audiobookRepository.GetByIdSnapshotAsync(audiobook.Id);
+            Assert.Equal(target, persisted!.BasePath);
+            var tracked = Assert.Single(
+                await _audiobookFileRepository.GetByAudiobookIdAsync(audiobook.Id));
+            Assert.Equal(Path.Join(target, "Book One.m4b"), tracked.Path);
+        }
+
+        [Fact]
+        public async Task ProcessJobAsync_NullBasePath_UsesTrackedManifestAndPublishesTargetBasePath()
+        {
+            var libraryRoot = FileService.GetTempDirectory(
+                "move-processor-null-base-root");
+            var source = Path.Join(libraryRoot, "Metadata Only Book");
+            Directory.CreateDirectory(source);
+            var sourceFile = await FileService.GetFileAsync(
+                source,
+                "Metadata Only Book.m4b",
+                "owned audio");
+            var target = Path.Join(
+                FileService.GetTempPath(),
+                $"move-processor-null-base-dst-{Guid.NewGuid():N}");
+            var audiobook = await _audiobookRepository.AddAsync(new Audiobook
+            {
+                Title = "Metadata Only Book",
+                BasePath = null
+            });
+            await AddTrackedFileAsync(audiobook, sourceFile, libraryRoot);
+
+            var (queue, job) = await EnqueueProductionManifestMoveAsync(
+                audiobook,
+                target);
+            await _provider.GetRequiredService<IMoveJobProcessor>()
+                .ProcessJobAsync(job, CancellationToken.None);
+
+            var completed = await queue.GetJobAsync(job.Id);
+            Assert.NotNull(completed);
+            Assert.True(
+                completed!.Status == MoveJobStatus.Completed,
+                completed.Error ?? $"Unexpected status: {completed.Status}");
+            Assert.False(Directory.Exists(source));
+            Assert.Equal(
+                "owned audio",
+                await File.ReadAllTextAsync(
+                    Path.Join(target, "Metadata Only Book.m4b")));
+            var persisted = await _audiobookRepository.GetByIdSnapshotAsync(audiobook.Id);
+            Assert.Equal(target, persisted!.BasePath);
+        }
+
+        [Fact]
         public async Task ProcessJobAsync_PhysicalMove_RewritesTrackedAudiobookFilePaths()
         {
             var source = FileService.GetTempDirectory("move-processor-file-reference-src");
@@ -24,18 +116,20 @@ namespace Listenarr.Tests.Features.Infrastructure.Library.Moving
             {
                 Title = "Move Processor File References",
                 BasePath = source,
-                FilePath = source,
-                Files =
-                [
-                    new AudiobookFile { Path = bookPath },
-                    new AudiobookFile { Path = chapterPath }
-                ]
+                FilePath = source
             });
-            var queue = _provider.GetRequiredService<IMoveQueueService>();
-            var jobId = await queue.EnqueueMoveAsync(audiobook.Id, target, source);
-            var job = await queue.GetJobAsync(jobId);
-            Assert.NotNull(job);
-            await PrepareJobForProcessingAsync(queue, job!);
+            await AddTrackedFileAsync(
+                audiobook,
+                bookPath,
+                FileService.GetTempPath());
+            await AddTrackedFileAsync(
+                audiobook,
+                chapterPath,
+                FileService.GetTempPath());
+            var (queue, job) = await EnqueueProductionManifestMoveAsync(
+                audiobook,
+                target);
+            var jobId = job.Id;
 
             var processor = _provider.GetRequiredService<IMoveJobProcessor>();
             await processor.ProcessJobAsync(job!, CancellationToken.None);
@@ -58,6 +152,54 @@ namespace Listenarr.Tests.Features.Infrastructure.Library.Moving
             Assert.DoesNotContain(
                 updatedAudiobook.Files!,
                 file => file.Path?.StartsWith(source, StringComparison.Ordinal) == true);
+        }
+
+        private async Task<(IMoveQueueService Queue, MoveJob Job)> EnqueueProductionManifestMoveAsync(
+            Audiobook audiobook,
+            string target)
+        {
+            var manifest = await _provider
+                .GetRequiredService<IMoveSourceManifestService>()
+                .BuildAsync(audiobook);
+            var targetResolution = await _provider
+                .GetRequiredService<IFileSystemSemanticsResolver>()
+                .ResolveAsync(target);
+            Assert.Equal(PathIdentityState.Valid, targetResolution.State);
+            var targetIdentity = PathIdentitySnapshot.FromResolution(
+                targetResolution.Semantics,
+                FileSystemCaseSensitivityMode.Auto,
+                targetResolution.BoundaryPath,
+                target);
+            var queue = _provider.GetRequiredService<IMoveQueueService>();
+            var jobId = await queue.EnqueueMoveAsync(new MoveEnqueueCommand(
+                audiobook.Id,
+                manifest.SourceRoot,
+                manifest.SourceIdentity,
+                manifest.Entries,
+                target,
+                targetIdentity,
+                DeleteEmptySource: true));
+            var job = await queue.GetJobAsync(jobId);
+            Assert.NotNull(job);
+            await PrepareJobForProcessingAsync(queue, job!);
+            return (queue, job!);
+        }
+
+        private async Task AddTrackedFileAsync(
+            Audiobook audiobook,
+            string path,
+            string boundary)
+        {
+            var semantics = FileSystemPathSemantics.CurrentHostDefault;
+            var identity = AudiobookFilePathIdentity.CreateValid(
+                path,
+                semantics,
+                FileSystemCaseSensitivityMode.Auto,
+                boundary);
+            var tracked = AudiobookFile.CreateUnresolved(path);
+            tracked.AudiobookId = audiobook.Id;
+            tracked.ApplyPathIdentity(path, identity);
+            await _audiobookFileRepository.AddAsync(tracked);
         }
 
         private static async Task PrepareJobForProcessingAsync(IMoveQueueService queue, MoveJob job)

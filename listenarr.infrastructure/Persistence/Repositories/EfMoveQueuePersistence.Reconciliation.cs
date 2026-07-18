@@ -20,13 +20,14 @@ public sealed partial class EfMoveQueuePersistence
                 : null;
             var activeJobs = await db.MoveJobs
                 .Include(job => job.Relocation)
+                .Include(job => job.Entries)
                 .Where(job => job.Status == MoveJobStatus.Queued
                     || job.Status == MoveJobStatus.Running
                     || job.Status == MoveJobStatus.RetryScheduled)
                 .ToListAsync(cancellationToken);
 
-            // Release the unique active-key index while every legacy key is rebuilt under
-            // the authoritative version-3 path identities in this transaction.
+            // Release the unique active-key index while every active job is rebuilt under
+            // the authoritative endpoint and tracked-file manifest identities.
             foreach (var job in activeJobs)
             {
                 job.ActiveDeduplicationKey = null;
@@ -37,6 +38,15 @@ public sealed partial class EfMoveQueuePersistence
             var resolvedJobs = new List<(MoveJob Job, string Key, PathIdentitySnapshot TargetIdentity)>();
             foreach (var job in activeJobs)
             {
+                if (job.Entries.Count == 0
+                    || job.Entries.All(entry => entry.EntryType != MoveJobEntryType.File))
+                {
+                    MarkIdentityConflict(
+                        job,
+                        "The move job has no persisted tracked-file source manifest and cannot be reconciled safely.");
+                    continue;
+                }
+
                 if (string.IsNullOrWhiteSpace(job.SourcePath)
                     || string.IsNullOrWhiteSpace(job.RequestedPath))
                 {
@@ -106,14 +116,16 @@ public sealed partial class EfMoveQueuePersistence
                     job.RequestedPath = targetPath;
                     job.SetSourceIdentity(sourceIdentity);
                     job.SetTargetIdentity(targetIdentity);
-                    job.IdentityKeyVersion = 3;
+                    job.IdentityKeyVersion = MoveManifestIdentity.Version;
                     resolvedJobs.Add((
                         job,
-                        FileSystemPathIdentity.CreateKey(
-                            $"move:{job.AudiobookId}",
+                        MoveManifestIdentity.CreateDeduplicationKey(
+                            job.AudiobookId,
+                            sourcePath,
+                            sourceIdentity,
                             targetPath,
-                            targetIdentity.Semantics,
-                            version: 3),
+                            targetIdentity,
+                            job.Entries),
                         targetIdentity));
                 }
                 catch (Exception exception) when (exception is
@@ -126,8 +138,10 @@ public sealed partial class EfMoveQueuePersistence
             }
 
             var activeJobIds = activeJobs.Select(job => job.Id).ToList();
-            var jobIdsWithManifest = await db.MoveJobEntries
-                .Where(entry => activeJobIds.Contains(entry.MoveJobId))
+            var jobIdsWithManifestExecutionState = await db.MoveJobEntries
+                .Where(entry => activeJobIds.Contains(entry.MoveJobId)
+                    && (entry.CopyState != MoveJobEntryCopyState.Pending
+                        || entry.CleanupState != MoveJobEntryCleanupState.Pending))
                 .Select(entry => entry.MoveJobId)
                 .Distinct()
                 .ToListAsync(cancellationToken);
@@ -136,7 +150,7 @@ public sealed partial class EfMoveQueuePersistence
                 .Select(directory => directory.MoveJobId)
                 .Distinct()
                 .ToListAsync(cancellationToken);
-            var manifestEvidence = jobIdsWithManifest.ToHashSet();
+            var manifestEvidence = jobIdsWithManifestExecutionState.ToHashSet();
             var scaffoldEvidence = jobIdsWithScaffolding.ToHashSet();
 
             foreach (var group in resolvedJobs.GroupBy(item => item.Key, StringComparer.Ordinal))
@@ -209,7 +223,7 @@ public sealed partial class EfMoveQueuePersistence
                         .ThenByDescending(item => item.Job.UpdatedAt ?? item.Job.EnqueuedAt)
                         .First();
                 canonical.Job.ActiveDeduplicationKey = group.Key;
-                canonical.Job.IdentityKeyVersion = 3;
+                canonical.Job.IdentityKeyVersion = MoveManifestIdentity.Version;
 
                 foreach (var duplicate in candidates.Where(item => item.Job.Id != canonical.Job.Id))
                 {
@@ -226,7 +240,7 @@ public sealed partial class EfMoveQueuePersistence
 
                     duplicate.Job.Status = MoveJobStatus.Superseded;
                     duplicate.Job.Error = $"Superseded by move job {canonical.Job.Id} during identity-key reconciliation.";
-                    duplicate.Job.IdentityKeyVersion = 3;
+                    duplicate.Job.IdentityKeyVersion = MoveManifestIdentity.Version;
                     duplicate.Job.ActiveDeduplicationKey = null;
                     duplicate.Job.LeaseOwner = null;
                     duplicate.Job.LeaseExpiresAt = null;
@@ -307,7 +321,7 @@ public sealed partial class EfMoveQueuePersistence
     private static void MarkIdentityConflict(MoveJob job, string error)
     {
         job.Status = MoveJobStatus.NeedsAttention;
-        job.IdentityKeyVersion = 3;
+        job.IdentityKeyVersion = MoveManifestIdentity.Version;
         job.ActiveDeduplicationKey = null;
         job.FailureKind = MoveFailureKind.Verification;
         job.Error = error;

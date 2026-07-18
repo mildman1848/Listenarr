@@ -173,7 +173,11 @@ internal sealed partial class AudiobookContentMoveService
             StringComparison.Ordinal);
         if (sourceCleanupCompleted)
         {
-            VerifySourceCleanupState(request, source, target);
+            VerifySourceCleanupState(
+                request,
+                source,
+                target,
+                manifest);
         }
 
         return new AudiobookContentMoveResult(
@@ -220,7 +224,11 @@ internal sealed partial class AudiobookContentMoveService
             request.TargetDirectoryOwnership,
             request.SourceCleanupBoundary,
             cancellationToken);
-        VerifySourceCleanupState(request, result.Source, result.Target);
+        VerifySourceCleanupState(
+            request,
+            result.Source,
+            result.Target,
+            manifest);
         await WriteRecoveryMarkerAsync(
             result.Target,
             request,

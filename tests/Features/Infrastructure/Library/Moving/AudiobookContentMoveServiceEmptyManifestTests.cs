@@ -5,7 +5,7 @@ namespace Listenarr.Tests.Features.Infrastructure.Library.Moving;
 public partial class AudiobookContentMoveServiceTests
 {
     [Fact]
-    public async Task MoveContentsAsync_EmptyCopyMove_PersistsRootManifestAndRetainsConfiguredSource()
+    public async Task MoveContentsAsync_EmptySourceWithoutTrackedManifest_RequiresAttention()
     {
         var source = FileService.GetTempDirectory("content-move-empty-copy-src");
         var target = Path.Join(
@@ -17,16 +17,17 @@ public partial class AudiobookContentMoveServiceTests
             deleteEmptySource: false);
         var service = _provider.GetRequiredService<AudiobookContentMoveService>();
 
-        var result = await service.MoveContentsAsync(request, CancellationToken.None);
+        var exception = await Assert.ThrowsAsync<MoveNeedsAttentionException>(() =>
+            service.MoveContentsAsync(request, CancellationToken.None));
 
-        Assert.True(result.SourceCleanupCompleted);
+        Assert.Contains(
+            "no persisted tracked-file source manifest",
+            exception.Message,
+            StringComparison.OrdinalIgnoreCase);
         Assert.True(Directory.Exists(source));
         Assert.Empty(Directory.EnumerateFileSystemEntries(source));
-        Assert.True(Directory.Exists(target));
-        var manifest = await LoadPersistedManifestAsync(request.JobId);
-        var root = Assert.Single(manifest);
-        Assert.Equal(MoveJobEntryType.Directory, root.EntryType);
-        Assert.Equal(string.Empty, root.RelativePath);
+        Assert.False(Directory.Exists(target));
+        Assert.Empty(await LoadPersistedManifestAsync(request.JobId));
     }
 
     private async Task<List<MoveJobEntry>> LoadPersistedManifestAsync(Guid jobId)
@@ -49,6 +50,7 @@ public partial class AudiobookContentMoveServiceTests
             Path.GetDirectoryName(source)!,
             $"content-move-phase-only-atomic-dst-{Guid.NewGuid():N}");
         var request = await CreateLeasedMoveRequestAsync(source, target);
+        await ClearPersistedManifestAsync(request.JobId);
         Directory.Move(source, target);
         var factory = _provider.GetRequiredService<IDbContextFactory<ListenArrDbContext>>();
         await using (var db = await factory.CreateDbContextAsync())
@@ -67,12 +69,13 @@ public partial class AudiobookContentMoveServiceTests
     }
 
     [Fact]
-    public async Task VerifyFinalizedMoveAsync_MarkerlessEmptyAtomicTarget_RemainsVerifiable()
+    public async Task VerifyFinalizedMoveAsync_MarkerlessAtomicTarget_RemainsVerifiable()
     {
-        var source = FileService.GetTempDirectory("content-move-empty-atomic-src");
+        var source = FileService.GetTempDirectory("content-move-atomic-src");
+        await FileService.GetFileAsync(source, "book.m4b", "audio");
         var target = Path.Join(
             Path.GetDirectoryName(source)!,
-            $"content-move-empty-atomic-dst-{Guid.NewGuid():N}");
+            $"content-move-atomic-dst-{Guid.NewGuid():N}");
         var request = await CreateLeasedMoveRequestAsync(source, target);
         var service = _provider.GetRequiredService<AudiobookContentMoveService>();
         var result = await service.MoveContentsAsync(request, CancellationToken.None);
@@ -81,17 +84,17 @@ public partial class AudiobookContentMoveServiceTests
         await service.VerifyFinalizedMoveAsync(request, CancellationToken.None);
 
         Assert.False(Directory.Exists(source));
-        Assert.True(Directory.Exists(target));
-        Assert.Empty(Directory.EnumerateFileSystemEntries(target));
+        Assert.True(File.Exists(Path.Join(target, "book.m4b")));
     }
 
     [Fact]
-    public async Task VerifyFinalizedMoveAsync_MarkerlessEmptyAtomicTargetReplacedWithContent_RequiresAttention()
+    public async Task VerifyFinalizedMoveAsync_MarkerlessAtomicTargetWithUnownedContent_RequiresAttention()
     {
-        var source = FileService.GetTempDirectory("content-move-empty-atomic-tampered-src");
+        var source = FileService.GetTempDirectory("content-move-atomic-tampered-src");
+        await FileService.GetFileAsync(source, "book.m4b", "audio");
         var target = Path.Join(
             Path.GetDirectoryName(source)!,
-            $"content-move-empty-atomic-tampered-dst-{Guid.NewGuid():N}");
+            $"content-move-atomic-tampered-dst-{Guid.NewGuid():N}");
         var request = await CreateLeasedMoveRequestAsync(source, target);
         var service = _provider.GetRequiredService<AudiobookContentMoveService>();
         var result = await service.MoveContentsAsync(request, CancellationToken.None);

@@ -22,18 +22,15 @@ public partial class ScanQueueService : IScanQueueService
     private readonly SemaphoreSlim _enqueueGate = new(1, 1);
     private readonly Dictionary<int, DispatchReservation> _dispatchReservations = [];
     private readonly ILogger<ScanQueueService> _logger;
-    private readonly IFileSystemSemanticsResolver _semanticsResolver;
     private readonly IMoveScanHandoffStore? _handoffStore;
     private readonly TimeProvider _timeProvider;
 
     public ScanQueueService(
         ILogger<ScanQueueService> logger,
-        IFileSystemSemanticsResolver semanticsResolver,
         IMoveScanHandoffStore? handoffStore = null,
         TimeProvider? timeProvider = null)
     {
         _logger = logger;
-        _semanticsResolver = semanticsResolver;
         _handoffStore = handoffStore;
         _timeProvider = timeProvider ?? TimeProvider.System;
     }
@@ -46,7 +43,12 @@ public partial class ScanQueueService : IScanQueueService
         var pathIdentity = command.PathIdentity;
         if (!string.IsNullOrWhiteSpace(command.Path))
         {
-            pathIdentity ??= await ResolvePathIdentityAsync(command.Path);
+            if (!pathIdentity.HasValue)
+            {
+                throw new InvalidOperationException(
+                    "A path-scoped scan must be authorized before queue publication.");
+            }
+
             pathIdentity.Value.ValidateForPath(command.Path);
         }
         else if (pathIdentity.HasValue)
@@ -62,7 +64,8 @@ public partial class ScanQueueService : IScanQueueService
             Path = command.Path,
             PathIdentity = pathIdentity,
             CorrelationId = command.CorrelationId,
-            DownloadId = command.DownloadId
+            DownloadId = command.DownloadId,
+            IsAuthoritativeScope = command.IsAuthoritativeScope
         };
         return await EnqueueJobAsync(
                 job,
@@ -73,15 +76,15 @@ public partial class ScanQueueService : IScanQueueService
 
     public Task<Guid> EnqueueScanAsync(
         Audiobook audiobook,
-        string? path = null,
         string? correlationId = null,
         string? downloadId = null) =>
         EnqueueScanAsync(new ScanEnqueueCommand(
             audiobook,
-            path,
+            Path: null,
             PathIdentity: null,
             correlationId,
-            downloadId));
+            downloadId,
+            IsAuthoritativeScope: true));
 
     public async Task<Guid?> EnqueueMoveHandoffScanAsync(
         Audiobook audiobook,
@@ -104,6 +107,7 @@ public partial class ScanQueueService : IScanQueueService
             CorrelationId = $"move:{claim.MoveJobId:N}",
             MoveScanHandoffId = claim.HandoffId,
             MoveScanAttemptGeneration = claim.AttemptGeneration,
+            IsAuthoritativeScope = true,
             Status = "Queued"
         };
 

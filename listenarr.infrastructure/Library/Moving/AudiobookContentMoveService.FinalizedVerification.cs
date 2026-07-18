@@ -73,6 +73,6 @@ internal sealed partial class AudiobookContentMoveService
             request.TargetSemantics,
             cancellationToken);
 
-        VerifySourceCleanupState(request, source, target);
+        VerifySourceCleanupState(request, source, target, manifest);
     }
 }

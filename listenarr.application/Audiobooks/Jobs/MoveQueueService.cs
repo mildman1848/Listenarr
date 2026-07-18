@@ -84,10 +84,19 @@ namespace Listenarr.Application.Audiobooks.Jobs
                     nameof(command));
             }
 
-            var deduplicationKey = BuildDeduplicationKey(
-                command.AudiobookId,
+            var manifest = ValidateSourceManifest(
+                source,
+                command.SourceIdentity,
                 target,
-                command.TargetIdentity);
+                command.TargetIdentity,
+                command.SourceEntries);
+            var deduplicationKey = MoveManifestIdentity.CreateDeduplicationKey(
+                command.AudiobookId,
+                source,
+                command.SourceIdentity,
+                target,
+                command.TargetIdentity,
+                manifest.Entries);
 
             MoveJob? jobToSchedule = null;
             var jobId = await _mutationCoordinator.ExecuteExclusiveAsync(async token =>
@@ -117,13 +126,14 @@ namespace Listenarr.Application.Audiobooks.Jobs
                     AudiobookId = command.AudiobookId,
                     RequestedPath = target,
                     ActiveDeduplicationKey = deduplicationKey,
-                    IdentityKeyVersion = 3,
+                    IdentityKeyVersion = MoveManifestIdentity.Version,
                     EnqueuedAt = _timeProvider.GetUtcNow().UtcDateTime,
                     Status = MoveJobStatus.Queued,
                     SourcePath = source,
                     SourceCleanupBoundary = command.SourceCleanupBoundary,
                     DeleteEmptySource = command.DeleteEmptySource,
-                    RelocationId = command.RelocationId
+                    RelocationId = command.RelocationId,
+                    Entries = manifest.Entries.ToList()
                 };
                 job.SetSourceIdentity(command.SourceIdentity);
                 job.SetTargetIdentity(command.TargetIdentity);
@@ -167,30 +177,6 @@ namespace Listenarr.Application.Audiobooks.Jobs
             }
 
             return jobId;
-        }
-
-        public async Task<Guid> EnqueueMoveAsync(
-            int audiobookId,
-            string requestedPath,
-            string? sourcePath = null,
-            bool deleteEmptySource = true,
-            string? sourceCleanupBoundary = null)
-        {
-            // Compatibility callers predate durable source snapshots. Treat an omitted source
-            // as a no-op source identity instead of allowing the worker to infer mutable state.
-            var absoluteTarget = FileSystemPathIdentity.ResolveNativeAbsolutePath(requestedPath);
-            var absoluteSource = FileSystemPathIdentity.ResolveNativeAbsolutePath(
-                sourcePath ?? requestedPath);
-            var sourceIdentity = await ResolveIdentitySnapshotAsync(absoluteSource);
-            var targetIdentity = await ResolveIdentitySnapshotAsync(absoluteTarget);
-            return await EnqueueMoveAsync(new MoveEnqueueCommand(
-                audiobookId,
-                absoluteSource,
-                sourceIdentity,
-                absoluteTarget,
-                targetIdentity,
-                deleteEmptySource,
-                sourceCleanupBoundary));
         }
 
         public async Task RecoverActiveJobsAsync(CancellationToken cancellationToken = default)

@@ -28,17 +28,6 @@ internal sealed partial class AudiobookContentMoveService
             HasLegacyFilesystemRecoveryArtifacts(source, target, jobId),
             cancellationToken);
 
-    private Task PersistManifestAsync(
-        Guid jobId,
-        MoveLeaseToken leaseToken,
-        IReadOnlyCollection<MoveJobEntry> manifest,
-        CancellationToken cancellationToken) =>
-        executionStore.PersistManifestAsync(
-            jobId,
-            leaseToken,
-            manifest,
-            cancellationToken);
-
     private Task<List<MoveJobEntry>> LoadManifestAsync(
         Guid jobId,
         CancellationToken cancellationToken) =>

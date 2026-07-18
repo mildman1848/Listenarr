@@ -21,7 +21,6 @@ public sealed class MoveScanHandoffRecoveryServiceTests : BaseTests
         var store = _provider.GetRequiredService<IMoveScanHandoffStore>();
         var scanQueue = new ScanQueueService(
             NullLogger<ScanQueueService>.Instance,
-            _provider.GetRequiredService<IFileSystemSemanticsResolver>(),
             store,
             TimeProvider.System);
         var service = new MoveScanHandoffRecoveryService(
@@ -90,7 +89,6 @@ public sealed class MoveScanHandoffRecoveryServiceTests : BaseTests
         var store = _provider.GetRequiredService<IMoveScanHandoffStore>();
         var scanQueue = new ScanQueueService(
             NullLogger<ScanQueueService>.Instance,
-            _provider.GetRequiredService<IFileSystemSemanticsResolver>(),
             store,
             TimeProvider.System);
         var service = new MoveScanHandoffRecoveryService(

@@ -4,27 +4,6 @@ namespace Listenarr.Infrastructure.Library.Moving;
 
 internal sealed partial class AudiobookContentMoveService
 {
-    private async Task<IReadOnlyList<MoveJobEntry>> LoadOrCreateManifestAsync(
-        Guid jobId,
-        MoveLeaseToken leaseToken,
-        IReadOnlyList<ValidatedSourceEntry> validatedSourceEntries,
-        CancellationToken cancellationToken)
-    {
-        var persisted = await LoadManifestAsync(jobId, cancellationToken);
-        if (persisted.Count > 0)
-        {
-            return persisted;
-        }
-
-        var manifest = await BuildManifestAsync(
-            jobId,
-            validatedSourceEntries,
-            cancellationToken,
-            includeRootProofWhenEmpty: true);
-        await PersistManifestAsync(jobId, leaseToken, manifest, cancellationToken);
-        return manifest;
-    }
-
     private async Task<List<MoveJobEntry>> SnapshotSourceAsync(
         Guid jobId,
         string source,

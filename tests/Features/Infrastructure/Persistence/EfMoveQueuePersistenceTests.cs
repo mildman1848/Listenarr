@@ -102,7 +102,8 @@ public sealed class EfMoveQueuePersistenceTests : IAsyncLifetime
                     Status = MoveJobStatus.Queued,
                     Phase = MoveJobPhase.Planned,
                     IdentityKeyVersion = 1,
-                    ActiveDeduplicationKey = "legacy:first"
+                    ActiveDeduplicationKey = "legacy:first",
+                    Entries = [CreateManifestEntry()]
                 },
                 new MoveJob
                 {
@@ -112,7 +113,8 @@ public sealed class EfMoveQueuePersistenceTests : IAsyncLifetime
                     Status = MoveJobStatus.Running,
                     Phase = MoveJobPhase.Published,
                     IdentityKeyVersion = 1,
-                    ActiveDeduplicationKey = "legacy:second"
+                    ActiveDeduplicationKey = "legacy:second",
+                    Entries = [CreateManifestEntry()]
                 });
             await db.SaveChangesAsync();
         }
@@ -122,14 +124,18 @@ public sealed class EfMoveQueuePersistenceTests : IAsyncLifetime
 
         await using var verification = await _factory.CreateDbContextAsync();
         var jobs = await verification.MoveJobs.OrderBy(job => job.Phase).ToListAsync();
-        Assert.Equal(MoveJobStatus.Superseded, jobs[0].Status);
+        Assert.True(
+            jobs[0].Status == MoveJobStatus.Superseded,
+            jobs[0].Error ?? $"Unexpected status: {jobs[0].Status}");
         Assert.Null(jobs[0].ActiveDeduplicationKey);
-        Assert.Equal(MoveJobStatus.Running, jobs[1].Status);
-        Assert.StartsWith("v3:move:42:", jobs[1].ActiveDeduplicationKey);
+        Assert.True(
+            jobs[1].Status == MoveJobStatus.Running,
+            jobs[1].Error ?? $"Unexpected status: {jobs[1].Status}");
+        Assert.StartsWith("v4:move-source:42:", jobs[1].ActiveDeduplicationKey);
     }
 
     [Fact]
-    public async Task ReconcileIdentityKeysAsync_MultipleEvidenceBearingDuplicates_RequireAttention()
+    public async Task ReconcileIdentityKeysAsync_DifferentSourcesRemainDistinctDespiteSharedTarget()
     {
         var target = Path.Join(
             Path.GetTempPath(),
@@ -186,12 +192,75 @@ public sealed class EfMoveQueuePersistenceTests : IAsyncLifetime
         await using var verification = await _factory.CreateDbContextAsync();
         var jobs = await verification.MoveJobs.AsNoTracking().ToListAsync();
         Assert.Equal(2, jobs.Count);
+        Assert.Contains(jobs, job => job.Status == MoveJobStatus.Running);
+        Assert.Contains(jobs, job => job.Status == MoveJobStatus.RetryScheduled);
+        Assert.All(jobs, job =>
+        {
+            Assert.NotNull(job.ActiveDeduplicationKey);
+            Assert.Equal(MoveFailureKind.None, job.FailureKind);
+        });
+    }
+
+    [Fact]
+    public async Task ReconcileIdentityKeysAsync_SameManifestWithExecutionStateOnBothJobs_RequiresAttention()
+    {
+        var source = Path.Join(
+            Path.GetTempPath(),
+            "listenarr-tests",
+            $"move-reconcile-executed-source-{Guid.NewGuid():N}");
+        var target = Path.Join(
+            Path.GetTempPath(),
+            "listenarr-tests",
+            $"move-reconcile-executed-target-{Guid.NewGuid():N}");
+        await using (var db = await _factory.CreateDbContextAsync())
+        {
+            var first = new MoveJob
+            {
+                AudiobookId = 42,
+                SourcePath = source,
+                RequestedPath = target,
+                Status = MoveJobStatus.Running,
+                Phase = MoveJobPhase.Copying,
+                IdentityKeyVersion = 1,
+                ActiveDeduplicationKey = "legacy:executed-first",
+                Entries =
+                [
+                    CreateManifestEntry(
+                        copyState: MoveJobEntryCopyState.Staged)
+                ]
+            };
+            var second = new MoveJob
+            {
+                AudiobookId = 42,
+                SourcePath = source,
+                RequestedPath = target,
+                Status = MoveJobStatus.RetryScheduled,
+                Phase = MoveJobPhase.Copying,
+                IdentityKeyVersion = 1,
+                ActiveDeduplicationKey = "legacy:executed-second",
+                Entries =
+                [
+                    CreateManifestEntry(
+                        copyState: MoveJobEntryCopyState.Staged)
+                ]
+            };
+            db.MoveJobs.AddRange(first, second);
+            await db.SaveChangesAsync();
+        }
+
+        await CreatePersistence().ReconcileIdentityKeysAsync();
+
+        await using var verification = await _factory.CreateDbContextAsync();
+        var jobs = await verification.MoveJobs.AsNoTracking().ToListAsync();
+        Assert.Equal(2, jobs.Count);
         Assert.All(jobs, job =>
         {
             Assert.Equal(MoveJobStatus.NeedsAttention, job.Status);
-            Assert.Equal(MoveFailureKind.Verification, job.FailureKind);
+            Assert.Contains(
+                "Multiple active move jobs own recovery evidence",
+                job.Error,
+                StringComparison.Ordinal);
             Assert.Null(job.ActiveDeduplicationKey);
-            Assert.Null(job.LeaseOwner);
         });
     }
 
@@ -215,7 +284,8 @@ public sealed class EfMoveQueuePersistenceTests : IAsyncLifetime
                 Status = MoveJobStatus.Queued,
                 Phase = MoveJobPhase.Planned,
                 IdentityKeyVersion = 1,
-                ActiveDeduplicationKey = "legacy:owner"
+                ActiveDeduplicationKey = "legacy:owner",
+                Entries = [CreateManifestEntry()]
             };
             duplicate = new MoveJob
             {
@@ -225,7 +295,8 @@ public sealed class EfMoveQueuePersistenceTests : IAsyncLifetime
                 Status = MoveJobStatus.Queued,
                 Phase = MoveJobPhase.Planned,
                 IdentityKeyVersion = 1,
-                ActiveDeduplicationKey = "legacy:duplicate"
+                ActiveDeduplicationKey = "legacy:duplicate",
+                Entries = [CreateManifestEntry()]
             };
             db.MoveJobs.AddRange(owner, duplicate);
             await db.SaveChangesAsync();
@@ -241,9 +312,13 @@ public sealed class EfMoveQueuePersistenceTests : IAsyncLifetime
             .SingleAsync(job => job.Id == owner.Id);
         var persistedDuplicate = await verification.MoveJobs.AsNoTracking()
             .SingleAsync(job => job.Id == duplicate.Id);
-        Assert.Equal(MoveJobStatus.Queued, persistedOwner.Status);
+        Assert.True(
+            persistedOwner.Status == MoveJobStatus.Queued,
+            persistedOwner.Error ?? $"Unexpected status: {persistedOwner.Status}");
         Assert.NotNull(persistedOwner.ActiveDeduplicationKey);
-        Assert.Equal(MoveJobStatus.Superseded, persistedDuplicate.Status);
+        Assert.True(
+            persistedDuplicate.Status == MoveJobStatus.Superseded,
+            persistedDuplicate.Error ?? $"Unexpected status: {persistedDuplicate.Status}");
         Assert.Null(persistedDuplicate.ActiveDeduplicationKey);
     }
 
@@ -267,7 +342,8 @@ public sealed class EfMoveQueuePersistenceTests : IAsyncLifetime
                 Status = MoveJobStatus.Queued,
                 Phase = MoveJobPhase.Planned,
                 IdentityKeyVersion = 1,
-                ActiveDeduplicationKey = "legacy:owner"
+                ActiveDeduplicationKey = "legacy:owner",
+                Entries = [CreateManifestEntry()]
             };
             duplicate = new MoveJob
             {
@@ -277,7 +353,8 @@ public sealed class EfMoveQueuePersistenceTests : IAsyncLifetime
                 Status = MoveJobStatus.Queued,
                 Phase = MoveJobPhase.Planned,
                 IdentityKeyVersion = 1,
-                ActiveDeduplicationKey = "legacy:duplicate"
+                ActiveDeduplicationKey = "legacy:duplicate",
+                Entries = [CreateManifestEntry()]
             };
             db.MoveJobs.AddRange(owner, duplicate);
             await db.SaveChangesAsync();
@@ -337,7 +414,8 @@ public sealed class EfMoveQueuePersistenceTests : IAsyncLifetime
                 Status = MoveJobStatus.Queued,
                 Phase = MoveJobPhase.Planned,
                 IdentityKeyVersion = 1,
-                ActiveDeduplicationKey = "legacy:owner"
+                ActiveDeduplicationKey = "legacy:owner",
+                Entries = [CreateManifestEntry()]
             };
             duplicate = new MoveJob
             {
@@ -347,7 +425,8 @@ public sealed class EfMoveQueuePersistenceTests : IAsyncLifetime
                 Status = MoveJobStatus.Queued,
                 Phase = MoveJobPhase.Planned,
                 IdentityKeyVersion = 1,
-                ActiveDeduplicationKey = "legacy:duplicate"
+                ActiveDeduplicationKey = "legacy:duplicate",
+                Entries = [CreateManifestEntry()]
             };
             db.MoveJobs.AddRange(owner, duplicate);
             await db.SaveChangesAsync();
@@ -415,7 +494,8 @@ public sealed class EfMoveQueuePersistenceTests : IAsyncLifetime
                     Status = MoveJobStatus.Queued,
                     Phase = MoveJobPhase.None,
                     IdentityKeyVersion = 1,
-                    ActiveDeduplicationKey = "legacy:bad"
+                    ActiveDeduplicationKey = "legacy:bad",
+                    Entries = [CreateManifestEntry()]
                 },
                 new MoveJob
                 {
@@ -425,7 +505,8 @@ public sealed class EfMoveQueuePersistenceTests : IAsyncLifetime
                     Status = MoveJobStatus.Queued,
                     Phase = MoveJobPhase.None,
                     IdentityKeyVersion = 1,
-                    ActiveDeduplicationKey = "legacy:good"
+                    ActiveDeduplicationKey = "legacy:good",
+                    Entries = [CreateManifestEntry()]
                 });
             await db.SaveChangesAsync();
         }
@@ -446,7 +527,7 @@ public sealed class EfMoveQueuePersistenceTests : IAsyncLifetime
         Assert.Contains("Move path identity could not be reconciled", bad.Error, StringComparison.Ordinal);
         Assert.Null(bad.ActiveDeduplicationKey);
         Assert.Equal(MoveJobStatus.Queued, good.Status);
-        Assert.StartsWith("v3:move:43:", good.ActiveDeduplicationKey);
+        Assert.StartsWith("v4:move-source:43:", good.ActiveDeduplicationKey);
     }
 
     [Fact]
@@ -473,7 +554,8 @@ public sealed class EfMoveQueuePersistenceTests : IAsyncLifetime
                 ActiveDeduplicationKey = "legacy:foreign",
                 LeaseOwner = "legacy-worker",
                 LeaseGeneration = 2,
-                LeaseExpiresAt = DateTime.UtcNow.AddMinutes(5)
+                LeaseExpiresAt = DateTime.UtcNow.AddMinutes(5),
+                Entries = [CreateManifestEntry()]
             });
             await db.SaveChangesAsync();
         }
@@ -520,7 +602,8 @@ public sealed class EfMoveQueuePersistenceTests : IAsyncLifetime
             ActiveDeduplicationKey = "v3:foreign-identity",
             LeaseOwner = "legacy-worker",
             LeaseGeneration = 2,
-            LeaseExpiresAt = DateTime.UtcNow.AddMinutes(5)
+            LeaseExpiresAt = DateTime.UtcNow.AddMinutes(5),
+            Entries = [CreateManifestEntry()]
         };
         job.SetSourceIdentity(new PathIdentitySnapshot(
             syntax,
@@ -575,7 +658,8 @@ public sealed class EfMoveQueuePersistenceTests : IAsyncLifetime
                 Status = MoveJobStatus.Queued,
                 Phase = MoveJobPhase.None,
                 IdentityKeyVersion = 1,
-                ActiveDeduplicationKey = "legacy:partial"
+                ActiveDeduplicationKey = "legacy:partial",
+                Entries = [CreateManifestEntry()]
             });
             await db.SaveChangesAsync();
         }
@@ -620,7 +704,8 @@ public sealed class EfMoveQueuePersistenceTests : IAsyncLifetime
                 ActiveDeduplicationKey = "legacy:navigation",
                 LeaseOwner = "legacy-worker",
                 LeaseGeneration = 7,
-                LeaseExpiresAt = DateTime.UtcNow.AddMinutes(5)
+                LeaseExpiresAt = DateTime.UtcNow.AddMinutes(5),
+                Entries = [CreateManifestEntry()]
             });
             await db.SaveChangesAsync();
         }
@@ -658,7 +743,8 @@ public sealed class EfMoveQueuePersistenceTests : IAsyncLifetime
                 Status = MoveJobStatus.Queued,
                 Phase = MoveJobPhase.None,
                 IdentityKeyVersion = 1,
-                ActiveDeduplicationKey = "legacy:relative"
+                ActiveDeduplicationKey = "legacy:relative",
+                Entries = [CreateManifestEntry()]
             });
             await db.SaveChangesAsync();
         }
@@ -1116,7 +1202,7 @@ public sealed class EfMoveQueuePersistenceTests : IAsyncLifetime
         Assert.Equal(FileSystemCaseSensitivityMode.Sensitive, persisted.TargetCaseSensitivityMode);
         Assert.Equal(FileSystemPathIdentity.ResolveNativeAbsolutePath("/downloads/book"), persisted.SourceIdentityBoundary);
         Assert.Equal(FileSystemPathIdentity.ResolveNativeAbsolutePath("/library/book"), persisted.TargetIdentityBoundary);
-        Assert.Equal(3, persisted.IdentityKeyVersion);
+        Assert.Equal(MoveManifestIdentity.Version, persisted.IdentityKeyVersion);
     }
 
     [Fact]
@@ -1360,12 +1446,28 @@ public sealed class EfMoveQueuePersistenceTests : IAsyncLifetime
         return resolver.Object;
     }
 
+    private static MoveJobEntry CreateManifestEntry(
+        string hashCharacter = "A",
+        MoveJobEntryCopyState copyState = MoveJobEntryCopyState.Pending,
+        MoveJobEntryCleanupState cleanupState = MoveJobEntryCleanupState.Pending) =>
+        new()
+        {
+            RelativePath = "book.m4b",
+            EntryType = MoveJobEntryType.File,
+            Length = 1,
+            LastWriteTimeUtc = DateTime.UnixEpoch,
+            Sha256 = string.Concat(Enumerable.Repeat(hashCharacter, 64)),
+            CopyState = copyState,
+            CleanupState = cleanupState
+        };
+
     private static MoveJob CreateJob(string key) => new()
     {
         AudiobookId = 42,
         RequestedPath = "/library/book",
         Status = MoveJobStatus.Queued,
-        ActiveDeduplicationKey = key
+        ActiveDeduplicationKey = key,
+        Entries = [CreateManifestEntry()]
     };
 
     private static RequeueMoveCommand CreateRequeueCommand(

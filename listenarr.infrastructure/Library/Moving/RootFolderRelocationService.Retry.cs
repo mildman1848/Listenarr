@@ -27,6 +27,7 @@ public sealed partial class RootFolderRelocationService
         await using var transaction = await db.Database.BeginTransactionAsync(cancellationToken);
         var relocation = await db.RootFolderRelocations
             .Include(candidate => candidate.MoveJobs)
+                .ThenInclude(job => job.Entries)
             .Include(candidate => candidate.SkippedItems)
             .SingleOrDefaultAsync(candidate => candidate.Id == relocationId, cancellationToken)
             ?? throw new KeyNotFoundException("Root folder relocation not found");
@@ -68,6 +69,7 @@ public sealed partial class RootFolderRelocationService
         }
 
         var skippedSupersededJobs = 0;
+        var unsafeRetryJobs = 0;
         foreach (var job in relocation.MoveJobs.Where(job => job.Status is
             MoveJobStatus.NeedsAttention or MoveJobStatus.Failed or MoveJobStatus.Superseded))
         {
@@ -80,20 +82,58 @@ public sealed partial class RootFolderRelocationService
                 continue;
             }
 
-            if (string.IsNullOrWhiteSpace(job.RequestedPath)
-                || !job.TryGetTargetIdentity(out var targetIdentity))
+            string? sourceIdentityError = null;
+            if (string.IsNullOrWhiteSpace(job.SourcePath)
+                || !job.TryGetSourceIdentity(out var sourceIdentity)
+                || !TryValidateRetryIdentity(
+                    sourceIdentity,
+                    job.SourcePath,
+                    out sourceIdentityError))
             {
                 job.Status = MoveJobStatus.NeedsAttention;
-                job.Error = "The move job has no authoritative target filesystem identity.";
+                job.Error = sourceIdentityError
+                    ?? "The move job has no authoritative source filesystem identity.";
                 job.FailureKind = MoveFailureKind.Verification;
+                job.ActiveDeduplicationKey = null;
+                unsafeRetryJobs++;
                 continue;
             }
 
-            var deduplicationKey = FileSystemPathIdentity.CreateKey(
-                $"move:{job.AudiobookId}",
+            string? targetIdentityError = null;
+            if (string.IsNullOrWhiteSpace(job.RequestedPath)
+                || !job.TryGetTargetIdentity(out var targetIdentity)
+                || !TryValidateRetryIdentity(
+                    targetIdentity,
+                    job.RequestedPath,
+                    out targetIdentityError))
+            {
+                job.Status = MoveJobStatus.NeedsAttention;
+                job.Error = targetIdentityError
+                    ?? "The move job has no authoritative target filesystem identity.";
+                job.FailureKind = MoveFailureKind.Verification;
+                job.ActiveDeduplicationKey = null;
+                unsafeRetryJobs++;
+                continue;
+            }
+
+            if (job.Entries.Count == 0
+                || job.Entries.All(entry => entry.EntryType != MoveJobEntryType.File))
+            {
+                job.Status = MoveJobStatus.NeedsAttention;
+                job.Error = "The move job has no persisted tracked-file source manifest and cannot be retried safely.";
+                job.FailureKind = MoveFailureKind.Verification;
+                job.ActiveDeduplicationKey = null;
+                unsafeRetryJobs++;
+                continue;
+            }
+
+            var deduplicationKey = MoveManifestIdentity.CreateDeduplicationKey(
+                job.AudiobookId,
+                job.SourcePath,
+                sourceIdentity,
                 job.RequestedPath,
-                targetIdentity.Semantics,
-                version: 3);
+                targetIdentity,
+                job.Entries);
             var conflictingJob = await db.MoveJobs.AsNoTracking().FirstOrDefaultAsync(
                 candidate => candidate.Id != job.Id
                     && candidate.ActiveDeduplicationKey == deduplicationKey,
@@ -106,7 +146,7 @@ public sealed partial class RootFolderRelocationService
             }
 
             MoveJobManualRetry.Reset(job, deduplicationKey, now);
-            job.IdentityKeyVersion = 3;
+            job.IdentityKeyVersion = MoveManifestIdentity.Version;
         }
 
         if (relocation.SkippedItems.Count > 0)
@@ -119,10 +159,21 @@ public sealed partial class RootFolderRelocationService
         }
 
         var remainingSkippedItems = relocation.SkippedItems.Count;
-        if (remainingSkippedItems > 0 || skippedSupersededJobs > 0)
+        if (remainingSkippedItems > 0
+            || skippedSupersededJobs > 0
+            || unsafeRetryJobs > 0)
         {
             relocation.Status = RootFolderRelocationStatus.NeedsAttention;
-            relocation.Error = BuildRetryAttentionError(remainingSkippedItems, skippedSupersededJobs);
+            var retryError = BuildRetryAttentionError(
+                remainingSkippedItems,
+                skippedSupersededJobs);
+            var unsafeError = unsafeRetryJobs > 0
+                ? $"{unsafeRetryJobs} job(s) lacked authoritative source identity or tracked-file manifest evidence and were not retried."
+                : string.Empty;
+            relocation.Error = string.Join(
+                ' ',
+                new[] { retryError, unsafeError }
+                    .Where(message => !string.IsNullOrWhiteSpace(message)));
         }
         else if (relocation.MoveJobs.Count == 0)
         {
@@ -175,5 +226,26 @@ public sealed partial class RootFolderRelocationService
 
         var result = Map(relocation, rootPath ?? resultFallbackPath);
         return result;
+    }
+
+    private static bool TryValidateRetryIdentity(
+        PathIdentitySnapshot identity,
+        string path,
+        out string? error)
+    {
+        try
+        {
+            identity.ValidateForPath(path);
+            error = null;
+            return true;
+        }
+        catch (Exception exception) when (exception is
+            ArgumentException or InvalidOperationException
+            or NotSupportedException or PathTooLongException
+            or System.Security.SecurityException)
+        {
+            error = $"The move job has an invalid persisted filesystem identity: {exception.Message}";
+            return false;
+        }
     }
 }

@@ -149,33 +149,6 @@ public sealed partial class LibraryMoveWorkflow
                     "Destination filesystem identity is unavailable.");
             }
 
-            // SourcePath is an expected-state token, not permission to move an arbitrary
-            // existing directory. The audiobook's persisted BasePath remains authoritative.
-            var sourcePath = audiobook.BasePath;
-            if (string.IsNullOrEmpty(sourcePath))
-            {
-                return new BadRequestObjectResult(new
-                {
-                    message = "The audiobook has no current source path."
-                });
-            }
-
-            if (FileUtils.IsPathInvalidForCurrentOs(sourcePath))
-            {
-                return new BadRequestObjectResult(new
-                {
-                    message = "The audiobook source path is not valid for this operating system."
-                });
-            }
-
-            if (!_fileSystem.DirectoryExists(sourcePath))
-            {
-                return new BadRequestObjectResult(new
-                {
-                    message = "Source path does not exist for the audiobook."
-                });
-            }
-
             var targetParent = Path.GetDirectoryName(final);
             if (string.IsNullOrEmpty(targetParent))
             {
@@ -202,131 +175,12 @@ public sealed partial class LibraryMoveWorkflow
                 });
             }
 
-            var sourceFull = Path.GetFullPath(sourcePath);
             var targetIdentity = PathIdentitySnapshot.FromResolution(
                 targetBoundary.Semantics,
                 targetBoundary.CaseSensitivityMode,
                 targetBoundary.Path,
                 final);
-            var sourceBoundary = FindAllowedMoveRoot(sourceFull, allowedMoveRoots);
-            PathIdentitySnapshot sourceIdentity;
-            if (sourceBoundary != null)
-            {
-                sourceIdentity = PathIdentitySnapshot.FromResolution(
-                    sourceBoundary.Semantics,
-                    sourceBoundary.CaseSensitivityMode,
-                    sourceBoundary.Path,
-                    sourceFull);
-            }
-            else
-            {
-                var sourceResolution = await _semanticsResolver.ResolveAsync(
-                    sourceFull,
-                    cancellationToken: cancellationToken);
-                if (sourceResolution.State != PathIdentityState.Valid)
-                {
-                    return new BadRequestObjectResult(new
-                    {
-                        message = sourceResolution.Reason
-                            ?? "Source filesystem identity is unavailable."
-                    });
-                }
-
-                sourceIdentity = PathIdentitySnapshot.FromResolution(
-                    sourceResolution.Semantics,
-                    FileSystemCaseSensitivityMode.Auto,
-                    sourceResolution.BoundaryPath,
-                    sourceFull);
-            }
-
-            if (!string.IsNullOrWhiteSpace(request.SourcePath))
-            {
-                if (!FileUtils.TryNormalizeUserProvidedDirectoryPathForCurrentOs(
-                        request.SourcePath,
-                        out var expectedSourceFull,
-                        out var expectedSourceReason,
-                        rejectParentTraversal: true))
-                {
-                    return new BadRequestObjectResult(new
-                    {
-                        message = $"SourcePath is invalid: {expectedSourceReason}"
-                    });
-                }
-
-                if (!FileSystemPathIdentity.AreEquivalent(
-                        expectedSourceFull,
-                        sourceFull,
-                        sourceIdentity.Semantics))
-                {
-                    return new ConflictObjectResult(new
-                    {
-                        message = "The audiobook source path changed. Refresh and try again.",
-                        code = "source_path_changed"
-                    });
-                }
-            }
-
-            try
-            {
-                if (AreSameMoveEndpoint(
-                        sourceFull,
-                        sourceIdentity,
-                        final,
-                        targetIdentity))
-                {
-                    return new BadRequestObjectResult(new
-                    {
-                        message = "Source and target paths are identical; nothing to move."
-                    });
-                }
-            }
-            catch (Exception normalizeEx) when (
-                normalizeEx is ArgumentException
-                || normalizeEx is NotSupportedException
-                || normalizeEx is PathTooLongException
-                || normalizeEx is System.Security.SecurityException)
-            {
-                _logger.LogDebug(
-                    normalizeEx,
-                    "Unable to normalize move paths for audiobook {AudiobookId}",
-                    id);
-            }
-
             var deleteEmptySource = request.DeleteEmptySource ?? true;
-            string? sourceCleanupBoundary = null;
-            if (deleteEmptySource)
-            {
-                var cleanupBoundary = await _cleanupBoundaryResolver.ResolveAsync(
-                    sourcePath,
-                    final,
-                    rootFolders,
-                    cancellationToken: cancellationToken);
-                sourceCleanupBoundary = cleanupBoundary.Boundary;
-                if (!cleanupBoundary.IsAvailable)
-                {
-                    _logger.LogWarning(
-                        "Move for audiobook {AudiobookId} has no safe source cleanup boundary: {Reason}",
-                        id,
-                        cleanupBoundary.Reason ?? "boundary unavailable");
-                }
-                else
-                {
-                    _logger.LogInformation(
-                        "Resolved {BoundaryKind} source cleanup boundary {Boundary} for audiobook {AudiobookId}",
-                        cleanupBoundary.Kind,
-                        LogRedaction.SanitizeFilePath(sourceCleanupBoundary),
-                        id);
-                }
-            }
-
-            var enqueueCommand = new MoveEnqueueCommand(
-                id,
-                sourceFull,
-                sourceIdentity,
-                final,
-                targetIdentity,
-                deleteEmptySource,
-                sourceCleanupBoundary);
             var jobId = await _audiobookOperationCoordinator.ExecuteExclusiveAsync(
                 id,
                 async lockedToken =>
@@ -334,25 +188,90 @@ public sealed partial class LibraryMoveWorkflow
                     using var authoritativeScope = _scopeFactory.CreateScope();
                     var authoritativeRepository = authoritativeScope.ServiceProvider
                         .GetRequiredService<IAudiobookRepository>();
+                    var manifestService = authoritativeScope.ServiceProvider
+                        .GetRequiredService<IMoveSourceManifestService>();
                     var currentAudiobook = await authoritativeRepository.GetByIdSnapshotAsync(
                         id,
                         lockedToken)
                         ?? throw new ApplicationNotFoundException(
                             "audiobook_not_found",
                             "Audiobook not found");
-                    if (string.IsNullOrWhiteSpace(currentAudiobook.BasePath)
-                        || !SourceStateMatches(
-                            currentAudiobook.BasePath,
-                            sourceFull,
-                            sourceIdentity.Semantics))
+                    var manifest = await manifestService.BuildAsync(
+                        currentAudiobook,
+                        lockedToken);
+
+                    if (!string.IsNullOrWhiteSpace(request.SourcePath))
                     {
-                        throw new ApplicationConflictException(
-                            "source_path_changed",
-                            "The audiobook source path changed. Refresh and try again.");
+                        if (!FileUtils.TryNormalizeUserProvidedDirectoryPathForCurrentOs(
+                                request.SourcePath,
+                                out var expectedSourceFull,
+                                out var expectedSourceReason,
+                                rejectParentTraversal: true))
+                        {
+                            throw new ApplicationValidationException(
+                                "source_path_invalid",
+                                $"SourcePath is invalid: {expectedSourceReason}");
+                        }
+
+                        if (string.IsNullOrWhiteSpace(currentAudiobook.BasePath)
+                            || !SourceStateMatches(
+                                currentAudiobook.BasePath,
+                                expectedSourceFull,
+                                manifest.SourceIdentity.Semantics))
+                        {
+                            throw new ApplicationConflictException(
+                                "source_path_changed",
+                                "The audiobook source path changed. Refresh and try again.");
+                        }
+                    }
+
+                    if (AreSameMoveEndpoint(
+                            manifest.SourceRoot,
+                            manifest.SourceIdentity,
+                            final,
+                            targetIdentity))
+                    {
+                        throw new ApplicationValidationException(
+                            "identical_move_endpoint",
+                            "Source and target paths are identical; nothing to move.");
+                    }
+
+                    string? sourceCleanupBoundary = null;
+                    if (deleteEmptySource)
+                    {
+                        var cleanupBoundary = await _cleanupBoundaryResolver.ResolveAsync(
+                            manifest.SourceRoot,
+                            final,
+                            rootFolders,
+                            cancellationToken: lockedToken);
+                        sourceCleanupBoundary = cleanupBoundary.Boundary;
+                        if (!cleanupBoundary.IsAvailable)
+                        {
+                            _logger.LogWarning(
+                                "Move for audiobook {AudiobookId} has no safe source cleanup boundary: {Reason}",
+                                id,
+                                cleanupBoundary.Reason ?? "boundary unavailable");
+                        }
+                        else
+                        {
+                            _logger.LogInformation(
+                                "Resolved {BoundaryKind} source cleanup boundary {Boundary} for audiobook {AudiobookId}",
+                                cleanupBoundary.Kind,
+                                LogRedaction.SanitizeFilePath(sourceCleanupBoundary),
+                                id);
+                        }
                     }
 
                     return await _moveQueueService!.EnqueueMoveAsync(
-                        enqueueCommand,
+                        new MoveEnqueueCommand(
+                            id,
+                            manifest.SourceRoot,
+                            manifest.SourceIdentity,
+                            manifest.Entries,
+                            final,
+                            targetIdentity,
+                            deleteEmptySource,
+                            sourceCleanupBoundary),
                         lockedToken);
                 },
                 cancellationToken);

@@ -40,7 +40,46 @@ namespace Listenarr.Tests.Features.Api.Features.Library
             var result = await controller.ScanAudiobookFiles(ab.Id, new LibraryController.ScanRequest { Path = tempRoot });
             var ok = Assert.IsType<OkObjectResult>(result);
             Assert.Equal(200, ok.StatusCode);
-            Assert.Contains("No files found", ok.Value?.ToString() ?? string.Empty);
+            Assert.Contains("Scan complete", ok.Value?.ToString() ?? string.Empty);
+            Assert.Contains("found = 0", ok.Value?.ToString() ?? string.Empty);
+        }
+
+        [Fact]
+        public async Task ScanAudiobook_QueuedScanPersistsConfiguredRootIdentity()
+        {
+            var configuredRoot = FileService.GetTempDirectory(
+                "listenarr-queued-identity-root");
+            var requestedPath = Path.Join(configuredRoot, "Author", "Book");
+            Directory.CreateDirectory(requestedPath);
+            var controller = _provider.GetRequiredService<LibraryController>();
+            await _rootFolderRepository.AddAsync(new RootFolder
+            {
+                Name = "root",
+                Path = configuredRoot
+            });
+            await _applicationSettingsRepository.SaveAsync(
+                new ApplicationSettingsBuilder()
+                    .WithOutputPath(configuredRoot)
+                    .Build());
+            var audiobook = await _audiobookRepository.AddAsync(
+                new AudiobookBuilder()
+                    .WithTitle("Book")
+                    .Build());
+
+            var result = await controller.ScanAudiobookFiles(
+                audiobook.Id,
+                new LibraryController.ScanRequest { Path = requestedPath });
+
+            Assert.IsType<AcceptedResult>(result);
+            var queue = Assert.IsType<ScanQueueService>(
+                _provider.GetRequiredService<IScanQueueService>());
+            Assert.True(queue.Reader.TryRead(out var job));
+            Assert.Equal(requestedPath, job.Path);
+            Assert.True(job.PathIdentity.HasValue);
+            Assert.True(FileSystemPathIdentity.AreEquivalent(
+                configuredRoot,
+                job.PathIdentity.Value.BoundaryPath,
+                job.PathIdentity.Value.Semantics));
         }
 
         [Fact]
@@ -54,17 +93,25 @@ namespace Listenarr.Tests.Features.Api.Features.Library
             await _rootFolderRepository.AddAsync(new RootFolder { Name = "root", Path = tempRoot });
             await _applicationSettingsRepository.SaveAsync(new ApplicationSettingsBuilder().WithOutputPath(tempRoot).Build());
             var audiobook = await _audiobookRepository.AddAsync(new AudiobookBuilder().WithTitle("Test").Build());
-            fileService.Setup(service => service.ClaimAudiobookFileAsync(It.IsAny<Audiobook>(), It.IsAny<AudiobookFile>(), audioPath, It.IsAny<CancellationToken>()))
-                .Returns<Audiobook, AudiobookFile, string, CancellationToken>(async (claimedAudiobook, _, _, token) =>
+            fileService.Setup(service => service.EnsureAudiobookFileAsync(
+                    It.IsAny<Audiobook>(),
+                    audioPath,
+                    "Manual Scan",
+                    It.IsAny<CancellationToken>()))
+                .Returns<Audiobook, string, string?, CancellationToken>(async (claimedAudiobook, _, _, token) =>
                 {
                     var persisted = await _audiobookRepository.GetByIdSnapshotAsync(claimedAudiobook.Id, token);
                     Assert.NotNull(persisted);
                     Assert.Equal(Path.GetFullPath(tempRoot), Path.GetFullPath(persisted!.BasePath!));
-                    return new AudiobookFileClaimResult(AudiobookFileClaimOutcome.IdentityUnavailable, Reason: "Injected claim result.");
+                    return false;
                 });
             var result = await controller.ScanAudiobookFiles(audiobook.Id, new LibraryController.ScanRequest { Path = tempRoot });
             Assert.IsType<OkObjectResult>(result);
-            fileService.Verify(service => service.ClaimAudiobookFileAsync(It.IsAny<Audiobook>(), It.IsAny<AudiobookFile>(), audioPath, It.IsAny<CancellationToken>()), Times.Once);
+            fileService.Verify(service => service.EnsureAudiobookFileAsync(
+                It.IsAny<Audiobook>(),
+                audioPath,
+                "Manual Scan",
+                It.IsAny<CancellationToken>()), Times.Once);
         }
 
         [Fact]
@@ -125,8 +172,127 @@ namespace Listenarr.Tests.Features.Api.Features.Library
                 new LibraryController.ScanRequest { Path = tempRoot });
 
             var ok = Assert.IsType<OkObjectResult>(result);
-            Assert.Contains("No files found", ok.Value?.ToString() ?? string.Empty);
+            Assert.Contains("Scan complete", ok.Value?.ToString() ?? string.Empty);
+            Assert.Contains("complete = False", ok.Value?.ToString() ?? string.Empty);
             Assert.Empty(await _audiobookFileRepository.GetByAudiobookIdAsync(audiobook.Id));
+        }
+
+        [Fact]
+        [Trait("Method", "ScanAudiobookFiles")]
+        [Trait("Scenario", "FilesystemRootCannotAuthorizeScan")]
+        public async Task ScanAudiobook_FilesystemRootCannotAuthorizeScan()
+        {
+            var requestedPath = FileService.GetTempDirectory(
+                "listenarr-scan-root-boundary");
+            var filesystemRoot = Path.GetPathRoot(requestedPath);
+            Assert.False(string.IsNullOrWhiteSpace(filesystemRoot));
+            var controller = _provider.GetRequiredService<LibraryController>();
+            await _applicationSettingsRepository.SaveAsync(
+                new ApplicationSettingsBuilder()
+                    .WithOutputPath(filesystemRoot!)
+                    .Build());
+            var audiobook = await _audiobookRepository.AddAsync(
+                new AudiobookBuilder()
+                    .WithTitle("Test")
+                    .Build());
+
+            var result = await controller.ScanAudiobookFiles(
+                audiobook.Id,
+                new LibraryController.ScanRequest { Path = requestedPath });
+
+            var bad = Assert.IsType<BadRequestObjectResult>(result);
+            Assert.Contains(
+                "No root folders configured",
+                bad.Value?.ToString() ?? string.Empty);
+        }
+
+        [Fact]
+        [Trait("Method", "ScanAudiobookFiles")]
+        [Trait("Scenario", "QueuedScanRejectsRequestPathOutsideConfiguredRoots")]
+        public async Task ScanAudiobook_QueuedScanRejectsRequestPathOutsideConfiguredRoots()
+        {
+            var tempRoot = FileService.GetTempDirectory("listenarr-queued-scan-root");
+            var outside = FileService.GetTempDirectory("listenarr-queued-scan-outside");
+            var controller = _provider.GetRequiredService<LibraryController>();
+            await _rootFolderRepository.AddAsync(new RootFolder
+            {
+                Name = "root",
+                Path = tempRoot
+            });
+            await _applicationSettingsRepository.SaveAsync(new ApplicationSettingsBuilder()
+                .WithOutputPath(tempRoot)
+                .Build());
+            var audiobook = await _audiobookRepository.AddAsync(new AudiobookBuilder()
+                .WithTitle("Test")
+                .Build());
+
+            var result = await controller.ScanAudiobookFiles(
+                audiobook.Id,
+                new LibraryController.ScanRequest { Path = outside });
+
+            var bad = Assert.IsType<BadRequestObjectResult>(result);
+            Assert.Contains("not within configured root folders", bad.Value?.ToString() ?? string.Empty);
+        }
+
+        [Fact]
+        [Trait("Method", "ScanAudiobookFiles")]
+        [Trait("Scenario", "StoredBasePathOutsideConfiguredRootsIsRejected")]
+        public async Task ScanAudiobook_StoredBasePathOutsideConfiguredRootsIsRejected()
+        {
+            var configuredRoot = FileService.GetTempDirectory(
+                "listenarr-scan-configured-root");
+            var outsideBasePath = FileService.GetTempDirectory(
+                "listenarr-scan-outside-base");
+            var controller = _provider.GetRequiredService<LibraryController>();
+            await _applicationSettingsRepository.SaveAsync(
+                new ApplicationSettingsBuilder()
+                    .WithOutputPath(configuredRoot)
+                    .Build());
+            var audiobook = await _audiobookRepository.AddAsync(
+                new AudiobookBuilder()
+                    .WithTitle("Test")
+                    .WithBasePath(outsideBasePath)
+                    .Build());
+
+            var result = await controller.ScanAudiobookFiles(
+                audiobook.Id,
+                request: null);
+
+            var bad = Assert.IsType<BadRequestObjectResult>(result);
+            Assert.Equal(400, bad.StatusCode);
+            Assert.Contains(
+                "BasePath is not within configured root folders",
+                bad.Value?.ToString() ?? string.Empty);
+        }
+
+        [Fact]
+        [Trait("Method", "ScanAudiobookFiles")]
+        [Trait("Scenario", "ExplicitOutsidePathIsRejectedEvenWhenBasePathExists")]
+        public async Task ScanAudiobook_ExplicitOutsidePathIsRejectedEvenWhenBasePathExists()
+        {
+            var tempRoot = FileService.GetTempDirectory("listenarr-scan-existing-base");
+            var bookRoot = FileService.GetTempDirectory("listenarr-scan-existing-book");
+            var outside = FileService.GetTempDirectory("listenarr-scan-existing-outside");
+            var controller = _provider.GetRequiredService<LibraryController>();
+            await _rootFolderRepository.AddAsync(new RootFolder
+            {
+                Name = "root",
+                Path = tempRoot
+            });
+            await _applicationSettingsRepository.SaveAsync(new ApplicationSettingsBuilder()
+                .WithOutputPath(tempRoot)
+                .Build());
+            var audiobook = await _audiobookRepository.AddAsync(new AudiobookBuilder()
+                .WithTitle("Test")
+                .WithBasePath(bookRoot)
+                .Build());
+
+            var result = await controller.ScanAudiobookFiles(
+                audiobook.Id,
+                new LibraryController.ScanRequest { Path = outside });
+
+            var bad = Assert.IsType<BadRequestObjectResult>(result);
+            Assert.Contains("not within configured root folders", bad.Value?.ToString() ?? string.Empty);
         }
 
         [Fact]

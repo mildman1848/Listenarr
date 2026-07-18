@@ -24,14 +24,14 @@ namespace Listenarr.Application.Audiobooks.Contracts
         string? Path = null,
         PathIdentitySnapshot? PathIdentity = null,
         string? CorrelationId = null,
-        string? DownloadId = null);
+        string? DownloadId = null,
+        bool IsAuthoritativeScope = true);
 
     public interface IScanQueueService
     {
         Task<Guid> EnqueueScanAsync(ScanEnqueueCommand command);
         Task<Guid> EnqueueScanAsync(
             Audiobook audiobook,
-            string? path = null,
             string? correlationId = null,
             string? downloadId = null);
         Task<Guid?> EnqueueMoveHandoffScanAsync(

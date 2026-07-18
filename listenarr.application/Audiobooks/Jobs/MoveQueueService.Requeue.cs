@@ -144,10 +144,24 @@ public partial class MoveQueueService
                 return null;
             }
 
-            var deduplicationKey = BuildDeduplicationKey(
+            if (job.Entries.Count == 0
+                || job.Entries.All(entry => entry.EntryType != MoveJobEntryType.File))
+            {
+                await MarkUnsafeStoredPathNeedsAttentionAsync(
+                    job,
+                    "The move job has no persisted tracked-file source manifest and cannot be requeued safely.",
+                    cancellationToken);
+                jobToNotify = job;
+                return null;
+            }
+
+            var deduplicationKey = MoveManifestIdentity.CreateDeduplicationKey(
                 job.AudiobookId,
+                sourcePath,
+                sourceIdentity,
                 targetPath,
-                targetIdentity);
+                targetIdentity,
+                job.Entries);
             cancellationToken.ThrowIfCancellationRequested();
             var requeue = await _persistence.RequeueAsync(
                 new RequeueMoveCommand(
@@ -215,16 +229,6 @@ public partial class MoveQueueService
         status is MoveJobStatus.Failed or
             MoveJobStatus.NeedsAttention or
             MoveJobStatus.Queued;
-
-    private static string BuildDeduplicationKey(
-        int audiobookId,
-        string requestedPath,
-        PathIdentitySnapshot targetIdentity) =>
-        FileSystemPathIdentity.CreateKey(
-            $"move:{audiobookId}",
-            requestedPath,
-            targetIdentity.Semantics,
-            version: 3);
 
     private async Task<bool> MarkUnsafeStoredPathNeedsAttentionAsync(
         MoveJob job,

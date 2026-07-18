@@ -87,57 +87,6 @@ namespace Listenarr.Api.Features.Library
             return ResolvePathWithOptionalBase(rootPath, relative);
         }
 
-        public static string CalculateBasePath(List<string> filePaths, IFileSystem fileSystem, ILogger logger, FileSystemPathSemantics semantics)
-        {
-            if (!filePaths.Any())
-                return string.Empty;
-
-            var directories = filePaths
-                .Select(p => FileUtils.NormalizeStoredPath(Path.GetDirectoryName(p) ?? p))
-                .Where(p => !string.IsNullOrWhiteSpace(p))
-                .Distinct(semantics.Comparer)
-                .ToList();
-
-            if (directories.Count == 1)
-            {
-                return directories[0];
-            }
-
-            var commonPath = FileUtils.GetCommonPathForDirectories(directories, semantics) ?? directories[0];
-            var currentPath = commonPath;
-            while (!string.IsNullOrEmpty(currentPath))
-            {
-                try
-                {
-                    var parent = fileSystem.GetParentDirectory(currentPath);
-                    if (string.IsNullOrEmpty(parent))
-                        break;
-
-                    var subDirs = fileSystem.EnumerateDirectories(parent).Count();
-                    var files = fileSystem.EnumerateFiles(parent).Count();
-
-                    if (subDirs + files > 1)
-                    {
-                        return currentPath;
-                    }
-
-                    currentPath = parent;
-                }
-                catch (Exception traversalEx) when (
-                    traversalEx is IOException
-                    || traversalEx is UnauthorizedAccessException
-                    || traversalEx is System.Security.SecurityException
-                    || traversalEx is ArgumentException
-                    || traversalEx is NotSupportedException)
-                {
-                    logger.LogDebug(traversalEx, "Stopping common-base-path ascent at {Path} due to traversal error", currentPath);
-                    break;
-                }
-            }
-
-            return commonPath;
-        }
-
         internal static string SanitizeDirectoryName(string name)
         {
             var invalidChars = Path.GetInvalidFileNameChars();

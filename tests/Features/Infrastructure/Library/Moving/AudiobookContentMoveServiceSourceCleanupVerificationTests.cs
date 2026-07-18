@@ -3,20 +3,39 @@ namespace Listenarr.Tests.Features.Infrastructure.Library.Moving;
 public partial class AudiobookContentMoveServiceTests
 {
     [Fact]
-    public async Task GetRecoverableMoveAsync_SourceCleanupCompleteWithRecreatedFile_RequiresAttention()
+    public async Task GetRecoverableMoveAsync_SourceCleanupCompleteWithRecreatedOwnedFile_RequiresAttention()
     {
         var state = await CreateSourceCleanupCompletedStateAsync(deleteEmptySource: true);
         Directory.CreateDirectory(state.Source);
-        await FileService.GetFileAsync(state.Source, "recreated.txt", "do not delete");
+        await FileService.GetFileAsync(state.Source, "book.m4b", "do not delete");
         var service = _provider.GetRequiredService<AudiobookContentMoveService>();
 
         var exception = await Assert.ThrowsAsync<MoveNeedsAttentionException>(() =>
             service.GetRecoverableMoveAsync(state.Request));
 
-        Assert.Contains("recreated or uncleared content", exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("owned file path", exception.Message, StringComparison.OrdinalIgnoreCase);
         Assert.Equal(
             "do not delete",
-            await File.ReadAllTextAsync(Path.Join(state.Source, "recreated.txt")));
+            await File.ReadAllTextAsync(Path.Join(state.Source, "book.m4b")));
+        Assert.True(File.Exists(state.MarkerPath));
+    }
+
+    [Fact]
+    public async Task GetRecoverableMoveAsync_SourceCleanupCompleteWithForeignFile_RemainsRecoverable()
+    {
+        var state = await CreateSourceCleanupCompletedStateAsync(deleteEmptySource: true);
+        Directory.CreateDirectory(state.Source);
+        var foreignFile = await FileService.GetFileAsync(
+            state.Source,
+            "operator-note.txt",
+            "preserve me");
+        var service = _provider.GetRequiredService<AudiobookContentMoveService>();
+
+        var result = await service.GetRecoverableMoveAsync(state.Request);
+
+        Assert.NotNull(result);
+        Assert.True(result.SourceCleanupCompleted);
+        Assert.Equal("preserve me", await File.ReadAllTextAsync(foreignFile));
         Assert.True(File.Exists(state.MarkerPath));
     }
 

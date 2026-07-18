@@ -23,7 +23,10 @@ namespace Listenarr.Tests.Features.Infrastructure.Library.Scanning
 
             _services.AddSingleton(metadataMock.Object);
             Init();
-            await Task.CompletedTask;
+            await _applicationSettingsRepository.SaveAsync(
+                new ApplicationSettingsBuilder()
+                    .WithOutputPath(FileService.GetTempPath())
+                    .Build());
         }
 
         [Fact]
@@ -50,6 +53,101 @@ namespace Listenarr.Tests.Features.Infrastructure.Library.Scanning
             var metricsMock = _provider.GetRequiredService<Mock<IAppMetricsService>>();
             metricsMock.Verify(m => m.Increment("worker.scan.job.started", It.IsAny<double>()), Times.Once);
             metricsMock.Verify(m => m.Increment("worker.scan.job.completed", It.IsAny<double>()), Times.Once);
+        }
+
+        [Fact]
+        public async Task ProcessJobAsync_ExplicitQueuedPath_IsNotOverriddenByStoredBasePath()
+        {
+            var storedBasePath = FileService.GetTempDirectory("scan-processor-stored-base");
+            var requestedPath = FileService.GetTempDirectory("scan-processor-requested");
+            var requestedFile = await FileService.GetFileAsync(
+                requestedPath,
+                "Requested Book.m4b",
+                "audio");
+            var audiobook = await _audiobookRepository.AddAsync(new AudiobookBuilder()
+                .WithTitle("Requested Book")
+                .WithBasePath(storedBasePath)
+                .Build());
+            var queue = Assert.IsType<ScanQueueService>(
+                _provider.GetRequiredService<IScanQueueService>());
+            var resolution = await _provider
+                .GetRequiredService<IFileSystemSemanticsResolver>()
+                .ResolveAsync(requestedPath);
+            Assert.Equal(PathIdentityState.Valid, resolution.State);
+            var identity = PathIdentitySnapshot.FromResolution(
+                resolution.Semantics,
+                FileSystemCaseSensitivityMode.Auto,
+                FileService.GetTempPath(),
+                requestedPath);
+            var jobId = await queue.EnqueueScanAsync(new ScanEnqueueCommand(
+                audiobook,
+                requestedPath,
+                identity));
+            Assert.True(queue.Reader.TryRead(out var job));
+            Assert.Equal(jobId, job.Id);
+
+            await _provider.GetRequiredService<IScanJobProcessor>()
+                .ProcessJobAsync(job, CancellationToken.None);
+
+            var file = Assert.Single(
+                await _audiobookFileRepository.GetByAudiobookIdAsync(audiobook.Id));
+            Assert.Equal(requestedFile, file.Path);
+            var persisted = await _audiobookRepository.GetByIdSnapshotAsync(
+                audiobook.Id);
+            Assert.Equal(requestedPath, persisted!.BasePath);
+        }
+
+        [Fact]
+        public async Task ProcessJobAsync_ConfiguredRootChangedAfterEnqueue_RejectsQueuedAuthority()
+        {
+            var originalRoot = FileService.GetTempDirectory(
+                "scan-processor-original-root");
+            var replacementRoot = FileService.GetTempDirectory(
+                "scan-processor-replacement-root");
+            var bookPath = Path.Join(originalRoot, "Author", "Book");
+            Directory.CreateDirectory(bookPath);
+            _ = await FileService.GetFileAsync(bookPath, "Book.m4b", "audio");
+            await _applicationSettingsRepository.SaveAsync(
+                new ApplicationSettingsBuilder()
+                    .WithOutputPath(originalRoot)
+                    .Build());
+            var audiobook = await _audiobookRepository.AddAsync(
+                new AudiobookBuilder()
+                    .WithTitle("Book")
+                    .Build());
+            var semantics = await _provider
+                .GetRequiredService<IFileSystemSemanticsResolver>()
+                .ResolveAsync(originalRoot);
+            Assert.Equal(PathIdentityState.Valid, semantics.State);
+            var identity = PathIdentitySnapshot.FromResolution(
+                semantics.Semantics,
+                FileSystemCaseSensitivityMode.Auto,
+                originalRoot,
+                bookPath);
+            var queue = Assert.IsType<ScanQueueService>(
+                _provider.GetRequiredService<IScanQueueService>());
+            var jobId = await queue.EnqueueScanAsync(new ScanEnqueueCommand(
+                audiobook,
+                bookPath,
+                identity));
+            Assert.True(queue.Reader.TryRead(out var job));
+            Assert.Equal(jobId, job.Id);
+            await _applicationSettingsRepository.SaveAsync(
+                new ApplicationSettingsBuilder()
+                    .WithOutputPath(replacementRoot)
+                    .Build());
+
+            await _provider.GetRequiredService<IScanJobProcessor>()
+                .ProcessJobAsync(job, CancellationToken.None);
+
+            Assert.True(queue.TryGetJob(job.Id, out var updated));
+            Assert.Equal("Failed", updated!.Status);
+            Assert.Contains(
+                "not within a configured root folder",
+                updated.Error ?? string.Empty,
+                StringComparison.OrdinalIgnoreCase);
+            Assert.Empty(
+                await _audiobookFileRepository.GetByAudiobookIdAsync(audiobook.Id));
         }
 
         [Fact]
@@ -130,6 +228,10 @@ namespace Listenarr.Tests.Features.Infrastructure.Library.Scanning
 
             _services.AddSingleton(hubContext.Object);
             Init();
+            await _applicationSettingsRepository.SaveAsync(
+                new ApplicationSettingsBuilder()
+                    .WithOutputPath(FileService.GetTempPath())
+                    .Build());
 
             var basePath = FileService.GetTempDirectory("scan-processor-failure");
             await FileService.GetFileAsync(basePath, "Broken Broadcast.m4b", "audio");
@@ -178,6 +280,10 @@ namespace Listenarr.Tests.Features.Infrastructure.Library.Scanning
             hubContext.Setup(context => context.Clients).Returns(hubClients.Object);
             _services.AddSingleton(hubContext.Object);
             Init();
+            await _applicationSettingsRepository.SaveAsync(
+                new ApplicationSettingsBuilder()
+                    .WithOutputPath(FileService.GetTempPath())
+                    .Build());
 
             var basePath = FileService.GetTempDirectory("scan-processor-post-effects");
             await FileService.GetFileAsync(basePath, "Post Effects.m4b", "audio");
@@ -213,7 +319,9 @@ namespace Listenarr.Tests.Features.Infrastructure.Library.Scanning
         [Fact]
         public async Task ProcessJobAsync_MissingBasePath_FailsWithoutClearingMetadataOrFiles()
         {
-            var missingBasePath = Path.Join(Path.GetTempPath(), $"scan-processor-missing-{Guid.NewGuid():N}");
+            var missingBasePath = Path.Join(
+                FileService.GetTempPath(),
+                $"scan-processor-missing-{Guid.NewGuid():N}");
             var audiobook = await _audiobookRepository.AddAsync(new AudiobookBuilder()
                 .WithTitle("Missing Scan Book")
                 .WithBasePath(missingBasePath)
@@ -363,9 +471,8 @@ namespace Listenarr.Tests.Features.Infrastructure.Library.Scanning
                 .WithBasePath(basePath)
                 .Build();
             var audiobookRepository = new Mock<IAudiobookRepository>();
-            audiobookRepository.SetupSequence(repository => repository.GetByIdAsync(audiobook.Id))
-                .ReturnsAsync(audiobook)
-                .ReturnsAsync((Audiobook?)null);
+            audiobookRepository.Setup(repository => repository.GetByIdAsync(audiobook.Id))
+                .ReturnsAsync(audiobook);
             var fileRepository = new Mock<IAudiobookFileRepository>();
             fileRepository.Setup(repository => repository.GetByAudiobookIdAsync(
                     audiobook.Id,
@@ -380,10 +487,30 @@ namespace Listenarr.Tests.Features.Infrastructure.Library.Scanning
                     It.IsAny<History>(),
                     It.IsAny<CancellationToken>()))
                 .ReturnsAsync((History entry, CancellationToken _) => entry);
+            var scanService = new Mock<IAudiobookScanService>();
+            scanService.Setup(service => service.ScanAsync(
+                    It.IsAny<AudiobookScanCommand>(),
+                    It.IsAny<CancellationToken>()))
+                .ThrowsAsync(new InvalidOperationException(
+                    "Audiobook disappeared before scan completion"));
+            var pathIdentity = PathIdentitySnapshot.FromResolution(
+                FileSystemPathSemantics.CurrentHostDefault,
+                FileSystemCaseSensitivityMode.Auto,
+                FileService.GetTempPath(),
+                basePath);
+            var authorizationService = new Mock<IScanPathAuthorizationService>();
+            authorizationService.Setup(service => service.ResolveDefaultAsync(
+                    basePath,
+                    It.IsAny<CancellationToken>()))
+                .ReturnsAsync(ScanPathAuthorizationResult.Authorized(
+                    basePath,
+                    pathIdentity));
             await using var services = new ServiceCollection()
                 .AddSingleton(audiobookRepository.Object)
                 .AddSingleton(fileRepository.Object)
                 .AddSingleton(historyRepository.Object)
+                .AddSingleton(scanService.Object)
+                .AddSingleton(authorizationService.Object)
                 .BuildServiceProvider();
             var queue = Assert.IsType<ScanQueueService>(
                 _provider.GetRequiredService<IScanQueueService>());

@@ -74,7 +74,9 @@ namespace Listenarr.Tests.Features.Api.Features.Downloads
         public static Mock<IScanQueueService> GetScanMock()
         {
             var scanMock = new Mock<IScanQueueService>();
-            scanMock.Setup(s => s.EnqueueScanAsync(It.IsAny<Audiobook>(), It.IsAny<string>())).ReturnsAsync(Guid.NewGuid());
+            scanMock.Setup(service => service.EnqueueScanAsync(
+                    It.IsAny<ScanEnqueueCommand>()))
+                .ReturnsAsync(Guid.NewGuid());
 
             return scanMock;
         }
@@ -137,6 +139,35 @@ namespace Listenarr.Tests.Features.Api.Features.Downloads
             rootFolderMock.Setup(r => r.GetAllAsync()).ReturnsAsync(
                 rootFolders?.ToList() ?? []);
             semanticsResolver ??= new FileSystemSemanticsResolver();
+            var scanAuthorizationMock = new Mock<IScanPathAuthorizationService>();
+            scanAuthorizationMock
+                .Setup(service => service.AuthorizeAsync(
+                    It.IsAny<string>(),
+                    It.IsAny<CancellationToken>()))
+                .Returns<string, CancellationToken>((path, _) =>
+                {
+                    var fullPath = Path.GetFullPath(path);
+                    var configuredBoundary = !string.IsNullOrWhiteSpace(settings.OutputPath)
+                        ? Path.GetFullPath(settings.OutputPath)
+                        : fullPath;
+                    if (!FileSystemPathIdentity.IsSameOrInside(
+                            fullPath,
+                            configuredBoundary,
+                            FileSystemPathSemantics.CurrentHostDefault))
+                    {
+                        configuredBoundary = fullPath;
+                    }
+
+                    var identity = PathIdentitySnapshot.FromResolution(
+                        FileSystemPathSemantics.CurrentHostDefault,
+                        FileSystemCaseSensitivityMode.Auto,
+                        configuredBoundary,
+                        fullPath);
+                    return Task.FromResult(
+                        ScanPathAuthorizationResult.Authorized(
+                            fullPath,
+                            identity));
+                });
             if (directoryOwnershipStore == null)
             {
                 var directoryOwnershipStoreMock = new Mock<ILibraryDirectoryOwnershipStore>();
@@ -160,6 +191,7 @@ namespace Listenarr.Tests.Features.Api.Features.Downloads
                 new FileNamingService(configMock.Object, NullLogger<FileNamingService>.Instance),
                 configMock.Object,
                 scanMock.Object,
+                scanAuthorizationMock.Object,
                 rootFolderMock.Object,
                 fileMover,
                 audiobookFileService,
@@ -577,8 +609,7 @@ namespace Listenarr.Tests.Features.Api.Features.Downloads
             var repoMock = GetRepoMock(book);
 
             var expectedScanPath = Path.Join(outputRoot, "Roger Zelazny", "Jack of Shadows");
-            var scanMock = new Mock<IScanQueueService>();
-            scanMock.Setup(s => s.EnqueueScanAsync(book, expectedScanPath)).ReturnsAsync(Guid.NewGuid());
+            var scanMock = GetScanMock();
 
             var controller = GetController(book, new ApplicationSettings
             {
@@ -604,8 +635,12 @@ namespace Listenarr.Tests.Features.Api.Features.Downloads
             Assert.IsType<Microsoft.AspNetCore.Mvc.OkObjectResult>(action.Result);
 
             Assert.Equal(expectedScanPath, book.BasePath);
-            scanMock.Verify(s => s.EnqueueScanAsync(book, expectedScanPath), Times.Once);
-            scanMock.Verify(s => s.EnqueueScanAsync(book, It.IsAny<string>()), Times.Once);
+            scanMock.Verify(service => service.EnqueueScanAsync(
+                It.Is<ScanEnqueueCommand>(command =>
+                    command.Audiobook.Id == book.Id
+                    && command.Path == expectedScanPath
+                    && command.PathIdentity.HasValue
+                    && !command.IsAuthoritativeScope)), Times.Once);
             repoMock.Verify(r => r.UpdateAsync(It.Is<Audiobook>(a => a.Id == book.Id && a.BasePath == expectedScanPath)), Times.AtLeastOnce);
         }
 
@@ -757,8 +792,11 @@ namespace Listenarr.Tests.Features.Api.Features.Downloads
                 basePath,
                 "Post Mutation Cancellation.mp3")));
             scanMock.Verify(service => service.EnqueueScanAsync(
-                It.Is<Audiobook>(candidate => candidate.Id == book.Id),
-                basePath), Times.Once);
+                It.Is<ScanEnqueueCommand>(command =>
+                    command.Audiobook.Id == book.Id
+                    && command.Path == basePath
+                    && command.PathIdentity.HasValue
+                    && !command.IsAuthoritativeScope)), Times.Once);
         }
 
         [Fact]

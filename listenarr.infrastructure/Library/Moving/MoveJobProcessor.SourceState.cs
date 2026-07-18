@@ -1,3 +1,4 @@
+using Listenarr.Application.Common.Exceptions;
 using Listenarr.Domain.Common;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
@@ -95,17 +96,9 @@ internal partial class MoveJobProcessor
             return false;
         }
 
-        if (string.IsNullOrWhiteSpace(currentAudiobook.BasePath))
-        {
-            await MarkSourceStateNeedsAttentionAsync(
-                job,
-                "The audiobook has no current source path, so the queued move cannot be proven safe.",
-                cancellationToken);
-            return false;
-        }
-
         var currentPath = currentAudiobook.BasePath;
-        if (!IsValidAbsolutePath(currentPath, sourceIdentity.Syntax)
+        if (!string.IsNullOrWhiteSpace(currentPath)
+            && !IsValidAbsolutePath(currentPath, sourceIdentity.Syntax)
             && !IsValidAbsolutePath(currentPath, targetIdentity.Syntax))
         {
             await MarkSourceStateNeedsAttentionAsync(
@@ -115,8 +108,14 @@ internal partial class MoveJobProcessor
             return false;
         }
 
-        var matchesSource = PathsMatch(currentPath, source, sourceIdentity.Semantics);
-        var matchesTarget = PathsMatch(currentPath, target, targetIdentity.Semantics);
+        var matchesSource = string.IsNullOrWhiteSpace(currentPath)
+            || PathsMatch(currentPath, source, sourceIdentity.Semantics)
+            || IsSourceInsideMetadataBasePath(
+                source,
+                currentPath,
+                sourceIdentity.Semantics);
+        var matchesTarget = !string.IsNullOrWhiteSpace(currentPath)
+            && PathsMatch(currentPath, target, targetIdentity.Semantics);
         var hasVerifiedRecovery = recoveredMove != null;
         var hasRecoveryEvidence = hasVerifiedRecovery || hasFilesystemExecutionEvidence;
         var hasAdvancedDurablePhase = job.Phase > MoveJobPhase.Planned;
@@ -129,6 +128,22 @@ internal partial class MoveJobProcessor
                 await MarkSourceStateNeedsAttentionAsync(
                     job,
                     "The move has durable execution evidence but recovery could not be verified.",
+                    cancellationToken);
+                return false;
+            }
+
+            if (!hasRecoveryEvidence
+                && !await CurrentTrackedManifestMatchesAsync(
+                    scope.ServiceProvider,
+                    currentAudiobook,
+                    job,
+                    source,
+                    sourceIdentity,
+                    cancellationToken))
+            {
+                await MarkSourceStateNeedsAttentionAsync(
+                    job,
+                    "The audiobook's current tracked-file ownership no longer matches the queued move source manifest.",
                     cancellationToken);
                 return false;
             }
@@ -214,6 +229,63 @@ internal partial class MoveJobProcessor
                 "Move job {JobId} could not inspect its filesystem execution evidence",
                 cancellationToken);
             return null;
+        }
+    }
+
+    private static bool IsSourceInsideMetadataBasePath(
+        string source,
+        string? metadataBasePath,
+        FileSystemPathSemantics sourceSemantics)
+    {
+        if (string.IsNullOrWhiteSpace(metadataBasePath))
+        {
+            return false;
+        }
+
+        try
+        {
+            return FileSystemPathIdentity.IsSameOrInside(
+                source,
+                metadataBasePath,
+                sourceSemantics);
+        }
+        catch (Exception exception) when (exception is
+            ArgumentException or NotSupportedException or PathTooLongException
+            or System.Security.SecurityException)
+        {
+            return false;
+        }
+    }
+
+    private static async Task<bool> CurrentTrackedManifestMatchesAsync(
+        IServiceProvider services,
+        Audiobook currentAudiobook,
+        MoveJob job,
+        string source,
+        PathIdentitySnapshot sourceIdentity,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            var currentManifest = await services
+                .GetRequiredService<IMoveSourceManifestService>()
+                .BuildAsync(currentAudiobook, cancellationToken);
+            return FileSystemPathIdentity.AreEquivalent(
+                    currentManifest.SourceRoot,
+                    source,
+                    sourceIdentity.Semantics)
+                && MoveManifestIdentity.SourceManifestsMatch(
+                    currentManifest.Entries,
+                    job.Entries,
+                    sourceIdentity.Semantics);
+        }
+        catch (Exception exception) when (exception is
+            ApplicationConflictException or ArgumentException
+            or InvalidOperationException or NotSupportedException
+            or PathTooLongException or IOException
+            or UnauthorizedAccessException)
+        {
+            return false;
         }
     }
 

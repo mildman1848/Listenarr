@@ -64,11 +64,30 @@ public partial class ManualImportController
                         return;
                     }
 
-                    await PersistAudiobookBasePathAsync(audiobook, scanPath);
+                    var authorization = await _scanPathAuthorizationService.AuthorizeAsync(
+                        scanPath,
+                        operationToken);
+                    if (!authorization.IsAuthorized)
+                    {
+                        _logger.LogWarning(
+                            "Skipped focused scan for audiobook {AudiobookId}: {Reason}",
+                            group.Key,
+                            authorization.Error);
+                        return;
+                    }
+
+                    await PersistAudiobookBasePathAsync(
+                        audiobook,
+                        authorization.Path);
 
                     try
                     {
-                        var scanJobId = await _scanQueueService.EnqueueScanAsync(audiobook, scanPath);
+                        var scanJobId = await _scanQueueService.EnqueueScanAsync(
+                            new ScanEnqueueCommand(
+                                audiobook,
+                                authorization.Path,
+                                authorization.Identity,
+                                IsAuthoritativeScope: false));
                         _logger.LogInformation(
                             "Enqueued focused scan {ScanJobId} for audiobook {AudiobookId} (path: {Path}) after manual import batch of {FileCount} file(s)",
                             scanJobId,

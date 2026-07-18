@@ -953,12 +953,6 @@ namespace Listenarr.Tests.Features.Application.Audiobooks.RootFolders
             var repo = new EfRootFolderRepository(dbFactory, Mock.Of<ILogger<EfRootFolderRepository>>());
 
             var mockMove = new Moq.Mock<IMoveQueueService>();
-            mockMove.Setup(m => m.EnqueueMoveAsync(
-                    It.IsAny<int>(),
-                    It.IsAny<string>(),
-                    It.IsAny<string>(),
-                    It.IsAny<bool>()))
-                .ReturnsAsync(Guid.NewGuid());
 
             var logger = new TestLogger<RootFolderService>(_output);
             var svc = new RootFolderService(repo, logger, mockMove.Object);
@@ -987,15 +981,8 @@ namespace Listenarr.Tests.Features.Application.Audiobooks.RootFolders
             }
 
             mockMove.Verify(m => m.EnqueueMoveAsync(
-                1,
-                newRootAuthorTitlePath,
-                rootAuthorTitlePath,
-                false), Times.Never);
-            mockMove.Verify(m => m.EnqueueMoveAsync(
-                2,
-                newRootPath,
-                rootPath,
-                false), Times.Never);
+                It.IsAny<MoveEnqueueCommand>(),
+                It.IsAny<CancellationToken>()), Times.Never);
         }
 
         [Fact]
@@ -1048,12 +1035,6 @@ namespace Listenarr.Tests.Features.Application.Audiobooks.RootFolders
                 new TestDbFactory(options),
                 Mock.Of<ILogger<EfRootFolderRepository>>());
             var moveQueue = new Mock<IMoveQueueService>();
-            moveQueue.Setup(queue => queue.EnqueueMoveAsync(
-                    It.IsAny<int>(),
-                    It.IsAny<string>(),
-                    It.IsAny<string>(),
-                    It.IsAny<bool>()))
-                .ThrowsAsync(new InvalidOperationException("queue unavailable"));
             var service = new RootFolderService(repo, new TestLogger<RootFolderService>(_output), moveQueue.Object);
 
             var exception = await Assert.ThrowsAsync<InvalidOperationException>(() =>
@@ -1063,10 +1044,8 @@ namespace Listenarr.Tests.Features.Application.Audiobooks.RootFolders
 
             Assert.Contains("path-changes", exception.Message, StringComparison.OrdinalIgnoreCase);
             moveQueue.Verify(queue => queue.EnqueueMoveAsync(
-                It.IsAny<int>(),
-                It.IsAny<string>(),
-                It.IsAny<string>(),
-                It.IsAny<bool>()), Times.Never);
+                It.IsAny<MoveEnqueueCommand>(),
+                It.IsAny<CancellationToken>()), Times.Never);
         }
 
         private static IFileSystemSemanticsResolver BuildSemanticsResolver(

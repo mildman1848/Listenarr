@@ -23,7 +23,10 @@ public sealed partial class EfMoveQueuePersistence(
         try
         {
             await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
-            return await db.MoveJobs.AsNoTracking().SingleOrDefaultAsync(job => job.Id == id, cancellationToken);
+            return await db.MoveJobs
+                .AsNoTracking()
+                .Include(job => job.Entries)
+                .SingleOrDefaultAsync(job => job.Id == id, cancellationToken);
         }
         catch (DbException ex)
         {
@@ -40,6 +43,7 @@ public sealed partial class EfMoveQueuePersistence(
             await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
             return await db.MoveJobs
                 .AsNoTracking()
+                .Include(job => job.Entries)
                 .SingleOrDefaultAsync(
                     job => job.ActiveDeduplicationKey == deduplicationKey,
                     cancellationToken);
@@ -57,6 +61,7 @@ public sealed partial class EfMoveQueuePersistence(
             await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
             return await db.MoveJobs
                 .AsNoTracking()
+                .Include(job => job.Entries)
                 .Where(job => job.ActiveDeduplicationKey != null
                     && (job.Status == MoveJobStatus.Queued
                         || job.Status == MoveJobStatus.Running

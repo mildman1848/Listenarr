@@ -36,7 +36,6 @@ public sealed class EfMoveExecutionStoreTests
                 semantics,
                 semantics,
                 CancellationToken.None),
-            () => store.PersistManifestAsync(jobId, lease, [], CancellationToken.None),
             async () => _ = await store.LoadManifestAsync(jobId, CancellationToken.None),
             () => store.UpdateCleanupStateAsync(
                 jobId,

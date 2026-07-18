@@ -39,7 +39,12 @@ namespace Listenarr.Tests.Features.Infrastructure.Library.Moving
             // Start background service
             await bg.StartAsync(CancellationToken.None);
 
-            var jobId = await moveQueue.EnqueueMoveAsync(ab.Id, dst, src);
+            var jobId = await moveQueue.EnqueueMoveAsync(
+                await MoveJobTestFactory.CreateCommandAsync(
+                    _provider,
+                    ab.Id,
+                    src,
+                    dst));
 
             // Wait for the deterministic target conflict to require operator attention.
             MoveJob? persisted = null;

@@ -56,7 +56,7 @@ public partial class MoveJobProcessorTests
     }
 
     [Fact]
-    public async Task ProcessJobAsync_SourceRecreatedBeforeMarkerDelete_RequiresAttentionAndPreservesMarker()
+    public async Task ProcessJobAsync_ForeignSourceFileBeforeMarkerDelete_PreservesFileAndCompletes()
     {
         var source = FileService.GetTempDirectory("move-processor-recreated-source-src");
         await FileService.GetFileAsync(source, "book.m4b", "audio");
@@ -82,11 +82,11 @@ public partial class MoveJobProcessorTests
 
         var persisted = await queue.GetJobAsync(job.Id);
         Assert.NotNull(persisted);
-        Assert.Equal(MoveJobStatus.NeedsAttention, persisted!.Status);
+        Assert.Equal(MoveJobStatus.Completed, persisted!.Status);
         Assert.Equal(
             "preserve me",
             await File.ReadAllTextAsync(Path.Join(source, "operator-note.txt")));
-        Assert.True(File.Exists(Path.Join(
+        Assert.False(File.Exists(Path.Join(
             target,
             $".listenarr-move-{job.Id:N}.pending")));
     }

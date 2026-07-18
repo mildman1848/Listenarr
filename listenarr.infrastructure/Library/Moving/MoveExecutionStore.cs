@@ -25,12 +25,6 @@ internal interface IMoveExecutionStore
         FileSystemPathSemantics targetSemantics,
         CancellationToken cancellationToken);
 
-    Task PersistManifestAsync(
-        Guid jobId,
-        MoveLeaseToken leaseToken,
-        IReadOnlyCollection<MoveJobEntry> manifest,
-        CancellationToken cancellationToken);
-
     Task<List<MoveJobEntry>> LoadManifestAsync(Guid jobId, CancellationToken cancellationToken);
 
     Task UpdateCleanupStateAsync(

@@ -146,19 +146,16 @@ internal sealed partial class AudiobookContentMoveService
             }
         }
 
-        var current = sourceExists
-            ? await SnapshotSourceAsync(
-                jobId,
+        if (sourceExists && expectedAtSource.Count > 0)
+        {
+            await ValidatePersistedSourceManifestAsync(
                 source,
                 target,
                 targetInsideSource,
+                expectedAtSource,
                 sourceSemantics,
-                cancellationToken)
-            : [];
-        if (!ManifestMatches(expectedAtSource, current, sourceSemantics))
-        {
-            throw new MoveNeedsAttentionException(
-                "Source content changed after the move was planned; cleanup was blocked.");
+                cancellationToken,
+                requireTrackedFile: false);
         }
 
         var publishedTempOwnership = await TryValidatePublishedTempOwnershipAsync(

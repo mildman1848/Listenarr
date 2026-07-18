@@ -23,7 +23,10 @@ internal sealed partial class AudiobookContentMoveService
 
         var manifest = await LoadManifestAsync(request.JobId, cancellationToken);
         var scaffolding = await GetCreatedDirectoriesAsync(request.JobId, cancellationToken);
-        if (manifest.Count > 0 || scaffolding.Count > 0)
+        var manifestHasExecutionState = manifest.Any(entry =>
+            entry.CopyState != MoveJobEntryCopyState.Pending
+            || entry.CleanupState != MoveJobEntryCleanupState.Pending);
+        if (manifestHasExecutionState || scaffolding.Count > 0)
         {
             throw new MoveNeedsAttentionException(
                 "The identical-endpoint job has durable move execution state and cannot be superseded automatically.");

@@ -31,6 +31,9 @@ internal static class LibraryRegistrationExtensions
         services.AddScoped<IAudiobookFilePathIdentityResolver, AudiobookFilePathIdentityResolver>();
         services.AddScoped<IAudiobookFileIdentityReconciler, AudiobookFileIdentityReconciler>();
         services.AddScoped<IAudiobookFileService, AudiobookFileService>();
+        services.AddScoped<IScanPathAuthorizationService, ScanPathAuthorizationService>();
+        services.AddScoped<IAudiobookScanService, AudiobookScanService>();
+        services.AddScoped<IMoveSourceManifestService, MoveSourceManifestService>();
         services.AddScoped<IAuthorCatalogService, AuthorCatalogService>();
         services.AddScoped<ISeriesCatalogService, SeriesCatalogService>();
         services.AddScoped<ILibraryDestinationMutationGuard, LibraryDestinationMutationGuard>();

@@ -15,5 +15,6 @@ namespace Listenarr.Application.Audiobooks.Jobs
         public string? DownloadId { get; set; }
         public Guid? MoveScanHandoffId { get; set; }
         public int MoveScanAttemptGeneration { get; set; }
+        public bool IsAuthoritativeScope { get; set; } = true;
     }
 }

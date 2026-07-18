@@ -105,10 +105,14 @@ internal static class AudiobookPathReferenceRewriter
         FileSystemPathSemantics sourceSemantics,
         FileSystemPathSemantics targetSemantics)
     {
+        if (string.IsNullOrWhiteSpace(currentBasePath))
+        {
+            return;
+        }
+
         if (string.IsNullOrWhiteSpace(sourceBasePath))
         {
-            if (string.IsNullOrWhiteSpace(currentBasePath)
-                || StoredPathsMatch(currentBasePath, targetBasePath)
+            if (StoredPathsMatch(currentBasePath, targetBasePath)
                 || PathsMatch(currentBasePath, targetBasePath, targetSemantics))
             {
                 return;
@@ -118,11 +122,11 @@ internal static class AudiobookPathReferenceRewriter
                 "The audiobook path changed before its path references could be rewritten.");
         }
 
-        if (!string.IsNullOrWhiteSpace(currentBasePath)
-            && (StoredPathsMatch(currentBasePath, sourceBasePath)
-                || PathsMatch(currentBasePath, sourceBasePath, sourceSemantics)
-                || StoredPathsMatch(currentBasePath, targetBasePath)
-                || PathsMatch(currentBasePath, targetBasePath, targetSemantics)))
+        if (StoredPathsMatch(currentBasePath, sourceBasePath)
+            || PathsMatch(currentBasePath, sourceBasePath, sourceSemantics)
+            || IsSameOrInside(sourceBasePath, currentBasePath, sourceSemantics)
+            || StoredPathsMatch(currentBasePath, targetBasePath)
+            || PathsMatch(currentBasePath, targetBasePath, targetSemantics))
         {
             return;
         }

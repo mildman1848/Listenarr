@@ -47,7 +47,12 @@ namespace Listenarr.Tests.Features.Infrastructure.Library.Moving
             await bg.StartAsync(CancellationToken.None);
 
             // Enqueue move (include source so move uses our exact directory)
-            var jobId = await moveQueue.EnqueueMoveAsync(ab.Id, destination, source);
+            var jobId = await moveQueue.EnqueueMoveAsync(
+                await MoveJobTestFactory.CreateCommandAsync(
+                    _provider,
+                    ab.Id,
+                    source,
+                    destination));
 
             // Poll for completion
             var succeeded = false;
@@ -84,10 +89,19 @@ namespace Listenarr.Tests.Features.Infrastructure.Library.Moving
             // Now verify AudioFileService will accept/associate the moved file
             var audiobookFileService = _provider.GetRequiredService<IAudiobookFileService>();
 
-            var created = await audiobookFileService.EnsureAudiobookFileAsync(audiobook, processedFile, "test");
-            Assert.True(created, "AudioFileService failed to associate moved file even though FilePath was updated");
+            var created = await audiobookFileService.EnsureAudiobookFileAsync(
+                audiobook,
+                processedFile,
+                "test");
+            Assert.False(
+                created,
+                "The moved tracked row should already own the rewritten target path.");
 
-            var fileRecord = (await _audiobookFileRepository.GetByAudiobookIdAsync(ab.Id)).First(f => f.Path == processedFile);
+            var fileRecord = (await _audiobookFileRepository
+                .GetByAudiobookIdAsync(ab.Id))
+                .Single(file => file.Path == processedFile);
+            Assert.Equal(PathIdentityState.Valid, fileRecord.PathIdentityState);
+            Assert.Equal(processedFile, fileRecord.CanonicalPath);
             Assert.NotNull(fileRecord);
         }
     }

@@ -22,7 +22,9 @@ namespace Listenarr.Tests.Features.Infrastructure.Library.Moving
 
             var updatedJob = await queue.GetJobAsync(job.Id);
             Assert.NotNull(updatedJob);
-            Assert.Equal(MoveJobStatus.Completed, updatedJob!.Status);
+            Assert.True(
+                updatedJob!.Status == MoveJobStatus.Completed,
+                updatedJob.Error ?? $"Unexpected move status: {updatedJob.Status}");
             Assert.False(Directory.Exists(src));
             Assert.True(File.Exists(Path.Join(dst, "book.m4b")));
 
@@ -615,7 +617,8 @@ namespace Listenarr.Tests.Features.Infrastructure.Library.Moving
                 {
                     MoveJobId = legacyJob.Id,
                     RelativePath = "book.m4b",
-                    EntryType = MoveJobEntryType.File
+                    EntryType = MoveJobEntryType.File,
+                    CopyState = MoveJobEntryCopyState.Staged
                 });
                 await db.SaveChangesAsync();
             }
@@ -969,16 +972,16 @@ namespace Listenarr.Tests.Features.Infrastructure.Library.Moving
                 Title = "Move Processor Legacy Source",
                 BasePath = source
             });
-            var queue = _provider.GetRequiredService<IMoveQueueService>();
-            var jobId = await queue.EnqueueMoveAsync(audiobook.Id, target, source);
-            var job = await queue.GetJobAsync(jobId);
-            Assert.NotNull(job);
+            var (queue, job) = await CreateQueuedMoveJobAsync(
+                audiobook,
+                target,
+                source);
+            var jobId = job.Id;
             job!.SourcePath = null;
             job.SourcePathSyntax = null;
             job.SourceCaseSensitivity = null;
             job.SourceCaseSensitivityMode = null;
             job.SourceIdentityBoundary = null;
-            await PrepareJobForProcessingAsync(queue, job);
 
             var processor = _provider.GetRequiredService<IMoveJobProcessor>();
             await processor.ProcessJobAsync(job, CancellationToken.None);
@@ -1131,15 +1134,152 @@ namespace Listenarr.Tests.Features.Infrastructure.Library.Moving
             bool deleteEmptySource = true)
         {
             var queue = _provider.GetRequiredService<IMoveQueueService>();
-            var jobId = await queue.EnqueueMoveAsync(
-                audiobook.Id,
-                requestedPath,
+            var semanticsResolver = _provider
+                .GetRequiredService<IFileSystemSemanticsResolver>();
+            var sourceResolution = await semanticsResolver.ResolveAsync(sourcePath);
+            var targetResolution = await semanticsResolver.ResolveAsync(requestedPath);
+            Assert.Equal(PathIdentityState.Valid, sourceResolution.State);
+            Assert.Equal(PathIdentityState.Valid, targetResolution.State);
+            var sourceIdentity = PathIdentitySnapshot.FromResolution(
+                sourceResolution.Semantics,
+                FileSystemCaseSensitivityMode.Auto,
+                sourceResolution.BoundaryPath,
+                sourcePath);
+            var targetIdentity = PathIdentitySnapshot.FromResolution(
+                targetResolution.Semantics,
+                FileSystemCaseSensitivityMode.Auto,
+                targetResolution.BoundaryPath,
+                requestedPath);
+            var manifest = await BuildMoveManifestAsync(sourcePath);
+            await EnsureTrackedManifestRowsAsync(
+                audiobook,
                 sourcePath,
-                deleteEmptySource);
+                sourceIdentity,
+                manifest);
+            var jobId = await queue.EnqueueMoveAsync(
+                new MoveEnqueueCommand(
+                    audiobook.Id,
+                    sourcePath,
+                    sourceIdentity,
+                    manifest,
+                    requestedPath,
+                    targetIdentity,
+                    deleteEmptySource));
             var job = await queue.GetJobAsync(jobId);
             Assert.NotNull(job);
             await PrepareJobForProcessingAsync(queue, job!);
             return (queue, job!);
+        }
+
+        private async Task EnsureTrackedManifestRowsAsync(
+            Audiobook audiobook,
+            string sourcePath,
+            PathIdentitySnapshot sourceIdentity,
+            IReadOnlyCollection<MoveSourceManifestEntry> manifest)
+        {
+            var existing = await _audiobookFileRepository
+                .GetByAudiobookIdAsync(audiobook.Id);
+            foreach (var entry in manifest.Where(candidate =>
+                candidate.EntryType == MoveJobEntryType.File))
+            {
+                Assert.True(FileSystemPathIdentity.TryResolveRelativePathWithinBase(
+                    sourcePath,
+                    entry.RelativePath,
+                    sourceIdentity.Semantics,
+                    out var fullPath));
+                var identity = AudiobookFilePathIdentity.CreateValid(
+                    fullPath,
+                    sourceIdentity.Semantics,
+                    sourceIdentity.RequestedMode,
+                    sourceIdentity.BoundaryPath);
+                var tracked = existing.FirstOrDefault(file =>
+                    !string.IsNullOrWhiteSpace(file.Path)
+                    && FileSystemPathIdentity.AreEquivalent(
+                        file.Path,
+                        fullPath,
+                        sourceIdentity.Semantics));
+                if (tracked != null)
+                {
+                    tracked.ApplyPathIdentity(fullPath, identity);
+                    await _audiobookFileRepository.UpdateAsync(tracked);
+                    continue;
+                }
+
+                tracked = AudiobookFile.CreateUnresolved(fullPath);
+                tracked.AudiobookId = audiobook.Id;
+                tracked.ApplyPathIdentity(fullPath, identity);
+                var claim = await _audiobookFileRepository.ClaimAsync(tracked);
+                Assert.Equal(AudiobookFileClaimOutcome.Created, claim.Outcome);
+                Assert.NotNull(claim.File);
+                existing.Add(claim.File!);
+            }
+        }
+
+        private static async Task<IReadOnlyList<MoveSourceManifestEntry>> BuildMoveManifestAsync(
+            string sourcePath)
+        {
+            if (!Directory.Exists(sourcePath))
+            {
+                return
+                [
+                    new MoveSourceManifestEntry(
+                        "book.m4b",
+                        MoveJobEntryType.File,
+                        1,
+                        DateTime.UnixEpoch,
+                        new string('A', 64))
+                ];
+            }
+
+            var entries = new List<MoveSourceManifestEntry>();
+            var pending = new Stack<string>();
+            pending.Push(sourcePath);
+            while (pending.Count > 0)
+            {
+                var directory = pending.Pop();
+                foreach (var path in Directory.EnumerateFileSystemEntries(directory))
+                {
+                    var attributes = File.GetAttributes(path);
+                    if ((attributes & FileAttributes.ReparsePoint) != 0)
+                    {
+                        continue;
+                    }
+
+                    var relativePath = Path.GetRelativePath(sourcePath, path);
+                    if ((attributes & FileAttributes.Directory) != 0)
+                    {
+                        entries.Add(new MoveSourceManifestEntry(
+                            relativePath,
+                            MoveJobEntryType.Directory,
+                            0,
+                            Directory.GetLastWriteTimeUtc(path),
+                            null));
+                        pending.Push(path);
+                        continue;
+                    }
+
+                    var bytes = await File.ReadAllBytesAsync(path);
+                    entries.Add(new MoveSourceManifestEntry(
+                        relativePath,
+                        MoveJobEntryType.File,
+                        bytes.LongLength,
+                        File.GetLastWriteTimeUtc(path),
+                        Convert.ToHexString(
+                            System.Security.Cryptography.SHA256.HashData(bytes))));
+                }
+            }
+
+            return entries.Count > 0
+                ? entries
+                :
+                [
+                    new MoveSourceManifestEntry(
+                        "book.m4b",
+                        MoveJobEntryType.File,
+                        1,
+                        DateTime.UnixEpoch,
+                        new string('A', 64))
+                ];
         }
     }
 }

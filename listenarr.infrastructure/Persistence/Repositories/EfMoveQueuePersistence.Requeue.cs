@@ -18,6 +18,7 @@ public sealed partial class EfMoveQueuePersistence
             await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
             var current = await db.MoveJobs
                 .AsNoTracking()
+                .Include(job => job.Entries)
                 .SingleOrDefaultAsync(job => job.Id == command.JobId, cancellationToken);
             if (current == null)
             {
@@ -75,7 +76,7 @@ public sealed partial class EfMoveQueuePersistence
                             .SetProperty(job => job.TargetCaseSensitivity, command.TargetIdentity.CaseSensitivity)
                             .SetProperty(job => job.TargetCaseSensitivityMode, command.TargetIdentity.RequestedMode)
                             .SetProperty(job => job.TargetIdentityBoundary, command.TargetIdentity.BoundaryPath)
-                            .SetProperty(job => job.IdentityKeyVersion, 3)
+                            .SetProperty(job => job.IdentityKeyVersion, MoveManifestIdentity.Version)
                             .SetProperty(job => job.ActiveDeduplicationKey, command.DeduplicationKey)
                             .SetProperty(job => job.Status, MoveJobStatus.Queued)
                             .SetProperty(job => job.FailureKind, MoveFailureKind.None)
@@ -98,6 +99,7 @@ public sealed partial class EfMoveQueuePersistence
 
             var repaired = await db.MoveJobs
                 .AsNoTracking()
+                .Include(job => job.Entries)
                 .SingleAsync(job => job.Id == command.JobId, cancellationToken);
             if (!IsMatchingQueuedRepair(repaired, command))
             {
@@ -158,7 +160,7 @@ public sealed partial class EfMoveQueuePersistence
         && job.TargetCaseSensitivity == command.TargetIdentity.CaseSensitivity
         && job.TargetCaseSensitivityMode == command.TargetIdentity.RequestedMode
         && job.TargetIdentityBoundary == command.TargetIdentity.BoundaryPath
-        && job.IdentityKeyVersion == 3
+        && job.IdentityKeyVersion == MoveManifestIdentity.Version
         && job.ActiveDeduplicationKey == command.DeduplicationKey
         && job.FailureKind == MoveFailureKind.None
         && job.AttemptCount == 0
@@ -173,7 +175,7 @@ public sealed partial class EfMoveQueuePersistence
         job.RequestedPath = command.TargetPath;
         job.SetSourceIdentity(command.SourceIdentity);
         job.SetTargetIdentity(command.TargetIdentity);
-        job.IdentityKeyVersion = 3;
+        job.IdentityKeyVersion = MoveManifestIdentity.Version;
         job.ActiveDeduplicationKey = command.DeduplicationKey;
         job.Status = MoveJobStatus.Queued;
         job.Error = null;

@@ -10,7 +10,8 @@ public sealed partial class RootFolderRelocationService(
     IHubBroadcaster hubBroadcaster,
     TimeProvider timeProvider,
     IFilesystemMutationCoordinator mutationCoordinator,
-    IAudiobookOperationCoordinator audiobookOperationCoordinator) : IRootFolderRelocationService
+    IAudiobookOperationCoordinator audiobookOperationCoordinator,
+    IMoveSourceManifestService moveSourceManifestService) : IRootFolderRelocationService
 {
     private readonly SemaphoreSlim _rootIdentityGate = new(1, 1);
     private readonly IFilesystemMutationCoordinator _mutationCoordinator =
@@ -218,15 +219,53 @@ public sealed partial class RootFolderRelocationService(
                 $"Active move job {conflictingMoveJob.Id} overlaps this root folder relocation; wait for it to finish before starting the relocation.");
         }
 
+        var movePlans = new List<RelocationMovePlan>();
         if (sourceResolution != null
             && command.Mode == RootFolderRelocationMode.Relocate)
         {
-            RejectDuplicateRelocationTargets(
-                affected,
-                root.Path,
-                targetPath,
-                sourceResolution.Semantics,
-                targetResolution.Semantics);
+            foreach (var candidate in affected)
+            {
+                var manifest = await moveSourceManifestService.BuildAsync(
+                    candidate.Audiobook,
+                    cancellationToken);
+                if (!FileSystemPathIdentity.IsSameOrInside(
+                        manifest.SourceRoot,
+                        root.Path,
+                        sourceResolution.Semantics))
+                {
+                    throw new InvalidOperationException(
+                        "A tracked audiobook move source escaped the relocating root folder.");
+                }
+
+                var requestedPath = MapTargetPath(
+                    root.Path,
+                    targetPath,
+                    manifest.SourceRoot,
+                    sourceResolution.Semantics,
+                    targetResolution.Semantics);
+                var targetIdentity = PathIdentitySnapshot.FromResolution(
+                    targetResolution.Semantics,
+                    command.TargetCaseSensitivityMode,
+                    targetPath,
+                    requestedPath);
+                if (FileSystemPathIdentity.AreEquivalentEndpoints(
+                        manifest.SourceRoot,
+                        manifest.SourceIdentity,
+                        requestedPath,
+                        targetIdentity))
+                {
+                    throw new InvalidOperationException(
+                        "Root folder relocation produced an identical source and target child move.");
+                }
+
+                movePlans.Add(new RelocationMovePlan(
+                    candidate,
+                    manifest,
+                    requestedPath,
+                    targetIdentity));
+            }
+
+            RejectDuplicateRelocationTargets(movePlans, targetResolution.Semantics);
         }
 
         var now = timeProvider.GetUtcNow();
@@ -347,60 +386,49 @@ public sealed partial class RootFolderRelocationService(
             DesiredName = command.DesiredName.Trim(),
             DesiredIsDefault = command.DesiredIsDefault,
             TargetCaseSensitivityMode = command.TargetCaseSensitivityMode,
-            TotalJobs = affected.Count,
+            TotalJobs = movePlans.Count,
             CreatedAt = nowUtc
         };
         db.RootFolderRelocations.Add(relocation);
 
-        foreach (var candidate in affected)
+        foreach (var plan in movePlans)
         {
-            var audiobook = candidate.Audiobook;
-            var requestedPath = MapTargetPath(
-                root.Path,
-                targetPath,
-                candidate.StoredBasePath,
-                sourceResolution!.Semantics,
-                targetResolution.Semantics);
-            var sourceIdentity = PathIdentitySnapshot.FromResolution(
-                sourceResolution.Semantics,
-                root.CaseSensitivityMode,
-                root.Path,
-                candidate.StoredBasePath);
-            var targetIdentity = PathIdentitySnapshot.FromResolution(
-                targetResolution.Semantics,
-                command.TargetCaseSensitivityMode,
-                targetPath,
-                requestedPath);
-            if (FileSystemPathIdentity.AreEquivalentEndpoints(
-                    candidate.StoredBasePath,
-                    sourceIdentity,
-                    requestedPath,
-                    targetIdentity))
-            {
-                throw new InvalidOperationException(
-                    "Root folder relocation produced an identical source and target child move.");
-            }
-
+            var audiobook = plan.Candidate.Audiobook;
+            var entries = plan.Manifest.Entries
+                .Select(entry => new MoveJobEntry
+                {
+                    RelativePath = entry.RelativePath,
+                    EntryType = entry.EntryType,
+                    Length = entry.Length,
+                    LastWriteTimeUtc = entry.LastWriteTimeUtc,
+                    Sha256 = entry.Sha256,
+                    CopyState = MoveJobEntryCopyState.Pending,
+                    CleanupState = MoveJobEntryCleanupState.Pending
+                })
+                .ToList();
             var moveJob = new MoveJob
             {
                 AudiobookId = audiobook.Id,
-                RequestedPath = requestedPath,
-                SourcePath = candidate.StoredBasePath,
+                RequestedPath = plan.RequestedPath,
+                SourcePath = plan.Manifest.SourceRoot,
                 SourceCleanupBoundary = root.Path,
                 DeleteEmptySource = command.DeleteEmptySource,
                 Status = MoveJobStatus.Queued,
                 Phase = MoveJobPhase.None,
                 EnqueuedAt = nowUtc,
                 RelocationId = relocation.Id,
-                IdentityKeyVersion = 3,
-                ActiveDeduplicationKey = FileSystemPathIdentity.CreateKey(
-                    $"move:{audiobook.Id}",
-                    requestedPath,
-                    targetResolution.Semantics,
-                    version: 3)
+                IdentityKeyVersion = MoveManifestIdentity.Version,
+                ActiveDeduplicationKey = MoveManifestIdentity.CreateDeduplicationKey(
+                    audiobook.Id,
+                    plan.Manifest.SourceRoot,
+                    plan.Manifest.SourceIdentity,
+                    plan.RequestedPath,
+                    plan.TargetIdentity,
+                    entries),
+                Entries = entries
             };
-            moveJob.SetSourceIdentity(sourceIdentity);
-            moveJob.SetTargetIdentity(targetIdentity);
+            moveJob.SetSourceIdentity(plan.Manifest.SourceIdentity);
+            moveJob.SetTargetIdentity(plan.TargetIdentity);
             db.MoveJobs.Add(moveJob);
         }
 

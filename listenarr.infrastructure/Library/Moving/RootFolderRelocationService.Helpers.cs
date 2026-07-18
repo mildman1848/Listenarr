@@ -44,6 +44,12 @@ public sealed partial class RootFolderRelocationService
 
     private sealed record AudiobookPathCandidate(Audiobook Audiobook, string StoredBasePath);
 
+    private sealed record RelocationMovePlan(
+        AudiobookPathCandidate Candidate,
+        MoveSourceManifest Manifest,
+        string RequestedPath,
+        PathIdentitySnapshot TargetIdentity);
+
     private sealed record StoredSourcePathSemantics(
         FileSystemPathSemantics Semantics,
         bool DetectAmbiguousCaseMatches);

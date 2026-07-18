@@ -621,6 +621,12 @@ namespace Listenarr.Tests.Features.Application.Audiobooks.Jobs
                         FileSystemCaseSensitivityMode.Auto,
                         boundary,
                         source),
+                    [new MoveSourceManifestEntry(
+                        "book.m4b",
+                        MoveJobEntryType.File,
+                        1,
+                        DateTime.UnixEpoch,
+                        new string('A', 64))],
                     target,
                     PathIdentitySnapshot.FromResolution(
                         semantics,
@@ -789,7 +795,18 @@ namespace Listenarr.Tests.Features.Application.Audiobooks.Jobs
                 AttemptCount = MoveTimingPolicy.MaxTransientAttempts,
                 NextAttemptAt = future.UtcDateTime,
                 LeaseOwner = "worker",
-                LeaseExpiresAt = future.UtcDateTime
+                LeaseExpiresAt = future.UtcDateTime,
+                Entries =
+                [
+                    new MoveJobEntry
+                    {
+                        RelativePath = "book.m4b",
+                        EntryType = MoveJobEntryType.File,
+                        Length = 1,
+                        LastWriteTimeUtc = DateTime.UnixEpoch,
+                        Sha256 = new string('A', 64)
+                    }
+                ]
             };
             var persistence = CreateInMemoryPersistence([job]);
             var service = new MoveQueueService(
@@ -825,7 +842,7 @@ namespace Listenarr.Tests.Features.Application.Audiobooks.Jobs
         [InlineData(nameof(MoveJobStatus.Failed))]
         [InlineData(nameof(MoveJobStatus.NeedsAttention))]
         [InlineData(nameof(MoveJobStatus.Queued))]
-        public async Task RequeueMoveAsync_LegacyJobWithoutIdentity_RepairsBeforeScheduling(
+        public async Task RequeueMoveAsync_LegacyJobWithoutManifest_RequiresAttention(
             string statusName)
         {
             var status = Enum.Parse<MoveJobStatus>(statusName);
@@ -850,13 +867,13 @@ namespace Listenarr.Tests.Features.Application.Audiobooks.Jobs
 
             var requeuedJobId = await service.RequeueMoveAsync(job.Id);
 
-            Assert.Equal(job.Id, requeuedJobId);
-            Assert.Equal(MoveJobStatus.Queued, job.Status);
-            Assert.True(job.TryGetSourceIdentity(out _));
-            Assert.True(job.TryGetTargetIdentity(out _));
-            Assert.Equal(3, job.IdentityKeyVersion);
-            Assert.True(service.Reader.TryRead(out var scheduled));
-            Assert.Equal(job.Id, scheduled.Id);
+            Assert.Null(requeuedJobId);
+            Assert.Equal(MoveJobStatus.NeedsAttention, job.Status);
+            Assert.Contains(
+                "no persisted tracked-file source manifest",
+                job.Error ?? string.Empty,
+                StringComparison.OrdinalIgnoreCase);
+            Assert.False(service.Reader.TryRead(out _));
         }
 
         [Fact]
@@ -1344,7 +1361,7 @@ namespace Listenarr.Tests.Features.Application.Audiobooks.Jobs
                     job.RequestedPath = command.TargetPath;
                     job.SetSourceIdentity(command.SourceIdentity);
                     job.SetTargetIdentity(command.TargetIdentity);
-                    job.IdentityKeyVersion = 3;
+                    job.IdentityKeyVersion = MoveManifestIdentity.Version;
                     job.Status = MoveJobStatus.Queued;
                     job.Error = null;
                     job.FailureKind = MoveFailureKind.None;
@@ -1389,6 +1406,8 @@ namespace Listenarr.Tests.Features.Application.Audiobooks.Jobs
 
     internal sealed class MoveQueueServiceTestAdapter : AppMoveQueueService
     {
+        private readonly IFileSystemSemanticsResolver _semanticsResolver;
+
         public MoveQueueServiceTestAdapter(
             ILogger<MoveQueueService> logger,
             IMoveQueuePersistence persistence,
@@ -1406,6 +1425,60 @@ namespace Listenarr.Tests.Features.Application.Audiobooks.Jobs
                 relocationService ?? Mock.Of<IRootFolderRelocationService>(),
                 mutationCoordinator ?? new FilesystemMutationCoordinator())
         {
+            _semanticsResolver = semanticsResolver;
+        }
+
+        public async Task<Guid> EnqueueMoveAsync(
+            int audiobookId,
+            string requestedPath,
+            string? sourcePath = null,
+            bool deleteEmptySource = true,
+            string? sourceCleanupBoundary = null)
+        {
+            var target = FileSystemPathIdentity.ResolveNativeAbsolutePath(requestedPath);
+            var source = FileSystemPathIdentity.ResolveNativeAbsolutePath(
+                sourcePath ?? requestedPath);
+            var sourceResolution = await _semanticsResolver.ResolveAsync(
+                source,
+                FileSystemCaseSensitivityMode.Auto,
+                CancellationToken.None);
+            var targetResolution = await _semanticsResolver.ResolveAsync(
+                target,
+                FileSystemCaseSensitivityMode.Auto,
+                CancellationToken.None);
+            if (sourceResolution.State != PathIdentityState.Valid
+                || targetResolution.State != PathIdentityState.Valid)
+            {
+                throw new InvalidOperationException(
+                    sourceResolution.Reason
+                        ?? targetResolution.Reason
+                        ?? "Filesystem identity is unavailable.");
+            }
+
+            var sourceIdentity = PathIdentitySnapshot.FromResolution(
+                sourceResolution.Semantics,
+                FileSystemCaseSensitivityMode.Auto,
+                sourceResolution.BoundaryPath,
+                source);
+            var targetIdentity = PathIdentitySnapshot.FromResolution(
+                targetResolution.Semantics,
+                FileSystemCaseSensitivityMode.Auto,
+                targetResolution.BoundaryPath,
+                target);
+            return await base.EnqueueMoveAsync(new MoveEnqueueCommand(
+                audiobookId,
+                source,
+                sourceIdentity,
+                [new MoveSourceManifestEntry(
+                    "book.m4b",
+                    MoveJobEntryType.File,
+                    1,
+                    DateTime.UnixEpoch,
+                    new string('A', 64))],
+                target,
+                targetIdentity,
+                deleteEmptySource,
+                sourceCleanupBoundary));
         }
     }
 }

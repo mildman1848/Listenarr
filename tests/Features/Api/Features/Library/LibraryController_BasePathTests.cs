@@ -28,38 +28,6 @@ namespace Listenarr.Tests.Features.Api.Features.Library
         private const string RootPath = "/server/mnt/drive/Audiobooks";
         private const string FileNamingPattern = "{Author}/{Series}/{Title}";
 
-        [Theory]
-        [InlineData(FileSystemCaseSensitivity.Sensitive, false)]
-        [InlineData(FileSystemCaseSensitivity.Insensitive, true)]
-        [Trait("Method", "CalculateBasePath")]
-        [Trait("Scenario", "CaseOnlyDirectoriesUseResolvedSemantics")]
-        public void CalculateBasePath_CaseOnlyDirectoriesUseResolvedSemantics(
-            FileSystemCaseSensitivity caseSensitivity,
-            bool expectCaseFoldedDirectory)
-        {
-            var root = FileService.GetTempDirectory("library-path-planner");
-            var first = Path.Join(root, "CaseBook", "one.m4b");
-            var second = Path.Join(root, "casebook", "two.m4b");
-            var semantics = new FileSystemPathSemantics(
-                FileSystemPathSemantics.CurrentHostDefault.Syntax,
-                caseSensitivity);
-
-            var result = LibraryPathPlanner.CalculateBasePath(
-                [first, second],
-                _provider.GetRequiredService<IFileSystem>(),
-                _provider.GetRequiredService<ILogger<LibraryController_BasePathTests>>(),
-                semantics);
-
-            if (expectCaseFoldedDirectory)
-            {
-                Assert.Equal(Path.Join(root, "CaseBook"), result);
-            }
-            else
-            {
-                Assert.NotEqual(Path.Join(root, "CaseBook"), result);
-            }
-        }
-
         [Fact]
         [Trait("Method", "ComputeAudiobookBaseDirectoryFromPattern")]
         [Trait("Scenario", "NonSeriesBook_ReturnsCorrectPath")]

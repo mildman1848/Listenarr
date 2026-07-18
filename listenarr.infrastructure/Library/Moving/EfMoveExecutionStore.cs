@@ -179,35 +179,6 @@ internal sealed partial class EfMoveExecutionStore(
             },
             cancellationToken);
 
-    public Task PersistManifestAsync(
-        Guid jobId,
-        MoveLeaseToken leaseToken,
-        IReadOnlyCollection<MoveJobEntry> manifest,
-        CancellationToken cancellationToken) =>
-        ExecuteAsync(
-            "persist the move manifest",
-            async () =>
-            {
-                EnsureLeaseTokenProvided(jobId, leaseToken);
-                var nowUtc = timeProvider.GetUtcNow().UtcDateTime;
-                await using var db = await dbContextFactory.CreateDbContextAsync(cancellationToken);
-                await using var transaction = db.Database.IsRelational()
-                    ? await db.Database.BeginTransactionAsync(cancellationToken)
-                    : null;
-                if (!await IsLeaseActiveAsync(db, jobId, leaseToken, nowUtc, cancellationToken))
-                {
-                    throw new MoveLeaseLostException(jobId, leaseToken.Generation);
-                }
-
-                db.MoveJobEntries.AddRange(manifest);
-                await db.SaveChangesAsync(cancellationToken);
-                if (transaction != null)
-                {
-                    await transaction.CommitAsync(cancellationToken);
-                }
-            },
-            cancellationToken);
-
     public Task<List<MoveJobEntry>> LoadManifestAsync(
         Guid jobId,
         CancellationToken cancellationToken) =>

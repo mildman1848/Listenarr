@@ -22,49 +22,52 @@ namespace Listenarr.Infrastructure.Library.Scanning
     internal static class ScanPathPlanner
     {
         public static string CalculateBasePath(
-            List<string> filePaths,
-            FileSystemPathSemantics semantics)
+            IReadOnlyCollection<string> filePaths,
+            FileSystemPathSemantics semantics,
+            string? provenBookBoundary = null,
+            string? authorizedScanRoot = null)
         {
-            if (!filePaths.Any())
+            if (filePaths.Count == 0)
+            {
                 return string.Empty;
+            }
+
+            if (!string.IsNullOrWhiteSpace(provenBookBoundary))
+            {
+                var canonicalBoundary = FileSystemPathIdentity.Canonicalize(
+                    provenBookBoundary,
+                    semantics.Syntax);
+                var boundaryIsAuthorized = string.IsNullOrWhiteSpace(authorizedScanRoot)
+                    || FileSystemPathIdentity.IsSameOrInside(
+                        canonicalBoundary,
+                        authorizedScanRoot,
+                        semantics);
+                if (boundaryIsAuthorized
+                    && filePaths.All(path => FileSystemPathIdentity.IsSameOrInside(
+                        path,
+                        canonicalBoundary,
+                        semantics)))
+                {
+                    return canonicalBoundary;
+                }
+            }
 
             var directories = filePaths
-                .Select(p => FileUtils.NormalizeStoredPath(Path.GetDirectoryName(p) ?? p))
-                .Where(p => !string.IsNullOrWhiteSpace(p))
+                .Select(path => FileSystemPathIdentity.Canonicalize(
+                    Path.GetDirectoryName(path) ?? path,
+                    semantics.Syntax))
+                .Where(path => !string.IsNullOrWhiteSpace(path))
                 .Distinct(semantics.Comparer)
                 .ToList();
-
-            if (directories.Count == 1)
+            if (directories.Count == 0)
             {
-                return directories[0];
+                return string.Empty;
             }
 
-            var commonPath = FileUtils.GetCommonPathForDirectories(directories, semantics) ?? directories[0];
-            var currentPath = commonPath;
-            while (!string.IsNullOrEmpty(currentPath))
-            {
-                try
-                {
-                    var parent = Directory.GetParent(currentPath)?.FullName;
-                    if (string.IsNullOrEmpty(parent))
-                        break;
-
-                    var subDirs = Directory.GetDirectories(parent).Length;
-                    var files = Directory.GetFiles(parent).Length;
-                    if (subDirs + files > 1)
-                    {
-                        return currentPath;
-                    }
-
-                    currentPath = parent;
-                }
-                catch (Exception caughtEx) when (caughtEx is not OperationCanceledException && caughtEx is not OutOfMemoryException && caughtEx is not StackOverflowException)
-                {
-                    break;
-                }
-            }
-
-            return commonPath;
+            return directories.Count == 1
+                ? directories[0]
+                : FileUtils.GetCommonPathForDirectories(directories, semantics)
+                    ?? directories[0];
         }
 
     }

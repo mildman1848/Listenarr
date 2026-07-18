@@ -19,8 +19,7 @@ namespace Listenarr.Tests.Features.Application.Audiobooks.Jobs
             bool shouldDedupe)
         {
             var queue = new ScanQueueService(
-                NullLogger<ScanQueueService>.Instance,
-                BuildResolver(caseSensitivity));
+                NullLogger<ScanQueueService>.Instance);
             var audiobook = new AudiobookBuilder()
                 .WithId(1001)
                 .WithTitle("Case Book")
@@ -29,10 +28,70 @@ namespace Listenarr.Tests.Features.Application.Audiobooks.Jobs
             var first = Path.Join(root, "CaseBook");
             var second = Path.Join(root, "casebook");
 
-            var firstJob = await queue.EnqueueScanAsync(audiobook, first);
-            var secondJob = await queue.EnqueueScanAsync(audiobook, second);
+            var firstJob = await queue.EnqueueScanAsync(new ScanEnqueueCommand(
+                audiobook,
+                first,
+                CreateHostIdentity(first, root, caseSensitivity)));
+            var secondJob = await queue.EnqueueScanAsync(new ScanEnqueueCommand(
+                audiobook,
+                second,
+                CreateHostIdentity(second, root, caseSensitivity)));
 
             Assert.Equal(shouldDedupe, firstJob == secondJob);
+        }
+
+        [Fact]
+        public async Task ScanQueue_DifferentReconciliationAuthorityDoesNotDedupe()
+        {
+            var queue = new ScanQueueService(
+                NullLogger<ScanQueueService>.Instance);
+            var audiobook = new AudiobookBuilder()
+                .WithId(1013)
+                .WithTitle("Authority Bound Scan")
+                .Build();
+            const string path = "/library/book/cd1";
+            var identity = CreateUnixIdentity(
+                path,
+                FileSystemCaseSensitivity.Sensitive);
+
+            var focused = await queue.EnqueueScanAsync(new ScanEnqueueCommand(
+                audiobook,
+                path,
+                identity,
+                IsAuthoritativeScope: false));
+            var authoritative = await queue.EnqueueScanAsync(new ScanEnqueueCommand(
+                audiobook,
+                path,
+                identity,
+                IsAuthoritativeScope: true));
+
+            Assert.NotEqual(focused, authoritative);
+        }
+
+        [Fact]
+        public async Task ScanQueue_RequeuePreservesReconciliationAuthority()
+        {
+            var queue = new ScanQueueService(
+                NullLogger<ScanQueueService>.Instance);
+            var audiobook = new AudiobookBuilder()
+                .WithId(1014)
+                .WithTitle("Focused Requeue")
+                .Build();
+            const string path = "/library/book/cd1";
+            var jobId = await queue.EnqueueScanAsync(new ScanEnqueueCommand(
+                audiobook,
+                path,
+                CreateUnixIdentity(path, FileSystemCaseSensitivity.Sensitive),
+                IsAuthoritativeScope: false));
+            Assert.True(queue.Reader.TryRead(out _));
+            queue.UpdateJobStatus(jobId, "Failed", "retry");
+
+            var replacementId = await queue.RequeueScanAsync(jobId);
+
+            Assert.NotNull(replacementId);
+            Assert.True(queue.Reader.TryRead(out var replacement));
+            Assert.Equal(replacementId, replacement.Id);
+            Assert.False(replacement.IsAuthoritativeScope);
         }
 
         [Theory]
@@ -54,8 +113,7 @@ namespace Listenarr.Tests.Features.Application.Audiobooks.Jobs
             bool shouldDedupe)
         {
             var queue = new ScanQueueService(
-                NullLogger<ScanQueueService>.Instance,
-                BuildResolver(FileSystemCaseSensitivity.Sensitive));
+                NullLogger<ScanQueueService>.Instance);
             var audiobook = new AudiobookBuilder()
                 .WithId(1010)
                 .WithTitle("Persisted Identity Scan")
@@ -79,8 +137,7 @@ namespace Listenarr.Tests.Features.Application.Audiobooks.Jobs
         public async Task ScanQueue_DifferentPersistedSyntaxesNeverDedupe()
         {
             var queue = new ScanQueueService(
-                NullLogger<ScanQueueService>.Instance,
-                BuildResolver(FileSystemCaseSensitivity.Insensitive));
+                NullLogger<ScanQueueService>.Instance);
             var audiobook = new AudiobookBuilder()
                 .WithId(1011)
                 .WithTitle("Cross Syntax Scan")
@@ -111,8 +168,7 @@ namespace Listenarr.Tests.Features.Application.Audiobooks.Jobs
         public async Task ScanQueue_CompletedCorrelationCreatesReplacementHandoff()
         {
             var queue = new ScanQueueService(
-                NullLogger<ScanQueueService>.Instance,
-                BuildResolver(FileSystemCaseSensitivity.Sensitive));
+                NullLogger<ScanQueueService>.Instance);
             var audiobook = new AudiobookBuilder()
                 .WithId(1002)
                 .WithTitle("Move Completion Book")
@@ -139,8 +195,7 @@ namespace Listenarr.Tests.Features.Application.Audiobooks.Jobs
         public async Task ScanQueue_ConcurrentCorrelationDispatchesOnlyOneJob()
         {
             var queue = new ScanQueueService(
-                NullLogger<ScanQueueService>.Instance,
-                BuildResolver(FileSystemCaseSensitivity.Sensitive));
+                NullLogger<ScanQueueService>.Instance);
             var audiobook = new AudiobookBuilder()
                 .WithId(1003)
                 .WithTitle("Concurrent Move Scan")
@@ -203,7 +258,6 @@ namespace Listenarr.Tests.Features.Application.Audiobooks.Jobs
                     2));
             var queue = new ScanQueueService(
                 NullLogger<ScanQueueService>.Instance,
-                BuildResolver(FileSystemCaseSensitivity.Sensitive),
                 store.Object,
                 TimeProvider.System);
             var audiobook = new AudiobookBuilder()
@@ -270,7 +324,6 @@ namespace Listenarr.Tests.Features.Application.Audiobooks.Jobs
                 .ReturnsAsync(true);
             var queue = new ScanQueueService(
                 NullLogger<ScanQueueService>.Instance,
-                BuildResolver(FileSystemCaseSensitivity.Sensitive),
                 store.Object,
                 TimeProvider.System);
             var audiobook = new AudiobookBuilder()
@@ -314,8 +367,7 @@ namespace Listenarr.Tests.Features.Application.Audiobooks.Jobs
         public async Task ScanQueue_TerminalPersistenceDoesNotHoldQueueGate()
         {
             var queue = new ScanQueueService(
-                NullLogger<ScanQueueService>.Instance,
-                BuildResolver(FileSystemCaseSensitivity.Sensitive));
+                NullLogger<ScanQueueService>.Instance);
             var audiobook = new AudiobookBuilder()
                 .WithId(1005)
                 .WithTitle("Terminal Persistence")
@@ -355,8 +407,7 @@ namespace Listenarr.Tests.Features.Application.Audiobooks.Jobs
         public async Task ScanQueue_RequestCancelledAfterTerminalPersistenceStillUpdatesQueue()
         {
             var queue = new ScanQueueService(
-                NullLogger<ScanQueueService>.Instance,
-                BuildResolver(FileSystemCaseSensitivity.Sensitive));
+                NullLogger<ScanQueueService>.Instance);
             var audiobook = new AudiobookBuilder()
                 .WithId(1008)
                 .WithTitle("Post Commit Cancellation")
@@ -384,8 +435,7 @@ namespace Listenarr.Tests.Features.Application.Audiobooks.Jobs
         public async Task ScanQueue_TerminalCommitUsesAuthoritativePersistedOutcome()
         {
             var queue = new ScanQueueService(
-                NullLogger<ScanQueueService>.Instance,
-                BuildResolver(FileSystemCaseSensitivity.Sensitive));
+                NullLogger<ScanQueueService>.Instance);
             var audiobook = new AudiobookBuilder()
                 .WithId(1006)
                 .WithTitle("Authoritative Terminal State")
@@ -407,8 +457,7 @@ namespace Listenarr.Tests.Features.Application.Audiobooks.Jobs
         public async Task ScanQueue_FailedCorrelationCreatesReplacementHandoff()
         {
             var queue = new ScanQueueService(
-                NullLogger<ScanQueueService>.Instance,
-                BuildResolver(FileSystemCaseSensitivity.Sensitive));
+                NullLogger<ScanQueueService>.Instance);
             var audiobook = new AudiobookBuilder()
                 .WithId(1005)
                 .WithTitle("Failed Move Scan")
@@ -445,6 +494,20 @@ namespace Listenarr.Tests.Features.Application.Audiobooks.Jobs
 
             Assert.Equal(shouldDedupe, firstJob == secondJob);
         }
+
+        private static PathIdentitySnapshot CreateHostIdentity(
+            string path,
+            string boundary,
+            FileSystemCaseSensitivity sensitivity) =>
+            PathIdentitySnapshot.FromResolution(
+                new FileSystemPathSemantics(
+                    FileSystemPathSemantics.CurrentHostDefault.Syntax,
+                    sensitivity),
+                sensitivity == FileSystemCaseSensitivity.Insensitive
+                    ? FileSystemCaseSensitivityMode.Insensitive
+                    : FileSystemCaseSensitivityMode.Sensitive,
+                boundary,
+                path);
 
         private static PathIdentitySnapshot CreateUnixIdentity(
             string path = "/library/book",

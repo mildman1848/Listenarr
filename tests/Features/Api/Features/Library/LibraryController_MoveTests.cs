@@ -29,8 +29,8 @@ namespace Listenarr.Tests.Features.Api.Features.Library
     {
         [Fact]
         [Trait("Method", "EnqueueMove")]
-        [Trait("Scenario", "ReturnsBadRequest_WhenSourceDoesNotExist")]
-        public async Task MoveAudiobook_ReturnsBadRequest_WhenSourceDoesNotExist()
+        [Trait("Scenario", "ReturnsConflict_WhenTrackedSourceDoesNotExist")]
+        public async Task MoveAudiobook_ReturnsConflict_WhenTrackedSourceDoesNotExist()
         {
             // Given
             var controller = _provider.GetRequiredService<LibraryController>();
@@ -40,20 +40,25 @@ namespace Listenarr.Tests.Features.Api.Features.Library
                 .WithOutputPath(outputPath)
                 .Build());
 
+            var missingSource = Path.Join(FileService.GetTempPath(), "nonexistent");
             var ab = await _audiobookRepository.AddAsync(new AudiobookBuilder()
                 .WithTitle("Test")
-                .WithBasePath(Path.Join(FileService.GetTempPath(), "nonexistent"))
+                .WithBasePath(missingSource)
                 .Build());
+            await AddTrackedFileAsync(
+                ab,
+                missingSource,
+                createFile: false);
 
             var request = new LibraryController.MoveRequest { DestinationPath = Path.Join(outputPath, "target") };
 
             // When
             var result = await controller.EnqueueMove(ab.Id, request);
 
-            // Then: expect 400 Bad Request with 'Source path' message
-            var badObj = Assert.IsAssignableFrom<ObjectResult>(result);
-            Assert.Equal(400, badObj.StatusCode);
-            Assert.Contains("Source path", badObj.Value?.ToString() ?? string.Empty);
+            var conflict = Assert.IsType<ConflictObjectResult>(result);
+            Assert.Equal(409, conflict.StatusCode);
+            Assert.Contains("move_source_unverified", conflict.Value?.ToString() ?? string.Empty);
+            Assert.Contains("missing from disk", conflict.Value?.ToString() ?? string.Empty);
         }
 
         [Fact]
@@ -77,10 +82,12 @@ namespace Listenarr.Tests.Features.Api.Features.Library
                 .WithOutputPath(outputPath)
                 .Build());
 
+            var sourcePath = FileService.GetTempDirectory("listenarr-move-src");
             var ab = await _audiobookRepository.AddAsync(new AudiobookBuilder()
                 .WithTitle("Test")
-                .WithBasePath(FileService.GetTempDirectory("listenarr-move-src"))
+                .WithBasePath(sourcePath)
                 .Build());
+            await AddTrackedFileAsync(ab, sourcePath);
 
             var target = Path.Join(outputPath, "listenarr-move-dst");
             var request = new LibraryController.MoveRequest
@@ -107,6 +114,145 @@ namespace Listenarr.Tests.Features.Api.Features.Library
         }
 
         [Fact]
+        public async Task MoveAudiobook_BroadBasePath_QueuesOnlyTrackedBookManifest()
+        {
+            MoveEnqueueCommand? captured = null;
+            var moveQueue = new Mock<IMoveQueueService>();
+            moveQueue.Setup(service => service.EnqueueMoveAsync(
+                    It.IsAny<MoveEnqueueCommand>(),
+                    It.IsAny<CancellationToken>()))
+                .Callback<MoveEnqueueCommand, CancellationToken>((command, _) =>
+                    captured = command)
+                .ReturnsAsync(Guid.NewGuid());
+            Init(services => services.WithSingleton(moveQueue.Object));
+            var outputPath = FileService.GetTempDirectory("listenarr-move-output");
+            await _applicationSettingsRepository.SaveAsync(
+                new ApplicationSettingsBuilder()
+                    .WithOutputPath(outputPath)
+                    .Build());
+            var authorPath = FileService.GetTempDirectory("listenarr-move-author");
+            var requestedBook = Path.Join(authorPath, "Book One");
+            var siblingBook = Path.Join(authorPath, "Book Two");
+            Directory.CreateDirectory(requestedBook);
+            Directory.CreateDirectory(siblingBook);
+            _ = await FileService.GetFileAsync(
+                siblingBook,
+                "Book Two.m4b",
+                "foreign");
+            var audiobook = await _audiobookRepository.AddAsync(
+                new AudiobookBuilder()
+                    .WithTitle("Book One")
+                    .WithBasePath(authorPath)
+                    .Build());
+            await AddTrackedFileAsync(
+                audiobook,
+                requestedBook,
+                "Book One.m4b");
+
+            var result = await _provider.GetRequiredService<LibraryController>()
+                .EnqueueMove(
+                    audiobook.Id,
+                    new LibraryController.MoveRequest
+                    {
+                        SourcePath = authorPath,
+                        DestinationPath = Path.Join(outputPath, "Book One"),
+                        MoveFiles = true
+                    });
+
+            Assert.IsType<AcceptedResult>(result);
+            Assert.NotNull(captured);
+            Assert.Equal(requestedBook, captured!.SourcePath);
+            var file = Assert.Single(
+                captured.SourceEntries,
+                entry => entry.EntryType == MoveJobEntryType.File);
+            Assert.Equal("Book One.m4b", file.RelativePath);
+            Assert.DoesNotContain(captured.SourceEntries, entry =>
+                entry.RelativePath.Contains("Book Two", StringComparison.Ordinal));
+        }
+
+        [Fact]
+        public async Task MoveAudiobook_SharedFlatFolder_QueuesOnlyTrackedFile()
+        {
+            MoveEnqueueCommand? captured = null;
+            var moveQueue = new Mock<IMoveQueueService>();
+            moveQueue.Setup(service => service.EnqueueMoveAsync(
+                    It.IsAny<MoveEnqueueCommand>(),
+                    It.IsAny<CancellationToken>()))
+                .Callback<MoveEnqueueCommand, CancellationToken>((command, _) =>
+                    captured = command)
+                .ReturnsAsync(Guid.NewGuid());
+            Init(services => services.WithSingleton(moveQueue.Object));
+            var outputPath = FileService.GetTempDirectory("listenarr-move-output");
+            await _applicationSettingsRepository.SaveAsync(
+                new ApplicationSettingsBuilder()
+                    .WithOutputPath(outputPath)
+                    .Build());
+            var sourcePath = FileService.GetTempDirectory("listenarr-move-shared-flat");
+            _ = await FileService.GetFileAsync(
+                sourcePath,
+                "Book Two.m4b",
+                "foreign");
+            var audiobook = await _audiobookRepository.AddAsync(
+                new AudiobookBuilder()
+                    .WithTitle("Book One")
+                    .WithBasePath(sourcePath)
+                    .Build());
+            await AddTrackedFileAsync(
+                audiobook,
+                sourcePath,
+                "Book One.m4b");
+
+            var result = await _provider.GetRequiredService<LibraryController>()
+                .EnqueueMove(
+                    audiobook.Id,
+                    new LibraryController.MoveRequest
+                    {
+                        DestinationPath = Path.Join(outputPath, "Book One"),
+                        MoveFiles = true
+                    });
+
+            Assert.IsType<AcceptedResult>(result);
+            Assert.NotNull(captured);
+            Assert.Equal(sourcePath, captured!.SourcePath);
+            var file = Assert.Single(captured.SourceEntries);
+            Assert.Equal("Book One.m4b", file.RelativePath);
+        }
+
+        [Fact]
+        public async Task MoveAudiobook_NoTrackedFiles_RequiresRepair()
+        {
+            var moveQueue = new Mock<IMoveQueueService>(MockBehavior.Strict);
+            Init(services => services.WithSingleton(moveQueue.Object));
+            var outputPath = FileService.GetTempDirectory("listenarr-move-output");
+            await _applicationSettingsRepository.SaveAsync(
+                new ApplicationSettingsBuilder()
+                    .WithOutputPath(outputPath)
+                    .Build());
+            var sourcePath = FileService.GetTempDirectory("listenarr-move-untracked");
+            _ = await FileService.GetFileAsync(sourcePath, "Untracked.m4b", "audio");
+            var audiobook = await _audiobookRepository.AddAsync(
+                new AudiobookBuilder()
+                    .WithTitle("Untracked")
+                    .WithBasePath(sourcePath)
+                    .Build());
+
+            var result = await _provider.GetRequiredService<LibraryController>()
+                .EnqueueMove(
+                    audiobook.Id,
+                    new LibraryController.MoveRequest
+                    {
+                        DestinationPath = Path.Join(outputPath, "Untracked"),
+                        MoveFiles = true
+                    });
+
+            var conflict = Assert.IsType<ConflictObjectResult>(result);
+            Assert.Contains("move_source_unverified", conflict.Value?.ToString() ?? string.Empty);
+            moveQueue.Verify(service => service.EnqueueMoveAsync(
+                It.IsAny<MoveEnqueueCommand>(),
+                It.IsAny<CancellationToken>()), Times.Never);
+        }
+
+        [Fact]
         [Trait("Method", "EnqueueMove")]
         [Trait("Scenario", "RejectsStalePhysicalSourcePath")]
         public async Task MoveAudiobook_PhysicalMoveRejectsStaleExistingSourcePath()
@@ -124,6 +270,7 @@ namespace Listenarr.Tests.Features.Api.Features.Library
                 .WithTitle("Stale Physical Source")
                 .WithBasePath(currentSource)
                 .Build());
+            await AddTrackedFileAsync(audiobook, currentSource);
 
             var result = await _provider.GetRequiredService<LibraryController>().EnqueueMove(
                 audiobook.Id,
@@ -169,6 +316,7 @@ namespace Listenarr.Tests.Features.Api.Features.Library
                 .WithTitle("Enqueue Fence")
                 .WithBasePath(originalSource)
                 .Build());
+            await AddTrackedFileAsync(audiobook, originalSource);
 
             var result = await _provider.GetRequiredService<LibraryController>().EnqueueMove(
                 audiobook.Id,
@@ -214,6 +362,7 @@ namespace Listenarr.Tests.Features.Api.Features.Library
                 .WithTitle("Custom Physical Move")
                 .WithBasePath(sourcePath)
                 .Build());
+            await AddTrackedFileAsync(audiobook, sourcePath);
             var customRoot = FileService.GetTempDirectory("listenarr-custom-destination");
             var target = Path.Join(customRoot, "Author", "Title", "test");
             var targetParent = Path.GetDirectoryName(target)!;
@@ -264,6 +413,7 @@ namespace Listenarr.Tests.Features.Api.Features.Library
                 .WithTitle("A Parade of Horribles")
                 .WithBasePath(source)
                 .Build());
+            await AddTrackedFileAsync(audiobook, source);
 
             var result = await _provider.GetRequiredService<LibraryController>().EnqueueMove(
                 audiobook.Id,
@@ -300,10 +450,12 @@ namespace Listenarr.Tests.Features.Api.Features.Library
             await _applicationSettingsRepository.SaveAsync(new ApplicationSettingsBuilder()
                 .WithOutputPath(outputPath)
                 .Build());
+            var sourcePath = FileService.GetTempDirectory("listenarr-move-src");
             var audiobook = await _audiobookRepository.AddAsync(new AudiobookBuilder()
                 .WithTitle("Test")
-                .WithBasePath(FileService.GetTempDirectory("listenarr-move-src"))
+                .WithBasePath(sourcePath)
                 .Build());
+            await AddTrackedFileAsync(audiobook, sourcePath);
 
             var result = await _provider.GetRequiredService<LibraryController>().EnqueueMove(
                 audiobook.Id,
@@ -355,11 +507,8 @@ namespace Listenarr.Tests.Features.Api.Features.Library
 
             // Ensure move queue was NOT enqueued
             mockMoveQueue.Verify(m => m.EnqueueMoveAsync(
-                It.IsAny<int>(),
-                It.IsAny<string>(),
-                It.IsAny<string>(),
-                It.IsAny<bool>(),
-                It.IsAny<string?>()), Times.Never);
+                It.IsAny<MoveEnqueueCommand>(),
+                It.IsAny<CancellationToken>()), Times.Never);
         }
 
         [Theory]
@@ -400,11 +549,8 @@ namespace Listenarr.Tests.Features.Api.Features.Library
             Assert.Contains("active root folder relocation", conflict.Value?.ToString() ?? string.Empty);
             Assert.Equal(sourcePath, (await _audiobookRepository.GetByIdAsync(audiobook.Id))!.BasePath);
             moveQueue.Verify(service => service.EnqueueMoveAsync(
-                It.IsAny<int>(),
-                It.IsAny<string>(),
-                It.IsAny<string?>(),
-                It.IsAny<bool>(),
-                It.IsAny<string?>()), Times.Never);
+                It.IsAny<MoveEnqueueCommand>(),
+                It.IsAny<CancellationToken>()), Times.Never);
         }
 
         [Fact]
@@ -447,11 +593,8 @@ namespace Listenarr.Tests.Features.Api.Features.Library
             Assert.Contains("source path changed", conflict.Value?.ToString() ?? string.Empty, StringComparison.OrdinalIgnoreCase);
             Assert.Equal(sourcePath, (await _audiobookRepository.GetByIdAsync(audiobook.Id))!.BasePath);
             moveQueue.Verify(service => service.EnqueueMoveAsync(
-                It.IsAny<int>(),
-                It.IsAny<string>(),
-                It.IsAny<string?>(),
-                It.IsAny<bool>(),
-                It.IsAny<string?>()), Times.Never);
+                It.IsAny<MoveEnqueueCommand>(),
+                It.IsAny<CancellationToken>()), Times.Never);
         }
 
         [Fact]
@@ -512,11 +655,8 @@ namespace Listenarr.Tests.Features.Api.Features.Library
             Assert.Contains("configured root folder or output path", badRequest.Value?.ToString() ?? string.Empty, StringComparison.OrdinalIgnoreCase);
             Assert.Equal(sourcePath, (await _audiobookRepository.GetByIdAsync(audiobook.Id))!.BasePath);
             moveQueue.Verify(service => service.EnqueueMoveAsync(
-                It.IsAny<int>(),
-                It.IsAny<string>(),
-                It.IsAny<string?>(),
-                It.IsAny<bool>(),
-                It.IsAny<string?>()), Times.Never);
+                It.IsAny<MoveEnqueueCommand>(),
+                It.IsAny<CancellationToken>()), Times.Never);
         }
 
         [Fact]
@@ -541,6 +681,7 @@ namespace Listenarr.Tests.Features.Api.Features.Library
                 .WithTitle("Physical Gate")
                 .WithBasePath(sourcePath)
                 .Build());
+            await AddTrackedFileAsync(audiobook, sourcePath);
             var targetPath = Path.Join(outputPath, "physical-target");
             var lockEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             var releaseLock = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -799,11 +940,8 @@ namespace Listenarr.Tests.Features.Api.Features.Library
             Assert.Contains(updated.Files!, file => file.Path == Path.Join("disc-1", "chapter.mp3"));
             Assert.Contains(updated.Files!, file => file.Path == unrelatedPath);
             moveQueue.Verify(service => service.EnqueueMoveAsync(
-                It.IsAny<int>(),
-                It.IsAny<string>(),
-                It.IsAny<string?>(),
-                It.IsAny<bool>(),
-                It.IsAny<string?>()), Times.Never);
+                It.IsAny<MoveEnqueueCommand>(),
+                It.IsAny<CancellationToken>()), Times.Never);
         }
 
         [Fact]
@@ -997,6 +1135,7 @@ namespace Listenarr.Tests.Features.Api.Features.Library
                 .WithTitle("Test")
                 .WithBasePath(sourcePath)
                 .Build());
+            await AddTrackedFileAsync(audiobook, sourcePath);
 
             var targetPath = Path.Join(outputPath, "caseonlybook");
             var request = new LibraryController.MoveRequest { DestinationPath = targetPath };
@@ -1039,6 +1178,11 @@ namespace Listenarr.Tests.Features.Api.Features.Library
                 .WithTitle("Test")
                 .WithBasePath(sourcePath)
                 .Build());
+            await AddTrackedFileAsync(
+                audiobook,
+                sourcePath,
+                identityBoundary: rootPath,
+                caseSensitivityMode: FileSystemCaseSensitivityMode.Insensitive);
             var controller = _provider.GetRequiredService<LibraryController>();
             var request = new LibraryController.MoveRequest
             {
@@ -1083,6 +1227,11 @@ namespace Listenarr.Tests.Features.Api.Features.Library
                 .WithTitle("Test")
                 .WithBasePath(sourcePath)
                 .Build());
+            await AddTrackedFileAsync(
+                audiobook,
+                sourcePath,
+                identityBoundary: rootPath,
+                caseSensitivityMode: FileSystemCaseSensitivityMode.Sensitive);
             var targetPath = Path.Join(rootPath, "caseonlybook");
             var controller = _provider.GetRequiredService<LibraryController>();
 
@@ -1132,6 +1281,11 @@ namespace Listenarr.Tests.Features.Api.Features.Library
                 .WithTitle("Nested sensitive move")
                 .WithBasePath(sourcePath)
                 .Build());
+            await AddTrackedFileAsync(
+                audiobook,
+                sourcePath,
+                identityBoundary: sensitiveRoot,
+                caseSensitivityMode: FileSystemCaseSensitivityMode.Sensitive);
 
             var result = await _provider.GetRequiredService<LibraryController>().EnqueueMove(
                 audiobook.Id,
@@ -1145,6 +1299,39 @@ namespace Listenarr.Tests.Features.Api.Features.Library
                     && command.SourceIdentity.CaseSensitivity == FileSystemCaseSensitivity.Sensitive
                     && command.TargetIdentity.CaseSensitivity == FileSystemCaseSensitivity.Sensitive),
                 It.IsAny<CancellationToken>()), Times.Once);
+        }
+
+        private async Task<string> AddTrackedFileAsync(
+            Audiobook audiobook,
+            string sourcePath,
+            string fileName = "book.m4b",
+            bool createFile = true,
+            string? identityBoundary = null,
+            FileSystemCaseSensitivityMode caseSensitivityMode = FileSystemCaseSensitivityMode.Auto)
+        {
+            Directory.CreateDirectory(sourcePath);
+            var filePath = Path.Join(sourcePath, fileName);
+            if (createFile)
+            {
+                await File.WriteAllTextAsync(filePath, "audio");
+            }
+
+            var resolution = await _provider
+                .GetRequiredService<IFileSystemSemanticsResolver>()
+                .ResolveAsync(filePath, caseSensitivityMode);
+            Assert.Equal(PathIdentityState.Valid, resolution.State);
+            var identity = AudiobookFilePathIdentity.CreateValid(
+                filePath,
+                resolution.Semantics,
+                caseSensitivityMode,
+                identityBoundary ?? resolution.BoundaryPath);
+            var tracked = new AudiobookFileBuilder()
+                .WithAudiobook(audiobook)
+                .WithPath(filePath)
+                .Build();
+            tracked.ApplyPathIdentity(filePath, identity);
+            await _audiobookFileRepository.AddAsync(tracked);
+            return filePath;
         }
 
         private sealed class BeforeExecuteAudiobookCoordinator(Func<Task> beforeExecute)
