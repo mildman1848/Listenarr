@@ -23,7 +23,9 @@ public sealed partial class EfMoveScanHandoffStore
                     .Where(handoff => handoff.Id == handoffId
                         && handoff.Status == MoveScanHandoffStatus.Claimed
                         && handoff.LeaseOwner == leaseOwner
-                        && handoff.LeaseGeneration == leaseGeneration)
+                        && handoff.LeaseGeneration == leaseGeneration
+                        && handoff.LeaseExpiresAt != null
+                        && handoff.LeaseExpiresAt > nowUtc)
                     .ExecuteUpdateAsync(updates => updates
                         .SetProperty(handoff => handoff.ActiveScanJobId, scanJobId)
                         .SetProperty(handoff => handoff.UpdatedAt, nowUtc),
@@ -34,7 +36,9 @@ public sealed partial class EfMoveScanHandoffStore
                 candidate.Id == handoffId
                 && candidate.Status == MoveScanHandoffStatus.Claimed
                 && candidate.LeaseOwner == leaseOwner
-                && candidate.LeaseGeneration == leaseGeneration,
+                && candidate.LeaseGeneration == leaseGeneration
+                && candidate.LeaseExpiresAt != null
+                && candidate.LeaseExpiresAt > nowUtc,
                 cancellationToken);
             if (handoff == null)
             {
@@ -71,7 +75,9 @@ public sealed partial class EfMoveScanHandoffStore
                     .Where(handoff => handoff.Id == handoffId
                         && handoff.Status == MoveScanHandoffStatus.Claimed
                         && handoff.AttemptGeneration == attemptGeneration
-                        && handoff.ActiveScanJobId == scanJobId)
+                        && handoff.ActiveScanJobId == scanJobId
+                        && handoff.LeaseExpiresAt != null
+                        && handoff.LeaseExpiresAt > nowUtc)
                     .ExecuteUpdateAsync(updates => updates
                         .SetProperty(handoff => handoff.LeaseExpiresAt, leaseExpiresAtUtc)
                         .SetProperty(handoff => handoff.UpdatedAt, nowUtc),
@@ -88,7 +94,9 @@ public sealed partial class EfMoveScanHandoffStore
                     candidate.Id == handoffId
                     && candidate.Status == MoveScanHandoffStatus.Claimed
                     && candidate.AttemptGeneration == attemptGeneration
-                    && candidate.ActiveScanJobId == scanJobId,
+                    && candidate.ActiveScanJobId == scanJobId
+                    && candidate.LeaseExpiresAt != null
+                    && candidate.LeaseExpiresAt > nowUtc,
                     cancellationToken);
                 if (handoff != null)
                 {
@@ -164,6 +172,13 @@ public sealed partial class EfMoveScanHandoffStore
             }
 
             var nowUtc = now.UtcDateTime;
+            if (snapshot.LeaseExpiresAt == null
+                || snapshot.LeaseExpiresAt <= nowUtc)
+            {
+                return new MoveScanAttemptResult(
+                    MoveScanAttemptOutcome.Superseded,
+                    null);
+            }
             var terminalStatus = outcome switch
             {
                 MoveScanTerminalOutcome.Succeeded => MoveScanHandoffStatus.Succeeded,
@@ -178,7 +193,9 @@ public sealed partial class EfMoveScanHandoffStore
                     .Where(handoff => handoff.Id == handoffId
                         && handoff.AttemptGeneration == attemptGeneration
                         && handoff.ActiveScanJobId == scanJobId
-                        && handoff.Status == MoveScanHandoffStatus.Claimed)
+                        && handoff.Status == MoveScanHandoffStatus.Claimed
+                        && handoff.LeaseExpiresAt != null
+                        && handoff.LeaseExpiresAt > nowUtc)
                     .ExecuteUpdateAsync(updates => updates
                         .SetProperty(handoff => handoff.Status, terminalStatus)
                         .SetProperty(handoff => handoff.LastError, terminalError)
@@ -213,6 +230,13 @@ public sealed partial class EfMoveScanHandoffStore
                 if (tracked.Status != MoveScanHandoffStatus.Claimed)
                 {
                     return ToAttemptResult(tracked.Status, tracked.LastError);
+                }
+                if (tracked.LeaseExpiresAt == null
+                    || tracked.LeaseExpiresAt <= nowUtc)
+                {
+                    return new MoveScanAttemptResult(
+                        MoveScanAttemptOutcome.Superseded,
+                        null);
                 }
 
                 tracked.Status = terminalStatus;

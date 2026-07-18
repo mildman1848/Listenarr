@@ -29,6 +29,7 @@ namespace Listenarr.Infrastructure.Persistence
         public DbSet<MoveJob> MoveJobs { get; set; } = null!;
         public DbSet<MoveJobEntry> MoveJobEntries { get; set; } = null!;
         public DbSet<MoveJobCreatedDirectory> MoveJobCreatedDirectories { get; set; } = null!;
+        public DbSet<LibraryDirectoryOwnership> LibraryDirectoryOwnerships { get; set; } = null!;
         public DbSet<MoveScanHandoff> MoveScanHandoffs { get; set; } = null!;
         public DbSet<ApplicationSettings> ApplicationSettings { get; set; } = null!;
         public DbSet<History> History { get; set; } = null!;

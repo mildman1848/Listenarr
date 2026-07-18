@@ -763,6 +763,33 @@ public sealed class RootFolderRelocationServiceTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task RetryAsync_RequestCanceledDuringBroadcast_ReturnsCommittedResult()
+    {
+        var (relocationId, rootId) = await SeedRetryableRelocationAsync();
+        using var cancellation = new CancellationTokenSource();
+        var service = new RootFolderRelocationService(
+            _factory,
+            new FileSystemSemanticsResolver(),
+            new CancelingHubBroadcaster(cancellation),
+            TimeProvider.System,
+            new FilesystemMutationCoordinator(),
+            _operationCoordinator);
+
+        var result = await service.RetryAsync(
+            relocationId,
+            cancellation.Token);
+
+        Assert.True(cancellation.IsCancellationRequested);
+        Assert.Equal(RootFolderRelocationStatus.Completed, result.Status);
+        await using var verification = await _factory.CreateDbContextAsync();
+        var relocation = await verification.RootFolderRelocations.SingleAsync();
+        var root = await verification.RootFolders.SingleAsync();
+        Assert.Equal(rootId, root.Id);
+        Assert.Equal(RootFolderRelocationStatus.Completed, relocation.Status);
+        Assert.Null(relocation.ActiveRootFolderId);
+    }
+
+    [Fact]
     public async Task RetryAsync_CancelledWhileWaiting_DoesNotMutateOrBroadcast()
     {
         var (relocationId, rootId) = await SeedRetryableRelocationAsync();
@@ -1596,6 +1623,53 @@ public sealed class RootFolderRelocationServiceTests : IAsyncLifetime
         Assert.Single(await verification.MoveJobs.ToListAsync());
     }
 
+    [Fact]
+    public async Task StartRelocation_RequestCanceledDuringBroadcast_ReturnsCommittedSaga()
+    {
+        var source = Path.Join(Path.GetTempPath(), $"broadcast-cancel-source-{Guid.NewGuid():N}");
+        var target = Path.Join(Path.GetTempPath(), $"broadcast-cancel-target-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(source);
+        int rootId;
+        await using (var db = await _factory.CreateDbContextAsync())
+        {
+            var root = new RootFolder { Name = "Library", Path = source };
+            db.RootFolders.Add(root);
+            db.Audiobooks.Add(new Audiobook
+            {
+                Title = "Title",
+                BasePath = Path.Join(source, "Title")
+            });
+            await db.SaveChangesAsync();
+            rootId = root.Id;
+        }
+
+        using var cancellation = new CancellationTokenSource();
+        var service = new RootFolderRelocationService(
+            _factory,
+            new FileSystemSemanticsResolver(),
+            new CancelingHubBroadcaster(cancellation),
+            TimeProvider.System,
+            new FilesystemMutationCoordinator(),
+            _operationCoordinator);
+
+        var result = await service.StartAsync(
+            rootId,
+            new RootFolderPathChangeCommand(
+                target,
+                RootFolderRelocationMode.Relocate,
+                true,
+                "Library",
+                false,
+                FileSystemCaseSensitivityMode.Auto),
+            cancellation.Token);
+
+        Assert.NotNull(result.RelocationId);
+        Assert.True(cancellation.IsCancellationRequested);
+        await using var verification = await _factory.CreateDbContextAsync();
+        Assert.Single(await verification.RootFolderRelocations.ToListAsync());
+        Assert.Single(await verification.MoveJobs.ToListAsync());
+    }
+
     [Theory]
     [InlineData("audiobook")]
     [InlineData("source")]
@@ -2015,6 +2089,29 @@ public sealed class RootFolderRelocationServiceTests : IAsyncLifetime
 
             return _inner.ResolveAsync(path, mode, cancellationToken);
         }
+    }
+
+    private sealed class CancelingHubBroadcaster(
+        CancellationTokenSource cancellation) : IHubBroadcaster
+    {
+        public Task BroadcastQueueUpdateAsync(QueueSnapshot queueSnapshot) => Task.CompletedTask;
+
+        public Task BroadcastAsync(
+            string method,
+            object payload,
+            CancellationToken cancellationToken = default)
+        {
+            cancellation.Cancel();
+            cancellationToken.ThrowIfCancellationRequested();
+            return Task.CompletedTask;
+        }
+
+        public Task BroadcastAsync(
+            RealtimeHubTarget target,
+            string method,
+            object payload,
+            CancellationToken cancellationToken = default) =>
+            Task.CompletedTask;
     }
 
     private sealed class ThrowingHubBroadcaster : IHubBroadcaster

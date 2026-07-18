@@ -185,12 +185,24 @@ namespace Listenarr.Infrastructure.Persistence.Repositories
                     propertyName => propertyName,
                     propertyName => existingEntry.Property(propertyName).CurrentValue);
                 existingEntry.CurrentValues.SetValues(file);
-                // Detached metadata updates cannot safely establish a new path or ownership.
+                // Metadata updates cannot safely establish a new path or ownership.
                 // Move/rename workflows update those references under their coordinated contracts.
                 existing.AudiobookId = preservedAudiobookId;
                 foreach (var pair in preservedValues)
                 {
                     existingEntry.Property(pair.Key).CurrentValue = pair.Value;
+                }
+            }
+            else
+            {
+                var preservedAudiobookId = entry
+                    .Property(nameof(AudiobookFile.AudiobookId))
+                    .OriginalValue;
+                file.AudiobookId = (int)preservedAudiobookId!;
+                foreach (var propertyName in PathIdentityPropertyNames)
+                {
+                    entry.Property(propertyName).CurrentValue =
+                        entry.Property(propertyName).OriginalValue;
                 }
             }
 

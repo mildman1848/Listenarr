@@ -50,7 +50,8 @@ public sealed partial class RootFolderRelocationService
                 relocation.Error = targetResolution.Reason ?? "Target filesystem identity is unavailable.";
                 relocation.UpdatedAt = now;
                 await db.SaveChangesAsync(cancellationToken);
-                await transaction.CommitAsync(cancellationToken);
+                cancellationToken.ThrowIfCancellationRequested();
+                await transaction.CommitAsync(CancellationToken.None);
                 var fallbackPath = ResolveCurrentPathFallback(relocation);
                 string? unavailableRootPath = null;
                 if (relocation.RootFolderId is int unavailableRootFolderId)
@@ -58,7 +59,7 @@ public sealed partial class RootFolderRelocationService
                     unavailableRootPath = await db.RootFolders
                         .Where(root => root.Id == unavailableRootFolderId)
                         .Select(root => root.Path)
-                        .SingleOrDefaultAsync(cancellationToken);
+                        .SingleOrDefaultAsync(CancellationToken.None);
                 }
 
                 var unavailableResult = Map(relocation, unavailableRootPath ?? fallbackPath);
@@ -160,7 +161,8 @@ public sealed partial class RootFolderRelocationService
 
         relocation.UpdatedAt = now;
         await db.SaveChangesAsync(cancellationToken);
-        await transaction.CommitAsync(cancellationToken);
+        cancellationToken.ThrowIfCancellationRequested();
+        await transaction.CommitAsync(CancellationToken.None);
         var resultFallbackPath = ResolveCurrentPathFallback(relocation);
         string? rootPath = null;
         if (relocation.RootFolderId is int resultRootFolderId)
@@ -168,7 +170,7 @@ public sealed partial class RootFolderRelocationService
             rootPath = await db.RootFolders
                 .Where(root => root.Id == resultRootFolderId)
                 .Select(root => root.Path)
-                .SingleOrDefaultAsync(cancellationToken);
+                .SingleOrDefaultAsync(CancellationToken.None);
         }
 
         var result = Map(relocation, rootPath ?? resultFallbackPath);

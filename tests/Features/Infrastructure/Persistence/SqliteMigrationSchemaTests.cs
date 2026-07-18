@@ -49,7 +49,9 @@ namespace Listenarr.Tests.Features.Infrastructure.Persistence
             "20260708225028_MakeRootFolderRelocationRootNullable",
             "20260708225144_SetRootFolderRelocationRootDeleteBehavior",
             "20260710172532_AddMoveJobSourceCleanupBoundary",
-            "20260713181804_HardenMoveExecutionAndScanHandoffs"
+            "20260713181804_HardenMoveExecutionAndScanHandoffs",
+            "20260715115000_AddAudiobookFileOwnershipIdentity",
+            "20260717143713_AddLibraryDirectoryOwnership"
         };
 
         private static (SqliteConnection Connection, ListenArrDbContext Context) CreateMigratedSqliteContext()
@@ -137,6 +139,138 @@ namespace Listenarr.Tests.Features.Infrastructure.Persistence
                 context.Database.HasPendingModelChanges(),
                 "The configured EF model differs from the accumulated migration snapshots. "
                 + "Regenerate migrations with dotnet ef migrations add instead of hand-authoring them.");
+        }
+
+        [Fact]
+        [Trait("Scenario", "AudiobookFileOwnershipIdentityDefaultsAndIndexes")]
+        public async Task AudiobookFileOwnershipMigration_PreservesRowsAndCreatesOwnershipIndexes()
+        {
+            await using var connection = new SqliteConnection("DataSource=:memory:");
+            await connection.OpenAsync();
+
+            var options = new DbContextOptionsBuilder<ListenArrDbContext>()
+                .UseSqlite(connection, sqlite =>
+                    sqlite.MigrationsAssembly(typeof(ListenArrDbContext).Assembly.GetName().Name))
+                .Options;
+
+            await using var context = new ListenArrDbContext(options);
+            var migrator = context.GetService<IMigrator>();
+            await migrator.MigrateAsync("20260713181804_HardenMoveExecutionAndScanHandoffs");
+            await context.Database.ExecuteSqlRawAsync(
+                """
+                INSERT INTO "Audiobooks" ("Id", "Explicit", "Abridged", "Monitored")
+                VALUES (1, 0, 0, 1)
+                """);
+            await context.Database.ExecuteSqlRawAsync(
+                """
+                INSERT INTO "AudiobookFiles" ("AudiobookId", "Path", "CreatedAt")
+                VALUES (1, '/library/book-one.m4b', CURRENT_TIMESTAMP),
+                       (1, '/library/book-two.m4b', CURRENT_TIMESTAMP)
+                """);
+
+            await migrator.MigrateAsync("20260715115000_AddAudiobookFileOwnershipIdentity");
+
+            await using (var command = connection.CreateCommand())
+            {
+                command.CommandText =
+                    """
+                    SELECT "PathCaseSensitivity", "PathCaseSensitivityMode",
+                           "PathIdentityVersion", "PathIdentityState"
+                    FROM "AudiobookFiles"
+                    ORDER BY "Id"
+                    LIMIT 1
+                    """;
+                await using var reader = await command.ExecuteReaderAsync();
+                Assert.True(await reader.ReadAsync());
+                Assert.Equal("Unknown", reader.GetString(0));
+                Assert.Equal("Auto", reader.GetString(1));
+                Assert.Equal(1, reader.GetInt32(2));
+                Assert.Equal("Unavailable", reader.GetString(3));
+            }
+
+            await using (var command = connection.CreateCommand())
+            {
+                command.CommandText =
+                    """
+                    SELECT COUNT(*)
+                    FROM pragma_index_list('AudiobookFiles')
+                    WHERE name IN (
+                        'IX_AudiobookFiles_PathIdentityLookupKey',
+                        'IX_AudiobookFiles_PathOwnershipKey')
+                    """;
+                Assert.Equal(2L, (long)(await command.ExecuteScalarAsync())!);
+            }
+
+            await context.Database.ExecuteSqlRawAsync(
+                "UPDATE \"AudiobookFiles\" SET \"PathOwnershipKey\" = 'owned:path' WHERE \"Id\" = 1");
+            await Assert.ThrowsAsync<SqliteException>(() =>
+                context.Database.ExecuteSqlRawAsync(
+                    "UPDATE \"AudiobookFiles\" SET \"PathOwnershipKey\" = 'owned:path' WHERE \"Id\" = 2"));
+        }
+
+        [Fact]
+        [Trait("Scenario", "LibraryDirectoryOwnershipIndexes")]
+        public async Task LibraryDirectoryOwnershipMigration_CreatesDurableOwnershipIndexes()
+        {
+            await using var connection = new SqliteConnection("DataSource=:memory:");
+            await connection.OpenAsync();
+
+            var options = new DbContextOptionsBuilder<ListenArrDbContext>()
+                .UseSqlite(connection, sqlite =>
+                    sqlite.MigrationsAssembly(typeof(ListenArrDbContext).Assembly.GetName().Name))
+                .Options;
+
+            await using var context = new ListenArrDbContext(options);
+            await context.Database.MigrateAsync();
+
+            await using (var command = connection.CreateCommand())
+            {
+                command.CommandText =
+                    """
+                    SELECT COUNT(*)
+                    FROM pragma_index_list('LibraryDirectoryOwnerships')
+                    WHERE name IN (
+                        'IX_LibraryDirectoryOwnerships_CreationOperationId_State',
+                        'IX_LibraryDirectoryOwnerships_OwnershipToken',
+                        'IX_LibraryDirectoryOwnerships_PathIdentityLookupKey',
+                        'IX_LibraryDirectoryOwnerships_PathOwnershipKey')
+                    """;
+                Assert.Equal(4L, (long)(await command.ExecuteScalarAsync())!);
+            }
+
+            const string insertSql =
+                """
+                INSERT INTO "LibraryDirectoryOwnerships" (
+                    "Path", "CanonicalPath", "PathSyntax", "PathCaseSensitivity",
+                    "PathCaseSensitivityMode", "PathIdentityBoundary",
+                    "PathIdentityLookupKey", "PathOwnershipKey", "OwnershipToken",
+                    "State", "CreationWorkflow", "CreatedAt", "UpdatedAt")
+                VALUES ({0}, {0}, 'Unix', 'Sensitive', 'Sensitive', '/library',
+                    {1}, {2}, {3}, 'Owned', 'migration-test', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                """;
+            await context.Database.ExecuteSqlRawAsync(
+                insertSql,
+                "/library/author-one",
+                "lookup:one",
+                "ownership:one",
+                "11111111111111111111111111111111");
+            await context.Database.ExecuteSqlRawAsync(
+                insertSql,
+                "/library/author-two",
+                "lookup:two",
+                null,
+                "22222222222222222222222222222222");
+
+            await Assert.ThrowsAsync<SqliteException>(() =>
+                context.Database.ExecuteSqlRawAsync(
+                    "UPDATE \"LibraryDirectoryOwnerships\" SET \"PathOwnershipKey\" = 'ownership:one' WHERE \"OwnershipToken\" = '22222222222222222222222222222222'"));
+            await Assert.ThrowsAsync<SqliteException>(() =>
+                context.Database.ExecuteSqlRawAsync(
+                    insertSql,
+                    "/library/author-three",
+                    "lookup:three",
+                    null,
+                    "11111111111111111111111111111111"));
         }
 
         [Theory]

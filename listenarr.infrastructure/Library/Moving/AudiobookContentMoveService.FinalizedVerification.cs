@@ -8,6 +8,9 @@ internal sealed partial class AudiobookContentMoveService
     {
         ArgumentNullException.ThrowIfNull(request);
         cancellationToken.ThrowIfCancellationRequested();
+        request = await WithValidatedTargetDirectoryOwnershipAsync(
+            request,
+            cancellationToken);
 
         var source = NormalizeMoveDirectoryEndpoint(request.Source);
         var target = NormalizeMoveDirectoryEndpoint(request.Target);
@@ -62,7 +65,8 @@ internal sealed partial class AudiobookContentMoveService
             request.TargetSemantics,
             tempOwnership,
             quarantineOwnership,
-            allowPartialFiles: false);
+            allowPartialFiles: false,
+            targetDirectoryOwnership: request.TargetDirectoryOwnership);
         await VerifyPublishedManifestAsync(
             target,
             manifest,

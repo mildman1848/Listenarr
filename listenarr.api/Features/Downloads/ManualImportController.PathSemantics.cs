@@ -4,7 +4,9 @@ namespace Listenarr.Api.Features.Downloads;
 
 public partial class ManualImportController
 {
-    private async Task<FileSystemPathSemantics> ResolveDestinationSemanticsAsync(string? basePath)
+    private async Task<FileSystemSemanticsResolution> ResolveDestinationResolutionAsync(
+        string? basePath,
+        CancellationToken cancellationToken)
     {
         if (string.IsNullOrWhiteSpace(basePath))
         {
@@ -22,7 +24,8 @@ public partial class ManualImportController
 
             var rootResolution = await _semanticsResolver.ResolveAsync(
                 root.Path,
-                root.CaseSensitivityMode);
+                root.CaseSensitivityMode,
+                cancellationToken);
             if (rootResolution.State != PathIdentityState.Valid
                 || !FileSystemPathIdentity.IsSameOrInside(
                     basePath,
@@ -44,21 +47,25 @@ public partial class ManualImportController
 
         var resolution = await _semanticsResolver.ResolveAsync(
             basePath,
-            bestRoot?.CaseSensitivityMode ?? FileSystemCaseSensitivityMode.Auto);
+            bestRoot?.CaseSensitivityMode ?? FileSystemCaseSensitivityMode.Auto,
+            cancellationToken);
         if (resolution.State != PathIdentityState.Valid)
         {
             throw new InvalidOperationException(
                 resolution.Reason ?? "Destination filesystem identity is unavailable.");
         }
 
-        return resolution.Semantics;
+        return resolution;
     }
 
     private async Task<FileSystemPathSemantics> ResolvePathSemanticsAsync(
         string path,
-        string defaultReason)
+        string defaultReason,
+        CancellationToken cancellationToken)
     {
-        var resolution = await _semanticsResolver.ResolveAsync(path);
+        var resolution = await _semanticsResolver.ResolveAsync(
+            path,
+            cancellationToken: cancellationToken);
         if (resolution.State != PathIdentityState.Valid)
         {
             throw new InvalidOperationException(resolution.Reason ?? defaultReason);
@@ -69,7 +76,8 @@ public partial class ManualImportController
 
     private async Task<bool> IsInsideAnyConfiguredRootAsync(
         string path,
-        IEnumerable<RootFolder> rootFolders)
+        IEnumerable<RootFolder> rootFolders,
+        CancellationToken cancellationToken)
     {
         foreach (var rootFolder in rootFolders)
         {
@@ -80,7 +88,8 @@ public partial class ManualImportController
 
             var resolution = await _semanticsResolver.ResolveAsync(
                 rootFolder.Path,
-                rootFolder.CaseSensitivityMode);
+                rootFolder.CaseSensitivityMode,
+                cancellationToken);
             if (resolution.State == PathIdentityState.Valid
                 && FileSystemPathIdentity.IsSameOrInside(
                     path,

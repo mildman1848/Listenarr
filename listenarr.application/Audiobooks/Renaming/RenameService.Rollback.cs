@@ -43,6 +43,7 @@ public partial class RenameService
         Audiobook audiobook,
         DirectoryRollbackState rollbackState,
         IReadOnlyCollection<string> allowedRoots,
+        FileSystemPathSemantics semantics,
         CancellationToken cancellationToken)
     {
         try
@@ -71,7 +72,13 @@ public partial class RenameService
                 var parent = Path.GetDirectoryName(rollbackDestination);
                 if (!string.IsNullOrWhiteSpace(parent))
                 {
-                    _fileSystem.CreateDirectory(parent);
+                    await EnsureOwnedRenameHierarchyAsync(
+                        parent,
+                        allowedRoots,
+                        semantics,
+                        audiobook.Id,
+                        Guid.NewGuid(),
+                        cancellationToken);
                 }
 
                 if (!await _fileMover.MoveDirectoryAsync(
@@ -150,7 +157,13 @@ public partial class RenameService
                     var parent = Path.GetDirectoryName(rollbackDestination);
                     if (!string.IsNullOrWhiteSpace(parent))
                     {
-                        _fileSystem.CreateDirectory(parent);
+                        await EnsureOwnedRenameHierarchyAsync(
+                            parent,
+                            allowedRoots,
+                            semantics,
+                            audiobook.Id,
+                            Guid.NewGuid(),
+                            cancellationToken);
                     }
 
                     var moved = await _fileMover.PerformActionOn(

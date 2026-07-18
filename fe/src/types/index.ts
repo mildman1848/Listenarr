@@ -288,6 +288,7 @@ export interface RootFolder {
   id: number
   name: string
   path: string
+  pathSyntax?: 'Windows' | 'Unix' | null
   isDefault: boolean
   createdAt?: string
   updatedAt?: string

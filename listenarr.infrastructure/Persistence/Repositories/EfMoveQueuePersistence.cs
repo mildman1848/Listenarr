@@ -117,6 +117,57 @@ public sealed partial class EfMoveQueuePersistence(
         await db.SaveChangesAsync(cancellationToken);
     }
 
+    public async Task<bool> MarkNeedsAttentionAsync(
+        Guid id,
+        MoveJobStatus expectedStatus,
+        string error,
+        DateTimeOffset updatedAt,
+        CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
+            if (!db.Database.IsRelational())
+            {
+                var trackedJob = await db.MoveJobs.SingleOrDefaultAsync(
+                    job => job.Id == id && job.Status == expectedStatus,
+                    cancellationToken);
+                if (trackedJob == null)
+                {
+                    return false;
+                }
+
+                trackedJob.Status = MoveJobStatus.NeedsAttention;
+                trackedJob.Error = error;
+                trackedJob.FailureKind = MoveFailureKind.Verification;
+                trackedJob.ActiveDeduplicationKey = null;
+                trackedJob.LeaseOwner = null;
+                trackedJob.LeaseExpiresAt = null;
+                trackedJob.UpdatedAt = updatedAt.UtcDateTime;
+                await db.SaveChangesAsync(cancellationToken);
+                return true;
+            }
+
+            var affected = await db.MoveJobs
+                .Where(job => job.Id == id && job.Status == expectedStatus)
+                .ExecuteUpdateAsync(
+                    updates => updates
+                        .SetProperty(job => job.Status, MoveJobStatus.NeedsAttention)
+                        .SetProperty(job => job.Error, error)
+                        .SetProperty(job => job.FailureKind, MoveFailureKind.Verification)
+                        .SetProperty(job => job.ActiveDeduplicationKey, (string?)null)
+                        .SetProperty(job => job.LeaseOwner, (string?)null)
+                        .SetProperty(job => job.LeaseExpiresAt, (DateTime?)null)
+                        .SetProperty(job => job.UpdatedAt, updatedAt.UtcDateTime),
+                    cancellationToken);
+            return affected == 1;
+        }
+        catch (Exception ex) when (ex is DbException or DbUpdateException)
+        {
+            throw new PersistenceException("Failed to mark move job as needing attention.", ex);
+        }
+    }
+
     public async Task<bool> UpdateStatusAsync(
         Guid id,
         string leaseOwner,

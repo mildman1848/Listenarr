@@ -360,6 +360,65 @@ namespace Listenarr.Tests.Features.Application.Audiobooks.RootFolders
         }
 
         [Fact]
+        public async Task Create_InsensitiveRequestedRootRejectsCaseVariantNestedExistingRoot()
+        {
+            if (OperatingSystem.IsWindows())
+            {
+                return;
+            }
+
+            var options = new DbContextOptionsBuilder<ListenArrDbContext>()
+                .UseInMemoryDatabase(Guid.NewGuid().ToString())
+                .Options;
+            var existingPath = Path.Join(rootPath, "Library");
+            await using (var db = new ListenArrDbContext(options))
+            {
+                db.RootFolders.Add(new RootFolder
+                {
+                    Name = "Existing",
+                    Path = existingPath,
+                    CaseSensitivityMode = FileSystemCaseSensitivityMode.Sensitive,
+                    ResolvedCaseSensitivity = FileSystemCaseSensitivity.Sensitive,
+                    PathIdentityState = PathIdentityState.Valid
+                });
+                await db.SaveChangesAsync();
+            }
+
+            var resolver = new Mock<IFileSystemSemanticsResolver>();
+            resolver.Setup(candidate => candidate.ResolveAsync(
+                    It.IsAny<string>(),
+                    It.IsAny<FileSystemCaseSensitivityMode>(),
+                    It.IsAny<CancellationToken>()))
+                .Returns((string path, FileSystemCaseSensitivityMode mode, CancellationToken _) =>
+                    ValueTask.FromResult(new FileSystemSemanticsResolution(
+                        new FileSystemPathSemantics(
+                            FileSystemPathSyntax.Unix,
+                            mode == FileSystemCaseSensitivityMode.Insensitive
+                                ? FileSystemCaseSensitivity.Insensitive
+                                : FileSystemCaseSensitivity.Sensitive),
+                        PathIdentityState.Valid,
+                        "/")));
+            var repository = new EfRootFolderRepository(
+                new TestDbFactory(options),
+                Mock.Of<ILogger<EfRootFolderRepository>>());
+            var service = new RootFolderService(
+                repository,
+                null,
+                semanticsResolver: resolver.Object);
+            var requestedPath = Path.Join(rootPath, "library", "Audiobooks");
+
+            var exception = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+                service.CreateAsync(new RootFolder
+                {
+                    Name = "Requested",
+                    Path = requestedPath,
+                    CaseSensitivityMode = FileSystemCaseSensitivityMode.Insensitive
+                }));
+
+            Assert.Contains("nested", exception.Message, StringComparison.OrdinalIgnoreCase);
+        }
+
+        [Fact]
         public async Task Create_Throws_WhenRequestedRootContainsExistingRoot()
         {
             var options = new DbContextOptionsBuilder<ListenArrDbContext>()

@@ -64,13 +64,15 @@ public partial class ScanJobProcessor
             var historyRepository = historyScope.ServiceProvider.GetRequiredService<IHistoryRepository>();
             var audiobookRepository = historyScope.ServiceProvider.GetRequiredService<IAudiobookRepository>();
             var audiobook = await audiobookRepository.GetByIdAsync(job.AudiobookId);
-            terminalDecision = await RecordScanFailureHistoryAsync(
-                historyRepository,
+            terminalDecision = await CommitTerminalDecisionAsync(
                 job,
-                audiobook,
-                exception.Message,
+                commitToken => RecordScanFailureHistoryAsync(
+                    historyRepository,
+                    job,
+                    audiobook,
+                    exception.Message,
+                    commitToken),
                 cancellationToken);
-            ApplyTerminalStatus(job, terminalDecision);
         }
         catch (Exception historyException) when (historyException is not (
             OperationCanceledException or OutOfMemoryException or StackOverflowException))

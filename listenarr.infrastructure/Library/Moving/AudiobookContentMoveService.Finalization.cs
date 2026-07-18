@@ -18,6 +18,9 @@ internal sealed partial class AudiobookContentMoveService
         AudiobookContentMoveResult result,
         CancellationToken cancellationToken)
     {
+        request = await WithValidatedTargetDirectoryOwnershipAsync(
+            request,
+            cancellationToken);
         await EnsureLeaseOwnedAsync(request.JobId, request.LeaseToken, cancellationToken);
         await ValidatePersistedMoveIdentityAsync(
             request.JobId,
@@ -39,31 +42,19 @@ internal sealed partial class AudiobookContentMoveService
             MoveJobPhase.Finalizing,
             cancellationToken);
 
-        if (request.DeleteEmptySource && !Directory.Exists(result.Source))
+        if (request.DeleteEmptySource
+            && !Directory.Exists(result.Source)
+            && !string.IsNullOrWhiteSpace(request.SourceCleanupBoundary))
         {
-            var nearestExistingAncestor = FindNearestExistingAncestor(result.Source);
-            var hasEmptyAncestorToPrune = nearestExistingAncestor != null
-                && !IsFilesystemRoot(nearestExistingAncestor, request.SourceSemantics)
-                && !Directory.EnumerateFileSystemEntries(nearestExistingAncestor).Any();
-            if (hasEmptyAncestorToPrune
-                && string.IsNullOrWhiteSpace(request.SourceCleanupBoundary))
-            {
-                throw new MoveNeedsAttentionException(
-                    "Files were moved successfully, but empty source-parent cleanup could not be completed safely because no source cleanup boundary is available.");
-            }
-
-            if (!string.IsNullOrWhiteSpace(request.SourceCleanupBoundary))
-            {
-                // Keep the recovery marker until pruning succeeds so transient filesystem
-                // failures remain retryable instead of leaving an orphaned empty folder.
-                await RemoveEmptySourceAncestorsAsync(
-                    request,
-                    result.Source,
-                    result.Target,
-                    request.SourceCleanupBoundary,
-                    request.SourceSemantics,
-                    cancellationToken);
-            }
+            // The boundary is only an upper fence. Every parent deletion still requires
+            // a durable ownership claim for the exact live directory identity.
+            await RemoveEmptySourceAncestorsAsync(
+                request,
+                result.Source,
+                result.Target,
+                request.SourceCleanupBoundary,
+                request.SourceSemantics,
+                cancellationToken);
         }
 
         var tempOwnership = await TryValidatePublishedTempOwnershipAsync(
@@ -86,6 +77,9 @@ internal sealed partial class AudiobookContentMoveService
         AudiobookContentMoveResult result,
         CancellationToken cancellationToken)
     {
+        request = await WithValidatedTargetDirectoryOwnershipAsync(
+            request,
+            cancellationToken);
         await EnsureLeaseOwnedAsync(request.JobId, request.LeaseToken, cancellationToken);
         await ValidatePersistedMoveIdentityAsync(
             request.JobId,
@@ -127,7 +121,8 @@ internal sealed partial class AudiobookContentMoveService
             request.TargetSemantics,
             publishedTempOwnership,
             quarantineOwnership: null,
-            allowPartialFiles: false);
+            allowPartialFiles: false,
+            targetDirectoryOwnership: request.TargetDirectoryOwnership);
         await VerifyPublishedManifestAsync(
             result.Target,
             manifest,
@@ -204,7 +199,8 @@ internal sealed partial class AudiobookContentMoveService
             request.TargetSemantics,
             finalTempOwnership,
             quarantineOwnership: null,
-            allowPartialFiles: false);
+            allowPartialFiles: false,
+            targetDirectoryOwnership: request.TargetDirectoryOwnership);
         await VerifyPublishedManifestAsync(
             result.Target,
             manifest,
@@ -228,7 +224,8 @@ internal sealed partial class AudiobookContentMoveService
             request.TargetSemantics,
             finalTempOwnership,
             quarantineOwnership: null,
-            allowPartialFiles: false);
+            allowPartialFiles: false,
+            targetDirectoryOwnership: request.TargetDirectoryOwnership);
         ValidateRecoveryMarkerLocation(
             result.RecoveryMarkerPath,
             result.Target,
@@ -260,22 +257,6 @@ internal sealed partial class AudiobookContentMoveService
             cancellationToken);
     }
 
-    private static string? FindNearestExistingAncestor(string source)
-    {
-        var current = Path.GetDirectoryName(Path.GetFullPath(source));
-        while (current != null)
-        {
-            if (Directory.Exists(current))
-            {
-                return current;
-            }
-
-            current = Path.GetDirectoryName(current);
-        }
-
-        return null;
-    }
-
     private async Task RemoveEmptyDirectoryTreeAsync(
         AudiobookContentMoveRequest request,
         string source,
@@ -301,8 +282,35 @@ internal sealed partial class AudiobookContentMoveService
                 throw new MoveNeedsAttentionException(reason);
             }
 
+            var ownership = await ResolveOwnedDirectoryForCleanupAsync(
+                current,
+                semantics,
+                cancellationToken);
+            if (ownership == null)
+            {
+                return;
+            }
+            if (ownership.State == LibraryDirectoryOwnershipState.Removing)
+            {
+                var interruptedRemovalCompleted = await ResumeOwnedDirectoryRemovalAsync(
+                    request,
+                    source,
+                    target,
+                    ownership,
+                    cancellationToken);
+                if (!interruptedRemovalCompleted)
+                {
+                    return;
+                }
+
+                current = Path.GetDirectoryName(current) ?? boundary;
+                continue;
+            }
+
             ValidateExistingMoveDirectory(current, "source ancestor cleanup directory");
-            if (Directory.EnumerateFileSystemEntries(current).Any())
+            if (!LibraryDirectoryOwnershipMarker.ContainsOnlyInsideMarker(
+                    ownership,
+                    current))
             {
                 return;
             }
@@ -311,13 +319,47 @@ internal sealed partial class AudiobookContentMoveService
                 request.JobId,
                 MoveFinalizationFaultPoint.BeforeSourceAncestorDelete);
             await EnsureMutationAuthorizedAsync(request, source, target, cancellationToken);
+            var finalOwnership = await ResolveOwnedDirectoryForCleanupAsync(
+                current,
+                semantics,
+                cancellationToken);
+            if (finalOwnership == null
+                || finalOwnership.Id != ownership.Id
+                || !string.Equals(
+                    finalOwnership.PathOwnershipKey,
+                    ownership.PathOwnershipKey,
+                    StringComparison.Ordinal))
+            {
+                throw new MoveNeedsAttentionException(
+                    "The durable directory ownership claim changed before source-parent cleanup.");
+            }
+
             ValidateExistingMoveDirectory(current, "source ancestor cleanup directory");
-            if (Directory.EnumerateFileSystemEntries(current).Any())
+            if (!LibraryDirectoryOwnershipMarker.ContainsOnlyInsideMarker(
+                    finalOwnership,
+                    current))
             {
                 return;
             }
 
-            Directory.Delete(current, false);
+            var ownershipKey = finalOwnership.PathOwnershipKey
+                ?? throw new MoveNeedsAttentionException(
+                    "The durable directory ownership key is unavailable.");
+            await directoryOwnershipStore.BeginRemovalAsync(
+                finalOwnership.Id,
+                ownershipKey,
+                cancellationToken);
+            var removalCompleted = await ResumeOwnedDirectoryRemovalAsync(
+                request,
+                source,
+                target,
+                finalOwnership,
+                cancellationToken);
+            if (!removalCompleted)
+            {
+                return;
+            }
+
             current = Path.GetDirectoryName(current) ?? boundary;
         }
     }
@@ -380,7 +422,54 @@ internal sealed partial class AudiobookContentMoveService
                 return;
             }
 
+            var ownership = await ResolveOwnedDirectoryForCleanupAsync(
+                current,
+                semantics,
+                cancellationToken);
+            if (ownership != null)
+            {
+                if (ownership.State != LibraryDirectoryOwnershipState.Removing)
+                {
+                    throw new MoveNeedsAttentionException(
+                        "An owned source-parent directory disappeared without a durable cleanup intent.");
+                }
+
+                await ResumeOwnedDirectoryRemovalAsync(
+                    request,
+                    source,
+                    target,
+                    ownership,
+                    cancellationToken);
+            }
+
             current = Path.GetDirectoryName(current);
         }
+    }
+
+    private async Task<LibraryDirectoryOwnership?> ResolveOwnedDirectoryForCleanupAsync(
+        string directory,
+        FileSystemPathSemantics semantics,
+        CancellationToken cancellationToken)
+    {
+        var resolution = await directoryOwnershipStore.ResolveOwnedAsync(
+            directory,
+            semantics,
+            cancellationToken);
+        return resolution.State switch
+        {
+            LibraryDirectoryOwnershipResolutionState.Owned
+                when resolution.Ownership != null => resolution.Ownership,
+            LibraryDirectoryOwnershipResolutionState.Unowned => null,
+            LibraryDirectoryOwnershipResolutionState.Conflict =>
+                throw new MoveNeedsAttentionException(
+                    resolution.Reason
+                        ?? "Conflicting durable directory ownership claims prevent cleanup."),
+            LibraryDirectoryOwnershipResolutionState.Unavailable =>
+                throw new MoveNeedsAttentionException(
+                    resolution.Reason
+                        ?? "Durable directory ownership is unavailable for cleanup."),
+            _ => throw new MoveNeedsAttentionException(
+                "Durable directory ownership could not be resolved for cleanup.")
+        };
     }
 }

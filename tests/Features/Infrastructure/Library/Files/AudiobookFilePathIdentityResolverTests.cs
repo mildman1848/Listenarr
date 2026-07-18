@@ -51,6 +51,38 @@ public sealed class AudiobookFilePathIdentityResolverTests
     }
 
     [Fact]
+    public async Task ResolveAsync_DoubleSlashBaseUsesNativeFilesystemContext()
+    {
+        var expectedSyntax = OperatingSystem.IsWindows()
+            ? FileSystemPathSyntax.Windows
+            : FileSystemPathSyntax.Unix;
+        var sensitivity = OperatingSystem.IsWindows()
+            ? FileSystemCaseSensitivity.Insensitive
+            : FileSystemCaseSensitivity.Sensitive;
+        var root = new RootFolder
+        {
+            Path = "//server/share",
+            CaseSensitivityMode = sensitivity == FileSystemCaseSensitivity.Insensitive
+                ? FileSystemCaseSensitivityMode.Insensitive
+                : FileSystemCaseSensitivityMode.Sensitive,
+            ResolvedCaseSensitivity = sensitivity,
+            PathIdentityState = PathIdentityState.Valid
+        };
+        var resolver = BuildResolver(root);
+        var audiobook = new Audiobook { BasePath = "//server/share/Author/Book" };
+
+        var identity = await resolver.ResolveAsync(audiobook, "Disc 1/Book.m4b");
+
+        Assert.Equal(PathIdentityState.Valid, identity.State);
+        Assert.Equal(expectedSyntax, identity.Syntax);
+        Assert.Equal(
+            FileSystemPathIdentity.Canonicalize(
+                "//server/share/Author/Book/Disc 1/Book.m4b",
+                expectedSyntax),
+            identity.CanonicalPath);
+    }
+
+    [Fact]
     public async Task ResolveAsync_SameRelativePathUnderDifferentBases_IsDistinct()
     {
         var resolver = BuildResolver(new RootFolder { Path = "/library", CaseSensitivityMode = FileSystemCaseSensitivityMode.Sensitive, ResolvedCaseSensitivity = FileSystemCaseSensitivity.Sensitive, PathIdentityState = PathIdentityState.Valid });

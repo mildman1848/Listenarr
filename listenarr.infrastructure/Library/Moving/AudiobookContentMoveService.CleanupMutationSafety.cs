@@ -16,6 +16,7 @@ internal sealed partial class AudiobookContentMoveService
         MoveJobEntry manifestEntry,
         IReadOnlyCollection<MoveJobEntry> manifest,
         ValidatedTempOwnership? publishedTempOwnership,
+        LibraryDirectoryOwnership? targetDirectoryOwnership,
         FileSystemPathSemantics sourceSemantics,
         FileSystemPathSemantics targetSemantics,
         CancellationToken cancellationToken)
@@ -73,7 +74,8 @@ internal sealed partial class AudiobookContentMoveService
             targetSemantics,
             publishedTempOwnership,
             ownership,
-            allowPartialFiles: false);
+            allowPartialFiles: false,
+            targetDirectoryOwnership: targetDirectoryOwnership);
         ValidateQuarantineMutationPath(ownership, quarantineFile);
         if (File.Exists(quarantineFile) || Directory.Exists(quarantineFile))
         {
@@ -95,6 +97,7 @@ internal sealed partial class AudiobookContentMoveService
         MoveJobEntry manifestEntry,
         IReadOnlyCollection<MoveJobEntry> manifest,
         ValidatedTempOwnership? publishedTempOwnership,
+        LibraryDirectoryOwnership? targetDirectoryOwnership,
         FileSystemPathSemantics sourceSemantics,
         FileSystemPathSemantics targetSemantics,
         CancellationToken cancellationToken)
@@ -126,7 +129,8 @@ internal sealed partial class AudiobookContentMoveService
             targetSemantics,
             publishedTempOwnership,
             ownership,
-            allowPartialFiles: false);
+            allowPartialFiles: false,
+            targetDirectoryOwnership: targetDirectoryOwnership);
         ValidateQuarantineMutationPath(ownership, quarantineFile);
         if (!File.Exists(quarantineFile)
             || (File.GetAttributes(quarantineFile) & FileAttributes.ReparsePoint) != 0

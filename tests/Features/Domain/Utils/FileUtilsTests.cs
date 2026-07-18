@@ -303,6 +303,8 @@ namespace Listenarr.Tests.Features.Domain.Utils
         [InlineData(@"C:\Books\COM1.txt", true)]
         [InlineData(@"C:\Books\Bad|Name", true)]
         [InlineData(@"C:\Books\..\Other", false)]
+        [InlineData(@"C:\Books\\Author", false)]
+        [InlineData(@"\\server\\share\Books", false)]
         public void IsPathInvalidForOs_UsesSharedWindowsSegmentRules(string path, bool expected)
         {
             Assert.Equal(expected, FileUtils.IsPathInvalidForOs(path, isWindows: true));
@@ -590,6 +592,8 @@ namespace Listenarr.Tests.Features.Domain.Utils
         [InlineData(@"C:\Books\Author", true)]
         [InlineData(@"C:\Books\.\Author", false)]
         [InlineData(@"C:\", false)]
+        [InlineData(@"\Books\Author", false)]
+        [InlineData("/Books/Author", false)]
         [InlineData(@"Books\Author", false)]
         [InlineData(@"C:\Books\Author ", false)]
         [InlineData(@"C:\Books\Author.", false)]
@@ -614,6 +618,114 @@ namespace Listenarr.Tests.Features.Domain.Utils
             {
                 Assert.False(string.IsNullOrWhiteSpace(reason));
             }
+        }
+
+        [Theory]
+        [InlineData(@"\\server\..\Books", "parent")]
+        [InlineData(@"\\.\share\Books", "current")]
+        [InlineData(@"\\server\NUL\Books", "reserved")]
+        [InlineData(@"\\NUL\share\Books", "reserved")]
+        [InlineData(@"\\server\share.\Books", "space or period")]
+        [InlineData(@"\\server.\share\Books", "space or period")]
+        [InlineData(@"\\server|name\share\Books", "invalid")]
+        [InlineData(@"\\server\\share\Books", "empty")]
+        [InlineData(@"\\server\share\\Books", "empty")]
+        [InlineData(@"\\\server\share\Books", "empty")]
+        [InlineData("//server//share/Books", "empty")]
+        public void TryNormalizeUserProvidedDirectoryPathForOs_RejectsInvalidUncAuthorityOrStructure(
+            string path,
+            string expectedReason)
+        {
+            var valid = FileUtils.TryNormalizeUserProvidedDirectoryPathForOs(
+                path,
+                isWindows: true,
+                out var normalizedPath,
+                out var reason,
+                allowFileSystemRoot: true);
+
+            Assert.False(valid);
+            Assert.Empty(normalizedPath);
+            Assert.Contains(expectedReason, reason, StringComparison.OrdinalIgnoreCase);
+        }
+
+        [Theory]
+        [InlineData(@"\\server\share", @"\\server\share")]
+        [InlineData(@"\\server\share\", @"\\server\share")]
+        [InlineData("//server/share", @"\\server\share")]
+        [InlineData(@"\\server\share\Books", @"\\server\share\Books")]
+        [InlineData("//server/share/Books", @"\\server\share\Books")]
+        [InlineData(@"\\server/share\Books", @"\\server\share\Books")]
+        [InlineData("//server\\share/Books", @"\\server\share\Books")]
+        public void TryNormalizeUserProvidedDirectoryPathForOs_CanonicalizesValidUncPaths(
+            string path,
+            string expected)
+        {
+            Assert.True(FileUtils.TryNormalizeUserProvidedDirectoryPathForOs(
+                path,
+                isWindows: true,
+                out var normalizedPath,
+                out var reason,
+                allowFileSystemRoot: true,
+                rejectParentTraversal: true));
+
+            Assert.Equal(string.Empty, reason);
+            Assert.Equal(expected, normalizedPath);
+
+            Assert.True(FileUtils.TryNormalizeUserProvidedDirectoryPathForOs(
+                normalizedPath,
+                isWindows: true,
+                out var normalizedAgain,
+                out var secondReason,
+                allowFileSystemRoot: true,
+                rejectParentTraversal: true));
+            Assert.Equal(string.Empty, secondReason);
+            Assert.Equal(normalizedPath, normalizedAgain);
+        }
+
+        [Theory]
+        [InlineData(@"\\")]
+        [InlineData(@"\\server")]
+        [InlineData(@"\\server\")]
+        [InlineData(@"\\\share")]
+        public void TryNormalizeUserProvidedDirectoryPathForOs_RejectsIncompleteUncPaths(string path)
+        {
+            Assert.False(FileUtils.TryNormalizeUserProvidedDirectoryPathForOs(
+                path,
+                isWindows: true,
+                out var normalizedPath,
+                out var reason,
+                allowFileSystemRoot: true));
+
+            Assert.Empty(normalizedPath);
+            Assert.False(string.IsNullOrWhiteSpace(reason));
+        }
+
+        [Fact]
+        public void TryNormalizeUserProvidedDirectoryPathForOs_RejectsWindowsDriveRelativePathEvenWhenRootsAreAllowed()
+        {
+            Assert.False(FileUtils.TryNormalizeUserProvidedDirectoryPathForOs(
+                "C:",
+                isWindows: true,
+                out var normalizedPath,
+                out var reason,
+                allowFileSystemRoot: true));
+
+            Assert.Empty(normalizedPath);
+            Assert.Contains("absolute", reason, StringComparison.OrdinalIgnoreCase);
+        }
+
+        [Fact]
+        public void TryNormalizeUserProvidedDirectoryPathForOs_CanonicalizesRepeatedDriveRootSeparators()
+        {
+            Assert.True(FileUtils.TryNormalizeUserProvidedDirectoryPathForOs(
+                @"C:\\",
+                isWindows: true,
+                out var normalizedPath,
+                out var reason,
+                allowFileSystemRoot: true));
+
+            Assert.Equal(string.Empty, reason);
+            Assert.Equal(@"C:\", normalizedPath);
         }
 
         [Fact]
@@ -801,6 +913,8 @@ namespace Listenarr.Tests.Features.Domain.Utils
         [InlineData("   /media/Author", true)]
         [InlineData(@" C:\Books\Author", true)]
         [InlineData(@" \\server\share\Books", true)]
+        [InlineData(@" \\server", true)]
+        [InlineData(@" \\\server\share", true)]
         [InlineData("  Relative Folder", false)]
         [InlineData("/media/Author ", false)]
         [InlineData("/media/ Author", false)]
@@ -897,6 +1011,7 @@ namespace Listenarr.Tests.Features.Domain.Utils
         [Theory]
         [InlineData(@"C:\Books", @"c:\books\", true, true)]
         [InlineData(@"\\server\share\Books", @"\\SERVER\SHARE\books\", true, true)]
+        [InlineData(@"\\server\\share\Books", @"\\server\share\Books", true, true)]
         [InlineData("/media/Books", "/media/books", false, false)]
         [InlineData("/media/Books", "/media/Books/", false, true)]
         public void AreFilesystemPathsEquivalentForOs_UsesHostStyleCaseRules(

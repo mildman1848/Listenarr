@@ -58,9 +58,14 @@ internal static class AudiobookPathReferenceRewriter
                         "A tracked audiobook file path is missing and cannot be rewritten.");
                 }
 
+                var storedFilePath = file.Path ?? string.Empty;
                 var isRelative = !FileSystemPathIdentity.TryDetectAbsoluteSyntax(
-                    file.Path ?? string.Empty,
-                    out _);
+                        storedFilePath,
+                        sourceSemantics.Syntax,
+                        out _)
+                    && !FileSystemPathIdentity.TryDetectAbsoluteSyntax(
+                        storedFilePath,
+                        out _);
                 var isAlreadyUnderTarget = IsSameOrInside(
                     rewrittenPath,
                     targetBasePath,
@@ -233,17 +238,19 @@ internal static class AudiobookPathReferenceRewriter
         FileSystemCaseSensitivityMode targetCaseSensitivityMode)
     {
         string absolutePath;
-        if (FileSystemPathIdentity.TryDetectAbsoluteSyntax(storedPath, out var syntax))
+        if (FileSystemPathIdentity.TryDetectAbsoluteSyntax(
+                storedPath,
+                targetSemantics.Syntax,
+                out _))
         {
-            if (syntax != targetSemantics.Syntax)
-            {
-                throw new AudiobookPathRewriteException(
-                    "A rewritten audiobook file path uses a different filesystem syntax than the target root.");
-            }
-
             absolutePath = FileSystemPathIdentity.Canonicalize(
                 storedPath,
                 targetSemantics.Syntax);
+        }
+        else if (FileSystemPathIdentity.TryDetectAbsoluteSyntax(storedPath, out _))
+        {
+            throw new AudiobookPathRewriteException(
+                "A rewritten audiobook file path uses a different filesystem syntax than the target root.");
         }
         else if (!FileSystemPathIdentity.TryResolveRelativePathWithinBase(
                      targetBasePath,

@@ -28,6 +28,7 @@ namespace Listenarr.Infrastructure.Library.Moving
         private readonly IRootFolderService _rootFolderService;
         private readonly IConfigurationService _configurationService;
         private readonly IFileSystemSemanticsResolver _semanticsResolver;
+        private readonly ILibraryDirectoryOwnershipStore _directoryOwnershipStore;
         private readonly ILogger<AudiobookFilesystemDeleteService> _logger;
 
         public AudiobookFilesystemDeleteService(
@@ -36,6 +37,7 @@ namespace Listenarr.Infrastructure.Library.Moving
             IRootFolderService rootFolderService,
             IConfigurationService configurationService,
             IFileSystemSemanticsResolver semanticsResolver,
+            ILibraryDirectoryOwnershipStore directoryOwnershipStore,
             ILogger<AudiobookFilesystemDeleteService> logger)
         {
             _audiobookRepository = audiobookRepository;
@@ -43,11 +45,16 @@ namespace Listenarr.Infrastructure.Library.Moving
             _rootFolderService = rootFolderService;
             _configurationService = configurationService;
             _semanticsResolver = semanticsResolver;
+            _directoryOwnershipStore = directoryOwnershipStore;
             _logger = logger;
         }
 
-        public async Task<AudiobookFilesystemDeleteResult> DeleteAsync(Audiobook audiobook, bool deleteFolder)
+        public async Task<AudiobookFilesystemDeleteResult> DeleteAsync(
+            Audiobook audiobook,
+            bool deleteFolder,
+            CancellationToken cancellationToken = default)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             var result = new AudiobookFilesystemDeleteResult();
             var trackedFilePaths = CollectTrackedFilePaths(audiobook);
             var boundaryPath = !string.IsNullOrWhiteSpace(audiobook.BasePath)
@@ -55,34 +62,67 @@ namespace Listenarr.Infrastructure.Library.Moving
                 : !string.IsNullOrWhiteSpace(audiobook.FilePath)
                     ? audiobook.FilePath
                     : trackedFilePaths.FirstOrDefault();
-            var semantics = await ResolveDeleteSemanticsAsync(boundaryPath, result);
+            var semantics = await ResolveDeleteSemanticsAsync(
+                boundaryPath,
+                result,
+                cancellationToken);
             if (semantics == null)
             {
                 return result;
             }
 
             var deleteSemantics = semantics.Value;
-            var deleteTarget = await ResolveDeleteFolderTargetAsync(audiobook, trackedFilePaths, deleteSemantics, result);
+            var deleteTarget = await ResolveDeleteFolderTargetAsync(
+                audiobook,
+                trackedFilePaths,
+                deleteSemantics,
+                result,
+                cancellationToken);
 
             if (deleteTarget != null)
             {
-                var contentsDeleted = TryDeleteFolderContents(deleteTarget, result);
+                cancellationToken.ThrowIfCancellationRequested();
+                var mutationToken = CancellationToken.None;
+                var contentsDeleted = TryDeleteFolderContents(
+                    deleteTarget,
+                    result);
 
                 if (deleteFolder && contentsDeleted)
                 {
-                    await TryDeleteAudiobookFolderAsync(audiobook, deleteTarget, result);
+                    await TryDeleteAudiobookFolderAsync(
+                        audiobook,
+                        deleteTarget,
+                        result,
+                        mutationToken);
                 }
             }
             else
             {
-                var protectedRoots = await GetProtectedRootPathsAsync();
+                var protectedRoots = await GetProtectedRootPathsAsync(
+                    cancellationToken);
                 var fallbackFolderRoot = ResolveAudiobookFolderPath(audiobook, trackedFilePaths, deleteSemantics);
                 var allowedRoots = protectedRoots
                     .Concat(string.IsNullOrWhiteSpace(fallbackFolderRoot) ? [] : [fallbackFolderRoot])
                     .ToList();
+                cancellationToken.ThrowIfCancellationRequested();
+                var mutationToken = CancellationToken.None;
                 foreach (var trackedFilePath in trackedFilePaths)
                 {
                     TryDeleteFile(trackedFilePath, result, allowedRoots);
+                }
+
+                if (deleteFolder)
+                {
+                    await RecoverMissingOwnedDirectoryAsync(
+                        fallbackFolderRoot,
+                        deleteSemantics,
+                        "audiobook",
+                        mutationToken);
+                    await RecoverMissingOwnedAuthorParentAsync(
+                        audiobook,
+                        fallbackFolderRoot,
+                        deleteSemantics,
+                        mutationToken);
                 }
             }
 
@@ -95,11 +135,13 @@ namespace Listenarr.Infrastructure.Library.Moving
             public required IReadOnlyCollection<string> ProtectedRoots { get; init; }
             public required IReadOnlyCollection<string> AllowedMutationRoots { get; init; }
             public required FileSystemPathSemantics Semantics { get; init; }
+            public required IReadOnlyList<LibraryDirectoryOwnership> OwnedDirectories { get; init; }
         }
 
         private async Task<FileSystemPathSemantics?> ResolveDeleteSemanticsAsync(
             string? boundaryPath,
-            AudiobookFilesystemDeleteResult result)
+            AudiobookFilesystemDeleteResult result,
+            CancellationToken cancellationToken)
         {
             if (string.IsNullOrWhiteSpace(boundaryPath))
             {
@@ -108,6 +150,7 @@ namespace Listenarr.Infrastructure.Library.Moving
 
             try
             {
+                cancellationToken.ThrowIfCancellationRequested();
                 FileSystemPathSemantics? bestSemantics = null;
                 var bestRootLength = -1;
                 foreach (var root in await _rootFolderService.GetAllAsync())
@@ -119,7 +162,8 @@ namespace Listenarr.Infrastructure.Library.Moving
 
                     var rootResolution = await _semanticsResolver.ResolveAsync(
                         root.Path,
-                        root.CaseSensitivityMode);
+                        root.CaseSensitivityMode,
+                        cancellationToken);
                     if (rootResolution.State != PathIdentityState.Valid
                         || !FileSystemPathIdentity.IsSameOrInside(
                             boundaryPath,
@@ -149,7 +193,9 @@ namespace Listenarr.Infrastructure.Library.Moving
                 _logger.LogWarning(exception, "Failed to resolve root folder semantics while deleting audiobook files");
             }
 
-            var resolution = await _semanticsResolver.ResolveAsync(boundaryPath);
+            var resolution = await _semanticsResolver.ResolveAsync(
+                boundaryPath,
+                cancellationToken: cancellationToken);
             if (resolution.State == PathIdentityState.Valid)
             {
                 return resolution.Semantics;
@@ -244,12 +290,24 @@ namespace Listenarr.Infrastructure.Library.Moving
                 return false;
             }
 
+            var ownershipMarkerPaths = deleteTarget.OwnedDirectories
+                .SelectMany(LibraryDirectoryOwnershipMarker.GetMarkerPaths)
+                .ToHashSet(deleteTarget.Semantics.Comparer);
             foreach (var filePath in files)
             {
-                TryDeleteFile(filePath, result, deleteTarget.AllowedMutationRoots);
+                if (!ownershipMarkerPaths.Contains(filePath))
+                {
+                    TryDeleteFile(filePath, result, deleteTarget.AllowedMutationRoots);
+                }
             }
 
-            foreach (var directoryPath in directories.OrderByDescending(path => path.Length))
+            foreach (var directoryPath in directories
+                .Where(path => !deleteTarget.OwnedDirectories.Any(ownership =>
+                    FileSystemPathIdentity.AreEquivalent(
+                        ownership.CanonicalPath,
+                        path,
+                        deleteTarget.Semantics)))
+                .OrderByDescending(path => path.Length))
             {
                 if (!FileSystemSafety.TryDeleteEmptyDirectory(
                         directoryPath,

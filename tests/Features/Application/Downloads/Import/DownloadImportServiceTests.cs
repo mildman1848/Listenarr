@@ -205,6 +205,56 @@ namespace Listenarr.Tests.Features.Application.Downloads.Import
         }
 
         [Fact]
+        public async Task Import_CanceledAfterOwnershipPreparation_DoesNotMutateFile()
+        {
+            await _applicationSettingsRepository.SaveAsync(new ApplicationSettingsBuilder()
+                .WithMoveFileOnCompleted()
+                .WithoutMetadataProcessing()
+                .Build());
+
+            var basePath = FileService.GetTempDirectory("canceled-import-library");
+            var sourcePath = FileService.GetTempDirectory("canceled-import-downloads");
+            var filePath = await FileService.GetFileAsync(sourcePath, "audio.mp3");
+            var audiobook = await _audiobookRepository.AddAsync(new AudiobookBuilder()
+                .WithBasePath(basePath)
+                .Build());
+            using var cancellation = new CancellationTokenSource();
+            var mover = new Mock<IFileMover>(MockBehavior.Strict);
+            var ownershipStore = new Mock<ILibraryDirectoryOwnershipStore>(MockBehavior.Strict);
+            ownershipStore
+                .Setup(store => store.EnsureCreatedHierarchyAsync(
+                    It.IsAny<string>(),
+                    It.IsAny<string>(),
+                    It.IsAny<FileSystemPathSemantics>(),
+                    It.IsAny<string>(),
+                    It.IsAny<Guid?>(),
+                    It.IsAny<int?>(),
+                    It.IsAny<CancellationToken>()))
+                .Callback(() => cancellation.Cancel())
+                .ReturnsAsync([]);
+            var service = ActivatorUtilities.CreateInstance<DownloadImportService>(
+                _provider,
+                mover.Object,
+                ownershipStore.Object);
+
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+                service.ImportDownloadFilesAsync(
+                    audiobook,
+                    [filePath],
+                    cancellation.Token));
+
+            Assert.True(File.Exists(filePath));
+            Assert.Empty(Directory.GetFiles(basePath, "*", SearchOption.AllDirectories));
+            mover.Verify(
+                service => service.PerformActionOn(
+                    It.IsAny<FileAction>(),
+                    It.IsAny<string>(),
+                    It.IsAny<string>()),
+                Times.Never);
+            ownershipStore.VerifyAll();
+        }
+
+        [Fact]
         public async Task Import_WithMove()
         {
             await _applicationSettingsRepository.SaveAsync(new ApplicationSettingsBuilder()

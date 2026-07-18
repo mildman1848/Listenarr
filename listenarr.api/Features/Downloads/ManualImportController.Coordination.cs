@@ -7,21 +7,26 @@ public partial class ManualImportController
 {
     private Task ExecuteWithAudiobookLocksAsync(
         IEnumerable<int> audiobookIds,
-        Func<Task> operation)
+        Func<CancellationToken, Task> operation,
+        CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(operation);
         return _filesystemMutationCoordinator.ExecuteExclusiveAsync(
             globalToken => _audiobookOperationCoordinator.ExecuteExclusiveAsync(
                 audiobookIds,
-                _ => operation(),
-                globalToken));
+                operation,
+                globalToken),
+            cancellationToken);
     }
 
     /// <summary>
     /// Order a scan for each audiobook impacted by the importation and update audiobook base path.
     /// </summary>
     /// <param name="results">List of imported files.</param>
-    private async Task EnqueueFocusedScansAsync(IEnumerable<ManualImportResultDto> results)
+    /// <param name="cancellationToken">Request cancellation token.</param>
+    private async Task EnqueueFocusedScansAsync(
+        IEnumerable<ManualImportResultDto> results,
+        CancellationToken cancellationToken)
     {
         var groupedResults = results
             .Where(result => result.Success
@@ -31,6 +36,7 @@ public partial class ManualImportController
 
         foreach (var group in groupedResults)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             var scanPath = ManualImportPathPlanner.DetermineScanPath(group
                 .Select(result => result.DestinationPath!)
                 .Where(path => !string.IsNullOrWhiteSpace(path))
@@ -46,8 +52,9 @@ public partial class ManualImportController
 
             await _audiobookOperationCoordinator.ExecuteExclusiveAsync(
                 group.Key,
-                async _ =>
+                async operationToken =>
                 {
+                    operationToken.ThrowIfCancellationRequested();
                     var audiobook = await _audiobookRepository.GetByIdAsync(group.Key);
                     if (audiobook == null)
                     {
@@ -77,11 +84,12 @@ public partial class ManualImportController
                     {
                         _logger.LogWarning(ex, "Failed to enqueue scan for audiobook {AudiobookId} after manual import", group.Key);
                     }
-                    catch (OperationCanceledException ex)
+                    catch (OperationCanceledException ex) when (!operationToken.IsCancellationRequested)
                     {
                         _logger.LogWarning(ex, "Failed to enqueue scan for audiobook {AudiobookId} after manual import", group.Key);
                     }
-                });
+                },
+                cancellationToken);
         }
     }
 

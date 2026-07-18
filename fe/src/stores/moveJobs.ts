@@ -20,6 +20,7 @@ import { defineStore } from 'pinia'
 import { apiService } from '@/services/api'
 import { signalRService } from '@/services/signalr'
 import { useToast } from '@/services/toastService'
+import { logger } from '@/utils/logger'
 
 export type MoveJobStatus =
   | 'Queued'
@@ -96,7 +97,9 @@ export const useMoveJobsStore = defineStore('moveJobs', () => {
     if (unsubscribe) {
       try {
         unsubscribe()
-      } catch {}
+      } catch (error) {
+        logger.debug('Failed to unsubscribe from move job updates', error)
+      }
     }
 
     unsubscribe = null

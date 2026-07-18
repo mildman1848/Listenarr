@@ -34,6 +34,7 @@ namespace Listenarr.Application.Downloads.Import
         IAudiobookRepository audiobookRepository,
         IFilesystemMutationCoordinator filesystemMutationCoordinator,
         IAudiobookOperationCoordinator audiobookOperationCoordinator,
+        ILibraryDirectoryOwnershipStore directoryOwnershipStore,
         ILogger<DownloadImportService> logger) : IDownloadImportService
     {
         private async Task<List<ImportResult>> ImportDownloadFilesCoreAsync(
@@ -48,6 +49,7 @@ namespace Listenarr.Application.Downloads.Import
             }
 
             var settings = await configurationService.GetApplicationSettingsAsync();
+            var importOperationId = Guid.NewGuid();
             var expectedBasePath = audiobook.BasePath;
             var destinationResolution = await ResolveDestinationResolutionAsync(
                 expectedBasePath,
@@ -56,6 +58,10 @@ namespace Listenarr.Application.Downloads.Import
             var normalizedBasePath = NormalizeAuthoritativeBasePath(
                 expectedBasePath,
                 destinationResolution);
+            var destinationOwnershipBoundary = await ResolveDestinationOwnershipBoundaryAsync(
+                normalizedBasePath,
+                destinationResolution,
+                ct);
             if (!string.Equals(expectedBasePath, normalizedBasePath, StringComparison.Ordinal))
             {
                 var updated = await audiobookRepository.TryUpdateBasePathAsync(
@@ -160,7 +166,15 @@ namespace Listenarr.Application.Downloads.Import
 
                                 var destinationReservation = await destinationPlanner.PlanIdempotentOrUniqueAsync(file, destination, usedDestinations, destinationSemantics, ct);
                                 destination = destinationReservation.Path;
-                                if (!await fileMover.PerformActionOn(completedFileAction, file, destination))
+                                if (!await PerformOwnedFileActionAsync(
+                                        completedFileAction,
+                                        file,
+                                        destination,
+                                        destinationOwnershipBoundary,
+                                        destinationSemantics,
+                                        importOperationId,
+                                        audiobook.Id,
+                                        ct))
                                 {
                                     results.Add(ImportResult.ImportFailure(completedFileAction, file, destination));
                                     continue;
@@ -289,7 +303,16 @@ namespace Listenarr.Application.Downloads.Import
                             var destinationAlreadyOwned = ownership.Outcome
                                 == AudiobookFileOwnershipCheckOutcome.AlreadyOwnedByAudiobook;
                             var destinationAlreadyMatchedSource = await destinationPlanner.IsExistingEquivalentAsync(file, destination, ct);
-                            if (!(destinationAlreadyMatchedSource && completedFileAction != FileAction.Move) && !await fileMover.PerformActionOn(completedFileAction, file, destination))
+                            if (!(destinationAlreadyMatchedSource && completedFileAction != FileAction.Move)
+                                && !await PerformOwnedFileActionAsync(
+                                    completedFileAction,
+                                    file,
+                                    destination,
+                                    destinationOwnershipBoundary,
+                                    destinationSemantics,
+                                    importOperationId,
+                                    audiobook.Id,
+                                    ct))
                             {
                                 results.Add(ImportResult.ImportFailure(completedFileAction, file, destination));
                                 continue;

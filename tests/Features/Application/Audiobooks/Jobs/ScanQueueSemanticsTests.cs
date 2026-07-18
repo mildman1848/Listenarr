@@ -35,6 +35,78 @@ namespace Listenarr.Tests.Features.Application.Audiobooks.Jobs
             Assert.Equal(shouldDedupe, firstJob == secondJob);
         }
 
+        [Theory]
+        [InlineData(
+            FileSystemCaseSensitivity.Insensitive,
+            FileSystemCaseSensitivity.Sensitive,
+            true)]
+        [InlineData(
+            FileSystemCaseSensitivity.Sensitive,
+            FileSystemCaseSensitivity.Insensitive,
+            true)]
+        [InlineData(
+            FileSystemCaseSensitivity.Sensitive,
+            FileSystemCaseSensitivity.Sensitive,
+            false)]
+        public async Task ScanQueue_DedupeUsesBothPersistedEndpointIdentities(
+            FileSystemCaseSensitivity firstSensitivity,
+            FileSystemCaseSensitivity secondSensitivity,
+            bool shouldDedupe)
+        {
+            var queue = new ScanQueueService(
+                NullLogger<ScanQueueService>.Instance,
+                BuildResolver(FileSystemCaseSensitivity.Sensitive));
+            var audiobook = new AudiobookBuilder()
+                .WithId(1010)
+                .WithTitle("Persisted Identity Scan")
+                .Build();
+            const string firstPath = "/library/CaseBook";
+            const string secondPath = "/library/casebook";
+
+            var firstJob = await queue.EnqueueScanAsync(new ScanEnqueueCommand(
+                audiobook,
+                firstPath,
+                CreateUnixIdentity(firstPath, firstSensitivity)));
+            var secondJob = await queue.EnqueueScanAsync(new ScanEnqueueCommand(
+                audiobook,
+                secondPath,
+                CreateUnixIdentity(secondPath, secondSensitivity)));
+
+            Assert.Equal(shouldDedupe, firstJob == secondJob);
+        }
+
+        [Fact]
+        public async Task ScanQueue_DifferentPersistedSyntaxesNeverDedupe()
+        {
+            var queue = new ScanQueueService(
+                NullLogger<ScanQueueService>.Instance,
+                BuildResolver(FileSystemCaseSensitivity.Insensitive));
+            var audiobook = new AudiobookBuilder()
+                .WithId(1011)
+                .WithTitle("Cross Syntax Scan")
+                .Build();
+            const string windowsPath = @"C:\Library\Book";
+            const string unixPath = "/Library/Book";
+            var windowsIdentity = PathIdentitySnapshot.FromResolution(
+                new FileSystemPathSemantics(
+                    FileSystemPathSyntax.Windows,
+                    FileSystemCaseSensitivity.Insensitive),
+                FileSystemCaseSensitivityMode.Insensitive,
+                @"C:\Library",
+                windowsPath);
+
+            var firstJob = await queue.EnqueueScanAsync(new ScanEnqueueCommand(
+                audiobook,
+                windowsPath,
+                windowsIdentity));
+            var secondJob = await queue.EnqueueScanAsync(new ScanEnqueueCommand(
+                audiobook,
+                unixPath,
+                CreateUnixIdentity(unixPath, FileSystemCaseSensitivity.Insensitive)));
+
+            Assert.NotEqual(firstJob, secondJob);
+        }
+
         [Fact]
         public async Task ScanQueue_CompletedCorrelationCreatesReplacementHandoff()
         {
@@ -183,6 +255,62 @@ namespace Listenarr.Tests.Features.Application.Audiobooks.Jobs
         }
 
         [Fact]
+        public async Task ScanQueue_CorrelatedMoveHandoffDoesNotReuseDifferentTargetIdentity()
+        {
+            var handoffId = Guid.NewGuid();
+            var moveJobId = Guid.NewGuid();
+            var store = new Mock<IMoveScanHandoffStore>();
+            store.Setup(candidate => candidate.MarkDispatchedAsync(
+                    handoffId,
+                    It.IsAny<string>(),
+                    It.IsAny<int>(),
+                    It.IsAny<Guid>(),
+                    It.IsAny<DateTimeOffset>(),
+                    It.IsAny<CancellationToken>()))
+                .ReturnsAsync(true);
+            var queue = new ScanQueueService(
+                NullLogger<ScanQueueService>.Instance,
+                BuildResolver(FileSystemCaseSensitivity.Sensitive),
+                store.Object,
+                TimeProvider.System);
+            var audiobook = new AudiobookBuilder()
+                .WithId(1012)
+                .WithTitle("Identity-Bound Handoff")
+                .Build();
+            var firstClaim = new MoveScanHandoffClaim(
+                handoffId,
+                moveJobId,
+                audiobook.Id,
+                "/library/book",
+                CreateUnixIdentity(),
+                1,
+                "worker-a",
+                1);
+            var conflictingClaim = firstClaim with
+            {
+                TargetPath = "/library/other",
+                TargetIdentity = CreateUnixIdentity(
+                    "/library/other",
+                    FileSystemCaseSensitivity.Sensitive)
+            };
+
+            var firstJob = await queue.EnqueueMoveHandoffScanAsync(audiobook, firstClaim);
+            var conflictingJob = await queue.EnqueueMoveHandoffScanAsync(
+                audiobook,
+                conflictingClaim);
+
+            Assert.NotNull(firstJob);
+            Assert.Null(conflictingJob);
+            store.Verify(candidate => candidate.MarkDispatchedAsync(
+                handoffId,
+                It.IsAny<string>(),
+                1,
+                firstJob!.Value,
+                It.IsAny<DateTimeOffset>(),
+                It.IsAny<CancellationToken>()), Times.Once);
+        }
+
+        [Fact]
         public async Task ScanQueue_TerminalPersistenceDoesNotHoldQueueGate()
         {
             var queue = new ScanQueueService(
@@ -220,6 +348,35 @@ namespace Listenarr.Tests.Features.Application.Audiobooks.Jobs
             releasePersistence.TrySetResult();
             await completion;
             Assert.True(queue.TryGetJob(original, out var completed));
+            Assert.Equal("Completed", completed!.Status);
+        }
+
+        [Fact]
+        public async Task ScanQueue_RequestCancelledAfterTerminalPersistenceStillUpdatesQueue()
+        {
+            var queue = new ScanQueueService(
+                NullLogger<ScanQueueService>.Instance,
+                BuildResolver(FileSystemCaseSensitivity.Sensitive));
+            var audiobook = new AudiobookBuilder()
+                .WithId(1008)
+                .WithTitle("Post Commit Cancellation")
+                .Build();
+            var jobId = await queue.EnqueueScanAsync(audiobook);
+            Assert.True(queue.Reader.TryRead(out _));
+            queue.UpdateJobStatus(jobId, "Processing");
+            using var cancellation = new CancellationTokenSource();
+
+            await queue.CommitTerminalJobStatusAsync(
+                jobId,
+                () =>
+                {
+                    cancellation.Cancel();
+                    return Task.FromResult(("Completed", (string?)null));
+                },
+                cancellation.Token);
+
+            Assert.True(cancellation.IsCancellationRequested);
+            Assert.True(queue.TryGetJob(jobId, out var completed));
             Assert.Equal("Completed", completed!.Status);
         }
 
@@ -289,14 +446,18 @@ namespace Listenarr.Tests.Features.Application.Audiobooks.Jobs
             Assert.Equal(shouldDedupe, firstJob == secondJob);
         }
 
-        private static PathIdentitySnapshot CreateUnixIdentity() =>
+        private static PathIdentitySnapshot CreateUnixIdentity(
+            string path = "/library/book",
+            FileSystemCaseSensitivity sensitivity = FileSystemCaseSensitivity.Sensitive) =>
             PathIdentitySnapshot.FromResolution(
                 new FileSystemPathSemantics(
                     FileSystemPathSyntax.Unix,
-                    FileSystemCaseSensitivity.Sensitive),
-                FileSystemCaseSensitivityMode.Sensitive,
+                    sensitivity),
+                sensitivity == FileSystemCaseSensitivity.Insensitive
+                    ? FileSystemCaseSensitivityMode.Insensitive
+                    : FileSystemCaseSensitivityMode.Sensitive,
                 "/library",
-                "/library/book");
+                path);
 
         private static IFileSystemSemanticsResolver BuildResolver(FileSystemCaseSensitivity caseSensitivity)
         {

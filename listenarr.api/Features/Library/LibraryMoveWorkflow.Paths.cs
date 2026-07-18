@@ -33,14 +33,18 @@ public sealed partial class LibraryMoveWorkflow
     private async Task AddAllowedMoveRootAsync(
         List<MoveRootBoundary> allowedRoots,
         string? normalizedRoot,
-        FileSystemCaseSensitivityMode caseSensitivityMode)
+        FileSystemCaseSensitivityMode caseSensitivityMode,
+        CancellationToken cancellationToken)
     {
         if (string.IsNullOrEmpty(normalizedRoot))
         {
             return;
         }
 
-        var resolution = await _semanticsResolver.ResolveAsync(normalizedRoot, caseSensitivityMode);
+        var resolution = await _semanticsResolver.ResolveAsync(
+            normalizedRoot,
+            caseSensitivityMode,
+            cancellationToken);
         if (resolution.State != PathIdentityState.Valid)
         {
             _logger.LogWarning(

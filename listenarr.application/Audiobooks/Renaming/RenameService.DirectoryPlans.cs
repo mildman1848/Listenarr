@@ -110,10 +110,12 @@ public partial class RenameService
     {
         rewrittenStoredPath = storedPath;
         physicalTargetPath = string.Empty;
-        if (FileSystemPathIdentity.TryDetectAbsoluteSyntax(storedPath, out var storedSyntax))
+        if (FileSystemPathIdentity.TryDetectAbsoluteSyntax(
+                storedPath,
+                sourceSemantics.Syntax,
+                out _))
         {
-            if (storedSyntax != sourceSemantics.Syntax
-                || !FileSystemPathIdentity.TryGetRelativePathWithinBase(
+            if (!FileSystemPathIdentity.TryGetRelativePathWithinBase(
                     sourceBasePath,
                     storedPath,
                     sourceSemantics,
@@ -137,6 +139,11 @@ public partial class RenameService
 
             rewrittenStoredPath = physicalTargetPath;
             return true;
+        }
+
+        if (FileSystemPathIdentity.TryDetectAbsoluteSyntax(storedPath, out _))
+        {
+            return false;
         }
 
         var relativeStoredPath = FileSystemPathIdentity.ConvertRelativePathSyntax(

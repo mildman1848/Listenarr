@@ -21,6 +21,59 @@ public partial class DownloadImportService
                 resolution.Reason ?? "Destination filesystem identity is unavailable.");
     }
 
+    private async Task<string> ResolveDestinationOwnershipBoundaryAsync(
+        string basePath,
+        FileSystemSemanticsResolution destinationResolution,
+        CancellationToken cancellationToken)
+    {
+        string? bestBoundary = null;
+        var bestLength = -1;
+        foreach (var root in await rootFolderService.GetAllAsync())
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (string.IsNullOrWhiteSpace(root.Path))
+            {
+                continue;
+            }
+
+            var rootResolution = await semanticsResolver.ResolveAsync(
+                root.Path,
+                root.CaseSensitivityMode,
+                cancellationToken);
+            if (rootResolution.State != PathIdentityState.Valid
+                || rootResolution.Semantics != destinationResolution.Semantics
+                || !FileSystemPathIdentity.IsSameOrInside(
+                    basePath,
+                    root.Path,
+                    rootResolution.Semantics))
+            {
+                continue;
+            }
+
+            var canonicalRoot = FileSystemPathIdentity.Canonicalize(
+                string.IsNullOrWhiteSpace(rootResolution.CanonicalPath)
+                    ? root.Path
+                    : rootResolution.CanonicalPath,
+                rootResolution.Semantics.Syntax);
+            if (canonicalRoot.Length > bestLength)
+            {
+                bestBoundary = canonicalRoot;
+                bestLength = canonicalRoot.Length;
+            }
+        }
+
+        var boundary = bestBoundary ?? destinationResolution.BoundaryPath;
+        if (string.IsNullOrWhiteSpace(boundary))
+        {
+            throw new InvalidOperationException(
+                "The destination ownership boundary is unavailable.");
+        }
+
+        return FileSystemPathIdentity.Canonicalize(
+            boundary,
+            destinationResolution.Semantics.Syntax);
+    }
+
     private async Task<FileSystemCaseSensitivityMode> ResolveDestinationCaseSensitivityModeAsync(
         string basePath,
         CancellationToken cancellationToken)

@@ -97,7 +97,8 @@ public sealed partial class RootFolderRelocationService
         }
 
         await db.SaveChangesAsync(cancellationToken);
-        await transaction.CommitAsync(cancellationToken);
+        cancellationToken.ThrowIfCancellationRequested();
+        await transaction.CommitAsync(CancellationToken.None);
         return Map(relocation, root?.Path ?? ResolveCurrentPathFallback(relocation));
     }
 
@@ -209,7 +210,8 @@ public sealed partial class RootFolderRelocationService
             }
 
             await db.SaveChangesAsync(cancellationToken);
-            await transaction.CommitAsync(cancellationToken);
+            cancellationToken.ThrowIfCancellationRequested();
+            await transaction.CommitAsync(CancellationToken.None);
             Volatile.Write(ref _rootIdentitiesReconciled, true);
         }
         finally

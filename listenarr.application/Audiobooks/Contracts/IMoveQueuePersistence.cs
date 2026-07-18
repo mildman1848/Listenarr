@@ -62,6 +62,13 @@ public interface IMoveQueuePersistence
         RequeueMoveCommand command,
         CancellationToken cancellationToken = default);
 
+    Task<bool> MarkNeedsAttentionAsync(
+        Guid id,
+        MoveJobStatus expectedStatus,
+        string error,
+        DateTimeOffset updatedAt,
+        CancellationToken cancellationToken = default);
+
     Task<bool> UpdateStatusAsync(
         Guid id,
         string leaseOwner,

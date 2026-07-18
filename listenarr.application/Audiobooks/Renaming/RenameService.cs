@@ -36,6 +36,7 @@ namespace Listenarr.Application.Audiobooks.Renaming
         private readonly IFileSystemSemanticsResolver _semanticsResolver;
         private readonly IHistoryRepository? _historyRepository;
         private readonly IAudiobookOperationCoordinator _audiobookOperationCoordinator;
+        private readonly ILibraryDirectoryOwnershipStore _directoryOwnershipStore;
 
         public RenameService(
             IConfigurationService configService,
@@ -49,6 +50,7 @@ namespace Listenarr.Application.Audiobooks.Renaming
             ILogger<RenameService> logger,
             IFileSystemSemanticsResolver semanticsResolver,
             IAudiobookOperationCoordinator audiobookOperationCoordinator,
+            ILibraryDirectoryOwnershipStore directoryOwnershipStore,
             IRootFolderService? rootFolderService = null,
             IHistoryRepository? historyRepository = null)
         {
@@ -65,6 +67,7 @@ namespace Listenarr.Application.Audiobooks.Renaming
             _rootFolderService = rootFolderService;
             _historyRepository = historyRepository;
             _audiobookOperationCoordinator = audiobookOperationCoordinator ?? throw new ArgumentNullException(nameof(audiobookOperationCoordinator));
+            _directoryOwnershipStore = directoryOwnershipStore ?? throw new ArgumentNullException(nameof(directoryOwnershipStore));
         }
 
         public async Task<List<RenamePreview>> PreviewRenameAsync(int[] audiobookIds, CancellationToken ct = default)
@@ -331,6 +334,7 @@ namespace Listenarr.Application.Audiobooks.Renaming
                                     audiobook,
                                     directoryRollbackState,
                                     allowedRoots,
+                                    semantics,
                                     CancellationToken.None);
 
                         if (!rollbackSucceeded)

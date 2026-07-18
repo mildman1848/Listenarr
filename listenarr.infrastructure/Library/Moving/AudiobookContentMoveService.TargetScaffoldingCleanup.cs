@@ -1,3 +1,5 @@
+using Listenarr.Domain.Common;
+
 namespace Listenarr.Infrastructure.Library.Moving;
 
 internal sealed partial class AudiobookContentMoveService
@@ -24,6 +26,7 @@ internal sealed partial class AudiobookContentMoveService
                 directory.Path,
                 MoveCreatedDirectoryState.Retained,
                 cancellationToken);
+            directory.State = MoveCreatedDirectoryState.Retained;
         }
 
         if (!Directory.Exists(publishedRoot))
@@ -43,6 +46,31 @@ internal sealed partial class AudiobookContentMoveService
             request.Target,
             publishedRoot,
             request.TargetSemantics);
+        foreach (var directory in scaffolding.Where(directory =>
+            directory.State == MoveCreatedDirectoryState.Retained
+            && !FileSystemPathIdentity.AreEquivalent(
+                directory.Path,
+                request.Target,
+                request.TargetSemantics)))
+        {
+            if (!Directory.Exists(directory.Path))
+            {
+                throw new MoveNeedsAttentionException(
+                    "A move-created retained directory disappeared before durable ownership could be recorded.");
+            }
+
+            ValidateExistingMoveDirectory(
+                directory.Path,
+                "move-created retained directory");
+            await directoryOwnershipStore.RecordCreatedAsync(
+                new LibraryDirectoryOwnershipClaim(
+                    directory.Path,
+                    request.TargetSemantics,
+                    "move",
+                    request.JobId),
+                CancellationToken.None);
+        }
+
         await EnsureMutationAuthorizedAsync(
             request,
             request.Source,

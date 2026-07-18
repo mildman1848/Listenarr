@@ -195,10 +195,19 @@ namespace Listenarr.Api.Features.Library
         /// <param name="id">Audiobook ID.</param>
         /// <param name="deleteFiles">When true, delete all files within the audiobook folder when it can be done safely; otherwise fall back to tracked audiobook files before removing the library record.</param>
         /// <param name="deleteFolder">When true, also delete the audiobook folder when it can be done safely.</param>
+        /// <param name="cancellationToken">Request cancellation token.</param>
         [HttpDelete("{id}")]
-        public async Task<IActionResult> DeleteAudiobook(int id, [FromQuery] bool deleteFiles = false, [FromQuery] bool deleteFolder = false)
+        public async Task<IActionResult> DeleteAudiobook(
+            int id,
+            [FromQuery] bool deleteFiles = false,
+            [FromQuery] bool deleteFolder = false,
+            CancellationToken cancellationToken = default)
         {
-            return await _deleteWorkflow.DeleteAsync(id, deleteFiles, deleteFolder);
+            return await _deleteWorkflow.DeleteAsync(
+                id,
+                deleteFiles,
+                deleteFolder,
+                cancellationToken);
         }
 
         /// <summary>
@@ -246,11 +255,15 @@ namespace Listenarr.Api.Features.Library
         /// </summary>
         /// <param name="id">Audiobook ID.</param>
         /// <param name="request">Move request with destination path and optional source override.</param>
+        /// <param name="cancellationToken">Request cancellation token.</param>
         /// <returns>Accepted with a job ID that can be polled for progress.</returns>
         [HttpPost("{id}/move")]
-        public async Task<IActionResult> EnqueueMove(int id, [FromBody] MoveRequest request)
+        public async Task<IActionResult> EnqueueMove(
+            int id,
+            [FromBody] MoveRequest request,
+            CancellationToken cancellationToken = default)
         {
-            return await _moveWorkflow.EnqueueAsync(id, request);
+            return await _moveWorkflow.EnqueueAsync(id, request, cancellationToken);
         }
 
         /// <summary>
@@ -265,14 +278,17 @@ namespace Listenarr.Api.Features.Library
         }
 
         /// <summary>
-        /// Re-enqueue a previously failed or completed move job for retry.
+        /// Re-enqueue a failed, needs-attention, or already queued move job for safe repair.
         /// </summary>
         /// <param name="jobId">Original move job GUID.</param>
+        /// <param name="cancellationToken">Request cancellation token.</param>
         /// <returns>Accepted with the new job ID.</returns>
         [HttpPost("move/requeue/{jobId}")]
-        public async Task<IActionResult> RequeueMoveJob(string jobId)
+        public async Task<IActionResult> RequeueMoveJob(
+            string jobId,
+            CancellationToken cancellationToken = default)
         {
-            return await _moveWorkflow.RequeueAsync(jobId);
+            return await _moveWorkflow.RequeueAsync(jobId, cancellationToken);
         }
 
         /// <summary>

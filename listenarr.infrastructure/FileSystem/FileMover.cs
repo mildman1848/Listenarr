@@ -72,6 +72,16 @@ namespace Listenarr.Infrastructure.FileSystem
 
         public async Task<bool> MoveDirectoryAsync(string sourceDir, string destDir)
         {
+            if (!TryRecoverInterruptedCopiedSourceCleanup(
+                    sourceDir,
+                    out var recoveryReason))
+            {
+                _logger.LogWarning(
+                    "Blocked directory move because interrupted source cleanup could not be recovered: {Reason}",
+                    recoveryReason);
+                return false;
+            }
+
             var pathEquivalence = await TryDetermineFilesystemPathEquivalenceAsync(
                 sourceDir,
                 destDir);
@@ -172,15 +182,35 @@ namespace Listenarr.Infrastructure.FileSystem
                 return false;
             }
 
-            // Fallback to copy+delete
+            // Fallback to copy plus verified, non-recursive source cleanup. New or
+            // changed source content is preserved instead of being recursively deleted.
             try
             {
-                CopyDirRecursive(sourceDir, destDir);
-                try { Directory.Delete(sourceDir, true); }
-                catch (Exception deleteEx) when (deleteEx is not OperationCanceledException && deleteEx is not OutOfMemoryException && deleteEx is not StackOverflowException)
+                await CopyDirRecursiveAsync(sourceDir, destDir);
+                var cleanup = await CleanupCopiedSourceTreeAsync(sourceDir, destDir);
+                if (!cleanup.DestinationVerified)
                 {
-                    _logger.LogDebug(deleteEx, "Failed deleting source directory after copy fallback for {Source}", sourceDir);
+                    _logger.LogWarning(
+                        "Directory copy fallback preserved the source because destination verification failed: {Reason}",
+                        cleanup.Reason);
+                    return false;
                 }
+
+                if (!cleanup.SourceRemoved)
+                {
+                    _logger.LogWarning(
+                        "Directory move copied the destination but preserved changed source content at {Source}: {Reason}",
+                        LogRedaction.SanitizeFilePath(sourceDir),
+                        cleanup.Reason);
+                    LogMutation(
+                        FileMutationOutcome.Failed,
+                        FileAction.Move,
+                        sourceDir,
+                        destDir,
+                        cleanup.Reason);
+                    return false;
+                }
+
                 LogMutation(FileMutationOutcome.Success, FileAction.Move, sourceDir, destDir);
                 return true;
             }
@@ -197,7 +227,6 @@ namespace Listenarr.Infrastructure.FileSystem
                         var startInfo = CreateRobocopyStartInfo(
                             sourceDir,
                             destDir,
-                            "/MOVE",
                             "/E",
                             "/NFL",
                             "/NDL",
@@ -208,6 +237,26 @@ namespace Listenarr.Infrastructure.FileSystem
                         var pr = await _processRunner.RunAsync(startInfo, _options.RobocopyTimeoutMs);
                         if (!pr.TimedOut && pr.ExitCode <= 7 && pr.ExitCode >= 0)
                         {
+                            var cleanup = await CleanupCopiedSourceTreeAsync(
+                                sourceDir,
+                                destDir);
+                            if (!cleanup.DestinationVerified)
+                            {
+                                _logger.LogWarning(
+                                    "Robocopy completed, but source cleanup was blocked because the destination could not be verified: {Reason}",
+                                    cleanup.Reason);
+                                return false;
+                            }
+
+                            if (!cleanup.SourceRemoved)
+                            {
+                                _logger.LogWarning(
+                                    "Robocopy completed and preserved changed source content at {Source}: {Reason}",
+                                    LogRedaction.SanitizeFilePath(sourceDir),
+                                    cleanup.Reason);
+                                return false;
+                            }
+
                             _logger.LogInformation("Robocopy fallback succeeded with exit code {Code}", pr.ExitCode);
                             _logger.LogDebug("Robocopy stdout: {Out}", LogRedaction.RedactText(Truncate(pr.Stdout, 2000), LogRedaction.GetSensitiveValuesFromEnvironment()));
                             return true;
@@ -303,61 +352,54 @@ namespace Listenarr.Infrastructure.FileSystem
                 return false;
             }
 
-            // Fallback copy+delete
-            try
+            var managedFallback = await TryManagedFileMoveFallbackAsync(
+                sourceFile,
+                destFile);
+            if (managedFallback == FileMoveFallbackOutcome.Success)
             {
-                File.Copy(sourceFile, destFile, true);
-                try { File.Delete(sourceFile); }
-                catch (Exception deleteEx) when (deleteEx is not OperationCanceledException && deleteEx is not OutOfMemoryException && deleteEx is not StackOverflowException)
-                {
-                    _logger.LogDebug(deleteEx, "Failed deleting source file after copy fallback for {Source}", sourceFile);
-                }
-                LogMutation(FileMutationOutcome.Success, FileAction.Move, sourceFile, destFile);
+                LogMutation(
+                    FileMutationOutcome.Success,
+                    FileAction.Move,
+                    sourceFile,
+                    destFile,
+                    "Verified copy fallback");
                 return true;
             }
-            catch (Exception ex) when (ex is not OperationCanceledException && ex is not OutOfMemoryException && ex is not StackOverflowException)
+
+            if (managedFallback == FileMoveFallbackOutcome.SourceRetained)
             {
-                _logger.LogError(ex, "Copy+delete fallback failed for file {Source} -> {Dest}", sourceFile, destFile);
-
-                // On Windows attempt robocopy for single-file move as a last resort
-                try
-                {
-                    if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows) && _options.EnableRobocopy && _processRunner != null)
-                    {
-                        _logger.LogWarning("Attempting robocopy fallback for file move: {Source} -> {Dest}", sourceFile, destFile);
-                        var srcDir = Path.GetDirectoryName(sourceFile) ?? string.Empty;
-                        var dstDir = Path.GetDirectoryName(destFile) ?? string.Empty;
-                        var fileName = Path.GetFileName(sourceFile);
-                        var startInfo = CreateRobocopyStartInfo(
-                            srcDir,
-                            dstDir,
-                            fileName,
-                            "/MOV",
-                            "/E",
-                            "/NFL",
-                            "/NDL",
-                            "/NJH",
-                            "/NJS",
-                            "/NP");
-
-                        var pr = await _processRunner.RunAsync(startInfo, _options.RobocopyTimeoutMs);
-                        if (!pr.TimedOut && pr.ExitCode == 1)
-                        {
-                            _logger.LogInformation("Robocopy fallback succeeded with exit code {Code}", pr.ExitCode);
-                            _logger.LogDebug("Robocopy stdout: {Out}", LogRedaction.RedactText(Truncate(pr.Stdout, 2000), LogRedaction.GetSensitiveValuesFromEnvironment()));
-                            return true;
-                        }
-
-                        _logger.LogWarning("Robocopy fallback failed or returned non-success code: {Code}. Stderr: {Err}", pr.ExitCode, LogRedaction.RedactText(Truncate(pr.Stderr, 2000), LogRedaction.GetSensitiveValuesFromEnvironment()));
-                    }
-                }
-                catch (Exception rex) when (rex is not OperationCanceledException && rex is not OutOfMemoryException && rex is not StackOverflowException)
-                {
-                    _logger.LogWarning(rex, "Robocopy fallback threw an exception");
-                }
-
+                LogMutation(
+                    FileMutationOutcome.Failed,
+                    FileAction.Move,
+                    sourceFile,
+                    destFile,
+                    "Destination was published but the verified source could not be removed");
                 return false;
             }
+
+            var robocopyFallback = await TryRobocopyFileMoveFallbackAsync(
+                sourceFile,
+                destFile);
+            if (robocopyFallback == FileMoveFallbackOutcome.Success)
+            {
+                LogMutation(
+                    FileMutationOutcome.Success,
+                    FileAction.Move,
+                    sourceFile,
+                    destFile,
+                    "Verified robocopy fallback");
+                return true;
+            }
+
+            LogMutation(
+                FileMutationOutcome.Failed,
+                FileAction.Move,
+                sourceFile,
+                destFile,
+                robocopyFallback == FileMoveFallbackOutcome.SourceRetained
+                    ? "Robocopy published the destination but the verified source could not be removed"
+                    : "No verified file move fallback completed");
+            return false;
         }
 
     }

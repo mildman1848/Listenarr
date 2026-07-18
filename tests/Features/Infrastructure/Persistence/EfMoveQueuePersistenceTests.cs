@@ -89,14 +89,16 @@ public sealed class EfMoveQueuePersistenceTests : IAsyncLifetime
     [Fact]
     public async Task ReconcileIdentityKeys_SelectsMostAdvancedLegacyDuplicate()
     {
+        var sourcePath = Path.GetFullPath(Path.Join(Path.GetTempPath(), "listenarr-reconcile-source", "book"));
+        var targetPath = Path.GetFullPath(Path.Join(Path.GetTempPath(), "listenarr-reconcile-target", "book"));
         await using (var db = await _factory.CreateDbContextAsync())
         {
             db.MoveJobs.AddRange(
                 new MoveJob
                 {
                     AudiobookId = 42,
-                    SourcePath = "/downloads/book",
-                    RequestedPath = "/library/book",
+                    SourcePath = sourcePath,
+                    RequestedPath = targetPath,
                     Status = MoveJobStatus.Queued,
                     Phase = MoveJobPhase.Planned,
                     IdentityKeyVersion = 1,
@@ -105,8 +107,8 @@ public sealed class EfMoveQueuePersistenceTests : IAsyncLifetime
                 new MoveJob
                 {
                     AudiobookId = 42,
-                    SourcePath = "/downloads/book",
-                    RequestedPath = "/library/book",
+                    SourcePath = sourcePath,
+                    RequestedPath = targetPath,
                     Status = MoveJobStatus.Running,
                     Phase = MoveJobPhase.Published,
                     IdentityKeyVersion = 1,
@@ -418,8 +420,8 @@ public sealed class EfMoveQueuePersistenceTests : IAsyncLifetime
                 new MoveJob
                 {
                     AudiobookId = 43,
-                    SourcePath = "/downloads/good-book",
-                    RequestedPath = "/library/good-book",
+                    SourcePath = Path.GetFullPath(Path.Join(Path.GetTempPath(), "downloads", "good-book")),
+                    RequestedPath = Path.GetFullPath(Path.Join(Path.GetTempPath(), "library", "good-book")),
                     Status = MoveJobStatus.Queued,
                     Phase = MoveJobPhase.None,
                     IdentityKeyVersion = 1,
@@ -445,6 +447,271 @@ public sealed class EfMoveQueuePersistenceTests : IAsyncLifetime
         Assert.Null(bad.ActiveDeduplicationKey);
         Assert.Equal(MoveJobStatus.Queued, good.Status);
         Assert.StartsWith("v3:move:43:", good.ActiveDeduplicationKey);
+    }
+
+    [Fact]
+    public async Task ReconcileIdentityKeysAsync_ForeignLegacyPaths_ArePreservedAndRequireAttention()
+    {
+        var sourcePath = OperatingSystem.IsWindows()
+            ? "/downloads/foreign-book"
+            : @"C:\Downloads\foreign-book";
+        var targetPath = OperatingSystem.IsWindows()
+            ? "/library/foreign-book"
+            : @"C:\Library\foreign-book";
+        var jobId = Guid.NewGuid();
+        await using (var db = await _factory.CreateDbContextAsync())
+        {
+            db.MoveJobs.Add(new MoveJob
+            {
+                Id = jobId,
+                AudiobookId = 44,
+                SourcePath = sourcePath,
+                RequestedPath = targetPath,
+                Status = MoveJobStatus.Running,
+                Phase = MoveJobPhase.Copying,
+                IdentityKeyVersion = 1,
+                ActiveDeduplicationKey = "legacy:foreign",
+                LeaseOwner = "legacy-worker",
+                LeaseGeneration = 2,
+                LeaseExpiresAt = DateTime.UtcNow.AddMinutes(5)
+            });
+            await db.SaveChangesAsync();
+        }
+
+        await CreatePersistence().ReconcileIdentityKeysAsync();
+
+        await using var verification = await _factory.CreateDbContextAsync();
+        var job = await verification.MoveJobs.SingleAsync(candidate => candidate.Id == jobId);
+        Assert.Equal(sourcePath, job.SourcePath);
+        Assert.Equal(targetPath, job.RequestedPath);
+        Assert.Equal(MoveJobStatus.NeedsAttention, job.Status);
+        Assert.Equal(MoveFailureKind.Verification, job.FailureKind);
+        Assert.Contains("filesystem syntax", job.Error, StringComparison.OrdinalIgnoreCase);
+        Assert.Null(job.ActiveDeduplicationKey);
+        Assert.Null(job.LeaseOwner);
+        Assert.Null(job.LeaseExpiresAt);
+        Assert.False(job.TryGetSourceIdentity(out _));
+        Assert.False(job.TryGetTargetIdentity(out _));
+    }
+
+    [Fact]
+    public async Task ReconcileIdentityKeysAsync_ForeignPersistedIdentity_RequiresAttention()
+    {
+        var syntax = OperatingSystem.IsWindows()
+            ? FileSystemPathSyntax.Unix
+            : FileSystemPathSyntax.Windows;
+        var sourcePath = syntax == FileSystemPathSyntax.Windows
+            ? @"C:\Downloads\foreign-identity-book"
+            : "/downloads/foreign-identity-book";
+        var targetPath = syntax == FileSystemPathSyntax.Windows
+            ? @"C:\Library\foreign-identity-book"
+            : "/library/foreign-identity-book";
+        var sourceBoundary = syntax == FileSystemPathSyntax.Windows ? @"C:\Downloads" : "/downloads";
+        var targetBoundary = syntax == FileSystemPathSyntax.Windows ? @"C:\Library" : "/library";
+        var job = new MoveJob
+        {
+            Id = Guid.NewGuid(),
+            AudiobookId = 47,
+            SourcePath = sourcePath,
+            RequestedPath = targetPath,
+            Status = MoveJobStatus.Running,
+            Phase = MoveJobPhase.Copying,
+            IdentityKeyVersion = 3,
+            ActiveDeduplicationKey = "v3:foreign-identity",
+            LeaseOwner = "legacy-worker",
+            LeaseGeneration = 2,
+            LeaseExpiresAt = DateTime.UtcNow.AddMinutes(5)
+        };
+        job.SetSourceIdentity(new PathIdentitySnapshot(
+            syntax,
+            FileSystemCaseSensitivity.Insensitive,
+            FileSystemCaseSensitivityMode.Insensitive,
+            sourceBoundary));
+        job.SetTargetIdentity(new PathIdentitySnapshot(
+            syntax,
+            FileSystemCaseSensitivity.Insensitive,
+            FileSystemCaseSensitivityMode.Insensitive,
+            targetBoundary));
+        await using (var db = await _factory.CreateDbContextAsync())
+        {
+            db.MoveJobs.Add(job);
+            await db.SaveChangesAsync();
+        }
+
+        await CreatePersistence().ReconcileIdentityKeysAsync();
+
+        await using var verification = await _factory.CreateDbContextAsync();
+        var persisted = await verification.MoveJobs.SingleAsync(candidate => candidate.Id == job.Id);
+        Assert.Equal(sourcePath, persisted.SourcePath);
+        Assert.Equal(targetPath, persisted.RequestedPath);
+        Assert.Equal(MoveJobStatus.NeedsAttention, persisted.Status);
+        Assert.Equal(MoveFailureKind.Verification, persisted.FailureKind);
+        Assert.Contains("persisted identity", persisted.Error, StringComparison.OrdinalIgnoreCase);
+        Assert.Null(persisted.ActiveDeduplicationKey);
+        Assert.Null(persisted.LeaseOwner);
+        Assert.Null(persisted.LeaseExpiresAt);
+    }
+
+    [Fact]
+    public async Task ReconcileIdentityKeysAsync_InvalidTarget_DoesNotPartiallyRewriteSource()
+    {
+        var sourcePath = Path.GetFullPath(Path.Join(
+            Path.GetTempPath(),
+            "listenarr-tests",
+            "reconcile-source",
+            "book")) + Path.DirectorySeparatorChar;
+        var targetPath = OperatingSystem.IsWindows()
+            ? "/library/foreign-book"
+            : @"C:\Library\foreign-book";
+        var jobId = Guid.NewGuid();
+        await using (var db = await _factory.CreateDbContextAsync())
+        {
+            db.MoveJobs.Add(new MoveJob
+            {
+                Id = jobId,
+                AudiobookId = 45,
+                SourcePath = sourcePath,
+                RequestedPath = targetPath,
+                Status = MoveJobStatus.Queued,
+                Phase = MoveJobPhase.None,
+                IdentityKeyVersion = 1,
+                ActiveDeduplicationKey = "legacy:partial"
+            });
+            await db.SaveChangesAsync();
+        }
+
+        await CreatePersistence().ReconcileIdentityKeysAsync();
+
+        await using var verification = await _factory.CreateDbContextAsync();
+        var job = await verification.MoveJobs.SingleAsync(candidate => candidate.Id == jobId);
+        Assert.Equal(sourcePath, job.SourcePath);
+        Assert.Equal(targetPath, job.RequestedPath);
+        Assert.Equal(MoveJobStatus.NeedsAttention, job.Status);
+        Assert.Null(job.ActiveDeduplicationKey);
+        Assert.False(job.TryGetSourceIdentity(out _));
+        Assert.False(job.TryGetTargetIdentity(out _));
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task ReconcileIdentityKeysAsync_NavigationSegment_IsPreservedAndRequiresAttention(
+        bool invalidSource)
+    {
+        var validSource = Path.GetFullPath(Path.Join(Path.GetTempPath(), "listenarr-reconcile-navigation-source", "Title"));
+        var validTarget = Path.GetFullPath(Path.Join(Path.GetTempPath(), "listenarr-reconcile-navigation-target", "Title"));
+        var invalidPath = OperatingSystem.IsWindows()
+            ? @"C:\Listenarr\Source\..\Title"
+            : "/listenarr/source/../Title";
+        var sourcePath = invalidSource ? invalidPath : validSource;
+        var targetPath = invalidSource ? validTarget : invalidPath;
+        var jobId = Guid.NewGuid();
+        await using (var db = await _factory.CreateDbContextAsync())
+        {
+            db.MoveJobs.Add(new MoveJob
+            {
+                Id = jobId,
+                AudiobookId = invalidSource ? 48 : 49,
+                SourcePath = sourcePath,
+                RequestedPath = targetPath,
+                Status = MoveJobStatus.Running,
+                Phase = MoveJobPhase.Copying,
+                IdentityKeyVersion = 1,
+                ActiveDeduplicationKey = "legacy:navigation",
+                LeaseOwner = "legacy-worker",
+                LeaseGeneration = 7,
+                LeaseExpiresAt = DateTime.UtcNow.AddMinutes(5)
+            });
+            await db.SaveChangesAsync();
+        }
+
+        await CreatePersistence().ReconcileIdentityKeysAsync();
+
+        await using var verification = await _factory.CreateDbContextAsync();
+        var job = await verification.MoveJobs.SingleAsync(candidate => candidate.Id == jobId);
+        Assert.Equal(sourcePath, job.SourcePath);
+        Assert.Equal(targetPath, job.RequestedPath);
+        Assert.Equal(MoveJobStatus.NeedsAttention, job.Status);
+        Assert.Equal(MoveFailureKind.Verification, job.FailureKind);
+        Assert.Contains(invalidSource ? "Source" : "Target", job.Error, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("navigation segment", job.Error, StringComparison.OrdinalIgnoreCase);
+        Assert.Null(job.ActiveDeduplicationKey);
+        Assert.Null(job.LeaseOwner);
+        Assert.Null(job.LeaseExpiresAt);
+        Assert.Equal(7, job.LeaseGeneration);
+    }
+
+    [Fact]
+    public async Task ReconcileIdentityKeysAsync_RelativeLegacyPath_IsPreservedAndRequiresAttention()
+    {
+        const string sourcePath = "downloads/relative-book";
+        var targetPath = Path.GetFullPath(Path.Join(Path.GetTempPath(), "listenarr-relative-target"));
+        var jobId = Guid.NewGuid();
+        await using (var db = await _factory.CreateDbContextAsync())
+        {
+            db.MoveJobs.Add(new MoveJob
+            {
+                Id = jobId,
+                AudiobookId = 46,
+                SourcePath = sourcePath,
+                RequestedPath = targetPath,
+                Status = MoveJobStatus.Queued,
+                Phase = MoveJobPhase.None,
+                IdentityKeyVersion = 1,
+                ActiveDeduplicationKey = "legacy:relative"
+            });
+            await db.SaveChangesAsync();
+        }
+
+        await CreatePersistence().ReconcileIdentityKeysAsync();
+
+        await using var verification = await _factory.CreateDbContextAsync();
+        var job = await verification.MoveJobs.SingleAsync(candidate => candidate.Id == jobId);
+        Assert.Equal(sourcePath, job.SourcePath);
+        Assert.Equal(targetPath, job.RequestedPath);
+        Assert.Equal(MoveJobStatus.NeedsAttention, job.Status);
+        Assert.Contains("not absolute", job.Error, StringComparison.OrdinalIgnoreCase);
+        Assert.Null(job.ActiveDeduplicationKey);
+    }
+
+    [Fact]
+    public async Task MarkNeedsAttentionAsync_RequiresExpectedStatusAndClearsActiveLease()
+    {
+        var persistence = CreatePersistence();
+        var job = CreateJob("v3:move:42:unsafe-path");
+        job.Status = MoveJobStatus.Running;
+        job.LeaseOwner = "worker-a";
+        job.LeaseGeneration = 3;
+        job.LeaseExpiresAt = DateTime.UtcNow.AddMinutes(5);
+        await persistence.AddAsync(job);
+
+        var staleUpdate = await persistence.MarkNeedsAttentionAsync(
+            job.Id,
+            MoveJobStatus.Failed,
+            "unsafe persisted path",
+            DateTimeOffset.UtcNow);
+
+        Assert.False(staleUpdate);
+        var unchanged = await persistence.GetByIdAsync(job.Id);
+        Assert.Equal(MoveJobStatus.Running, unchanged!.Status);
+        Assert.Equal("worker-a", unchanged.LeaseOwner);
+        Assert.NotNull(unchanged.ActiveDeduplicationKey);
+
+        var updated = await persistence.MarkNeedsAttentionAsync(
+            job.Id,
+            MoveJobStatus.Running,
+            "unsafe persisted path",
+            DateTimeOffset.UtcNow);
+
+        Assert.True(updated);
+        var persisted = await persistence.GetByIdAsync(job.Id);
+        Assert.Equal(MoveJobStatus.NeedsAttention, persisted!.Status);
+        Assert.Equal(MoveFailureKind.Verification, persisted.FailureKind);
+        Assert.Equal("unsafe persisted path", persisted.Error);
+        Assert.Null(persisted.ActiveDeduplicationKey);
+        Assert.Null(persisted.LeaseOwner);
+        Assert.Null(persisted.LeaseExpiresAt);
+        Assert.Equal(3, persisted.LeaseGeneration);
     }
 
     [Fact]

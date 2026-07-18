@@ -28,6 +28,7 @@ export interface DestinationPathValidationOptions {
   pathKind?: PathKind
   caseSensitivity?: PathCaseSensitivity
   sourcePath?: string | null
+  requireAbsolute?: boolean
 }
 
 const WINDOWS_RESERVED_DEVICE_PATTERN = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/i
@@ -37,16 +38,26 @@ export function toForward(s: string | null | undefined): string {
 }
 
 export function trimTrailingSlash(s: string): string {
-  if (s === '/' || /^[a-zA-Z]:[\\/]$/.test(s)) return s
+  if (s === '/') return s
+  const driveRoot = s.match(/^([a-zA-Z]:)([\\/]+)$/)
+  if (driveRoot) return `${driveRoot[1]}${driveRoot[2][0]}`
   let out = s
   while (out.endsWith('/') || out.endsWith('\\')) out = out.slice(0, -1)
   return out
 }
 
-export function detectPathKind(s: string | null | undefined): PathKind {
+export function detectPathKind(
+  s: string | null | undefined,
+  expectedKind: PathKind = 'unknown',
+): PathKind {
   const value = s || ''
-  if (/^[a-zA-Z]:([\\/]|$)/.test(value)) return 'windows'
+  const isForwardSlashUnc = /^\/\/[^\\/]+[\\/][^\\/]+/.test(value)
+
+  if (expectedKind === 'windows' && isForwardSlashUnc) return 'windows'
+  if (expectedKind === 'unix' && value.startsWith('/')) return 'unix'
+  if (/^[a-zA-Z]:/.test(value)) return 'windows'
   if (/^\\\\[^\\/]+[\\/][^\\/]+/.test(value)) return 'windows'
+  if (isForwardSlashUnc) return 'unknown'
   if (value.startsWith('/')) return 'unix'
   if (value.includes('\\')) return 'windows'
   return 'unknown'
@@ -125,7 +136,12 @@ export function pathsOverlap(
   )
 }
 
-export function isAbsolutePath(s: string): boolean {
+export function isAbsolutePath(s: string, pathKind: PathKind = 'unknown'): boolean {
+  const kind = pathKind === 'unknown' ? detectPathKind(s) : pathKind
+  if (kind === 'unix') return s.startsWith('/')
+  if (kind === 'windows') {
+    return /^[a-zA-Z]:[\\/]/.test(s) || /^[\\/]{2}/.test(s) || /^[\\/]$/.test(s)
+  }
   return /^([a-zA-Z]:[\\/]|[\\/])/.test(s)
 }
 
@@ -159,9 +175,11 @@ export function hasEmptyMiddlePathSegment(
       .some((segment) => segment === '')
   }
 
-  const segments = normalized.split('/')
-  const startIndex = normalized.startsWith('/') ? 1 : 0
-  return segments.slice(startIndex).some((segment) => segment === '')
+  const pathWithoutRoot =
+    kind === 'unix' || (kind === 'unknown' && normalized.startsWith('//'))
+      ? normalized.replace(/^\/+/, '')
+      : normalized
+  return pathWithoutRoot.split('/').some((segment) => segment === '')
 }
 
 export function hasControlCharacter(s: string | null | undefined): boolean {
@@ -180,6 +198,30 @@ export function hasPathSegmentOuterWhitespace(
   return splitPathSegments(s, pathKind)
     .filter((segment) => segment.length > 0)
     .some((segment) => segment !== segment.trim())
+}
+
+export function hasWindowsDriveRelativePath(
+  s: string | null | undefined,
+  pathKind: PathKind = 'unknown',
+): boolean {
+  const value = s || ''
+  const kind = pathKind === 'unknown' ? detectPathKind(value) : pathKind
+  return kind === 'windows' && /^[a-zA-Z]:(?![\\/])/.test(value)
+}
+
+export function hasIncompleteWindowsUncAuthority(
+  s: string | null | undefined,
+  pathKind: PathKind = 'unknown',
+): boolean {
+  const value = s || ''
+  const kind = pathKind === 'unknown' ? detectPathKind(value) : pathKind
+  if (kind !== 'windows') return false
+
+  const normalized = value.replace(/\\/g, '/')
+  if (!normalized.startsWith('//')) return false
+
+  const authoritySegments = trimTrailingSlash(normalized).slice(2).split('/')
+  return authoritySegments.length < 2 || !authoritySegments[0] || !authoritySegments[1]
 }
 
 export function hasWindowsTrailingSpaceOrPeriodSegment(
@@ -221,9 +263,6 @@ export function hasWindowsReservedDeviceSegment(
 
   if (/^[a-zA-Z]:$/.test(segments[0] || '')) {
     segments = segments.slice(1)
-  } else if (normalized.startsWith('//')) {
-    // Skip UNC server and share components; validate the destination folders below the share.
-    segments = segments.slice(2)
   }
 
   return segments.some((segment) => {
@@ -245,6 +284,14 @@ export function validateLibraryDestinationPath(
     return 'Destination folder cannot contain control characters.'
   }
 
+  if (hasWindowsDriveRelativePath(s, pathKind)) {
+    return 'Windows destination folders must include a separator after the drive letter, such as C:\\.'
+  }
+
+  if (options.requireAbsolute && !isAbsolutePath(s, pathKind)) {
+    return 'Destination folder must be an absolute directory path.'
+  }
+
   if (hasParentTraversalSegment(s, pathKind)) {
     return 'Path traversal is not allowed in the destination folder. Remove parent directory segments and choose the actual target folder instead.'
   }
@@ -255,6 +302,10 @@ export function validateLibraryDestinationPath(
 
   if (hasEmptyMiddlePathSegment(s, pathKind)) {
     return 'Destination folder cannot contain empty path segments. Remove repeated path separators.'
+  }
+
+  if (hasIncompleteWindowsUncAuthority(s, pathKind)) {
+    return 'Windows UNC destination folders must include both a server and share.'
   }
 
   if (hasWindowsTrailingSpaceOrPeriodSegment(s, pathKind)) {
@@ -280,69 +331,50 @@ export function validateLibraryDestinationPath(
 }
 
 /**
- * If `value` contains the configured `root` prefix, remove it and return the
- * relative portion (respecting backslash style). Returns null if no match.
+ * Remove the complete configured root from an equal or contained absolute path.
+ * Returns null when the value is outside the root or uses incompatible syntax.
  */
-export function stripRootPrefix(root: string, value: string): string | null {
+export function stripRootPrefix(
+  root: string,
+  value: string,
+  caseSensitivity: PathCaseSensitivity = 'Unknown',
+  pathKind: PathKind = 'unknown',
+): string | null {
   if (!root || !value) return null
   try {
-    const rootKind = detectPathKind(root)
-    const nroot = normalizeForCompare(root, rootKind)
-    const nval = normalizeForCompare(value, rootKind)
-    const normalizedValue = rootKind === 'windows' ? value.replace(/\\/g, '/') : value
+    const rootKind = pathKind === 'unknown' ? detectPathKind(root) : pathKind
+    const valueKind = detectPathKind(value, rootKind)
+    if (rootKind === 'unknown' || (valueKind !== 'unknown' && valueKind !== rootKind)) return null
+
+    const normalizedRoot = trimTrailingSlash(rootKind === 'windows' ? toForward(root) : root)
+    const normalizedValue = trimTrailingSlash(rootKind === 'windows' ? toForward(value) : value)
+    const comparableRoot = normalizeForCompare(normalizedRoot, rootKind, caseSensitivity)
+    const comparableValue = normalizeForCompare(normalizedValue, rootKind, caseSensitivity)
     const useBackslash = rootKind === 'windows' && root.includes('\\')
 
-    const rootIndex = findPathSegmentMatch(nval, nroot)
-    if (rootIndex >= 0) {
-      const rel = normalizedValue.slice(rootIndex + nroot.length).replace(/^\/+/, '')
-      return useBackslash ? rel.replace(/\//g, '\\') : rel
-    }
+    if (comparableValue === comparableRoot) return ''
 
-    // fallback: try matching two-segment windows from the end toward the start
-    const segs = splitPathSegments(nroot, rootKind)
-    const fallbackStop = /^[a-zA-Z]:$/.test(segs[0] || '') || segs[0] === '' ? 1 : 0
-    for (let i = Math.max(fallbackStop, segs.length - 2); i >= fallbackStop; i--) {
-      const two = segs.slice(i, i + 2).join('/')
-      const idx = two ? findPathSegmentMatch(nval, two) : -1
-      if (idx >= 0) {
-        const rel = normalizedValue.slice(idx + two.length).replace(/^\/+/, '')
-        return useBackslash ? rel.replace(/\//g, '\\') : rel
-      }
-    }
+    const rootBoundary = comparableRoot.endsWith('/') ? comparableRoot : `${comparableRoot}/`
+    if (!comparableValue.startsWith(rootBoundary)) return null
+
+    const rel = normalizedValue.slice(normalizedRoot.length).replace(/^\/+/, '')
+    return useBackslash ? rel.replace(/\//g, '\\') : rel
   } catch {
-    // noop - fall through to null
+    return null
   }
-
-  return null
-}
-
-function findPathSegmentMatch(value: string, pattern: string): number {
-  let fromIndex = 0
-  while (fromIndex <= value.length) {
-    const idx = value.indexOf(pattern, fromIndex)
-    if (idx < 0) return -1
-
-    const before = idx === 0 || value[idx - 1] === '/'
-    const afterIndex = idx + pattern.length
-    const after = afterIndex === value.length || value[afterIndex] === '/'
-    if (before && after) return idx
-
-    fromIndex = idx + 1
-  }
-
-  return -1
 }
 
 export function joinPaths(
   root: string | null | undefined,
   relative: string | null | undefined,
+  pathKind: PathKind = 'unknown',
 ): string {
   if (!root) return relative || ''
-  const rootKind = detectPathKind(root)
+  const rootKind = pathKind === 'unknown' ? detectPathKind(root) : pathKind
   const useBackslash = rootKind === 'windows' && root.includes('\\')
   const normalizedRoot = rootKind === 'windows' ? root.replace(/\\/g, '/') : root
   const r = trimTrailingSlash(normalizedRoot)
   const rel = (relative || '').toString().replace(/^\/+/, '')
-  const combined = rel ? `${r}/${rel}` : r
+  const combined = rel ? `${r}${r.endsWith('/') ? '' : '/'}${rel}` : r
   return useBackslash ? combined.replace(/\//g, '\\') : combined
 }

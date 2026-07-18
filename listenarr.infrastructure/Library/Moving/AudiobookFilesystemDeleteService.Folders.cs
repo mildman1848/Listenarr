@@ -14,9 +14,11 @@ namespace Listenarr.Infrastructure.Library.Moving
             Audiobook audiobook,
             IReadOnlyList<string> trackedFilePaths,
             FileSystemPathSemantics semantics,
-            AudiobookFilesystemDeleteResult result)
+            AudiobookFilesystemDeleteResult result,
+            CancellationToken cancellationToken)
         {
-            var protectedRoots = await GetProtectedRootPathsAsync();
+            cancellationToken.ThrowIfCancellationRequested();
+            var protectedRoots = await GetProtectedRootPathsAsync(cancellationToken);
             var folderPath = ResolveAudiobookFolderPath(audiobook, trackedFilePaths, semantics);
             if (string.IsNullOrWhiteSpace(folderPath))
             {
@@ -47,11 +49,27 @@ namespace Listenarr.Infrastructure.Library.Moving
                 return null;
             }
 
-            if (!Directory.Exists(folderPath))
+            var ownedDirectories = await ResolveOwnedDirectoriesForDeleteAsync(
+                folderPath,
+                semantics,
+                result,
+                cancellationToken);
+            if (ownedDirectories == null)
+            {
+                return null;
+            }
+            if (!Directory.Exists(folderPath)
+                && !ownedDirectories.Any(ownership =>
+                    FileSystemPathIdentity.AreEquivalent(
+                        ownership.CanonicalPath,
+                        folderPath,
+                        semantics)
+                    && ownership.State == LibraryDirectoryOwnershipState.Removing))
             {
                 return null;
             }
 
+            cancellationToken.ThrowIfCancellationRequested();
             var allFiles = await _audioFileRepository.GetAllAsync();
             var otherFilePaths = allFiles
                 .Where(f => f.AudiobookId != audiobook.Id && f.Path != null)
@@ -66,6 +84,7 @@ namespace Listenarr.Infrastructure.Library.Moving
                 return null;
             }
 
+            cancellationToken.ThrowIfCancellationRequested();
             var allAudiobooks = await _audiobookRepository.GetAllAsync();
             var otherAudiobookPaths = allAudiobooks
                 .Where(a => a.Id != audiobook.Id)
@@ -105,40 +124,57 @@ namespace Listenarr.Infrastructure.Library.Moving
                 FolderPath = folderPath,
                 ProtectedRoots = protectedRoots,
                 AllowedMutationRoots = allowedMutationRoots,
-                Semantics = semantics
+                Semantics = semantics,
+                OwnedDirectories = ownedDirectories
             };
         }
 
-        private async Task TryDeleteAudiobookFolderAsync(Audiobook audiobook, DeleteFolderTarget deleteTarget, AudiobookFilesystemDeleteResult result)
+        private async Task TryDeleteAudiobookFolderAsync(
+            Audiobook audiobook,
+            DeleteFolderTarget deleteTarget,
+            AudiobookFilesystemDeleteResult result,
+            CancellationToken cancellationToken)
         {
-            if (!Directory.Exists(deleteTarget.FolderPath))
+            cancellationToken.ThrowIfCancellationRequested();
+            if (deleteTarget.OwnedDirectories.Count > 0
+                && !await RetireOwnedHierarchyAsync(
+                    deleteTarget.OwnedDirectories,
+                    cancellationToken))
             {
+                result.Warnings.Add(
+                    "The audiobook folder gained content while its owned directory hierarchy was being deleted.");
                 return;
             }
 
-            // Contents were enumerated and deleted individually above. Revalidate every
-            // existing path component immediately before removing the now-empty folder.
-            if (!FileSystemSafety.TryDeleteEmptyDirectory(
-                    deleteTarget.FolderPath,
-                    deleteTarget.AllowedMutationRoots,
-                    out var reason))
+            if (Directory.Exists(deleteTarget.FolderPath))
             {
-                result.Warnings.Add("Failed to delete the audiobook folder.");
-                _logger.LogWarning(
-                    "Failed to safely delete audiobook folder {FolderPath}: {Reason}",
-                    LogRedaction.SanitizeFilePath(deleteTarget.FolderPath),
-                    LogRedaction.SanitizeText(reason));
-                return;
+                cancellationToken.ThrowIfCancellationRequested();
+                // Unowned exact audiobook folders may still be removed because the user
+                // explicitly requested folder deletion. Implicit parent deletion remains
+                // ownership-gated below.
+                if (!FileSystemSafety.TryDeleteEmptyDirectory(
+                        deleteTarget.FolderPath,
+                        deleteTarget.AllowedMutationRoots,
+                        out var reason))
+                {
+                    result.Warnings.Add("Failed to delete the audiobook folder.");
+                    _logger.LogWarning(
+                        "Failed to safely delete audiobook folder {FolderPath}: {Reason}",
+                        LogRedaction.SanitizeFilePath(deleteTarget.FolderPath),
+                        LogRedaction.SanitizeText(reason));
+                    return;
+                }
             }
 
-            result.DeletedFolder = true;
+            result.DeletedFolder = !Directory.Exists(deleteTarget.FolderPath);
             _logger.LogInformation("Deleted audiobook folder {FolderPath}", LogRedaction.SanitizeFilePath(deleteTarget.FolderPath));
             await TryDeleteEmptyAuthorFolderAsync(
                 audiobook,
                 deleteTarget.FolderPath,
                 deleteTarget.ProtectedRoots,
                 deleteTarget.Semantics,
-                result);
+                result,
+                cancellationToken);
         }
 
         private async Task TryDeleteEmptyAuthorFolderAsync(
@@ -146,31 +182,89 @@ namespace Listenarr.Infrastructure.Library.Moving
             string deletedFolderPath,
             IReadOnlyCollection<string> protectedRoots,
             FileSystemPathSemantics semantics,
-            AudiobookFilesystemDeleteResult result)
+            AudiobookFilesystemDeleteResult result,
+            CancellationToken cancellationToken)
         {
             var parentFolder = NormalizePath(Path.GetDirectoryName(deletedFolderPath));
             if (string.IsNullOrWhiteSpace(parentFolder)
                 || IsFilesystemRoot(parentFolder, semantics)
                 || protectedRoots.Any(root => PathsEqual(root, parentFolder, semantics))
-                || !Directory.Exists(parentFolder)
                 || !IsAuthorFolder(parentFolder, audiobook.Authors?.FirstOrDefault()))
             {
                 return;
             }
 
+            LibraryDirectoryOwnershipResolution parentOwnership;
             try
             {
-                if (Directory.EnumerateFileSystemEntries(parentFolder).Any())
+                parentOwnership = await _directoryOwnershipStore.ResolveOwnedAsync(
+                    parentFolder,
+                    semantics,
+                    cancellationToken);
+            }
+            catch (Exception exception) when (exception is
+                ArgumentException or InvalidOperationException or NotSupportedException or PathTooLongException)
+            {
+                _logger.LogWarning(
+                    exception,
+                    "Unable to resolve durable ownership for author folder {FolderPath}",
+                    LogRedaction.SanitizeFilePath(parentFolder));
+                if (!Directory.Exists(parentFolder))
+                {
+                    throw;
+                }
+
+                result.Warnings.Add(
+                    "The empty author folder was preserved because its durable ownership could not be resolved.");
+                return;
+            }
+
+            if (parentOwnership.State != LibraryDirectoryOwnershipResolutionState.Owned
+                || parentOwnership.Ownership == null)
+            {
+                if (!Directory.Exists(parentFolder)
+                    && parentOwnership.State != LibraryDirectoryOwnershipResolutionState.Unowned)
+                {
+                    throw new InvalidOperationException(
+                        parentOwnership.Reason
+                            ?? "The missing author folder has conflicting or unavailable ownership state.");
+                }
+
+                return;
+            }
+
+            var ownedParent = parentOwnership.Ownership;
+            try
+            {
+                ValidateOwnedDirectoryForDelete(ownedParent);
+                if (Directory.Exists(parentFolder)
+                    && Directory.EnumerateFileSystemEntries(parentFolder).Any(path =>
+                        !LibraryDirectoryOwnershipMarker.GetMarkerPaths(ownedParent)
+                            .Any(markerPath => FileSystemPathIdentity.AreEquivalent(
+                                markerPath,
+                                path,
+                                semantics))))
                 {
                     return;
                 }
             }
-            catch (Exception ex) when (ex is IOException || ex is UnauthorizedAccessException)
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidOperationException)
             {
-                _logger.LogDebug(ex, "Unable to inspect parent folder {FolderPath} after audiobook delete", LogRedaction.SanitizeFilePath(parentFolder));
+                _logger.LogWarning(
+                    exception,
+                    "Unable to validate owned author folder {FolderPath}",
+                    LogRedaction.SanitizeFilePath(parentFolder));
+                if (!Directory.Exists(parentFolder))
+                {
+                    throw;
+                }
+
+                result.Warnings.Add(
+                    "The empty author folder was preserved because its ownership proof changed.");
                 return;
             }
 
+            cancellationToken.ThrowIfCancellationRequested();
             var allAudiobooks = await _audiobookRepository.GetAllAsync();
             var otherAudiobookPaths = allAudiobooks
                 .Where(a => a.Id != audiobook.Id)
@@ -195,33 +289,28 @@ namespace Listenarr.Infrastructure.Library.Moving
                 }
             }
 
-            var allowedMutationRoots = protectedRoots
-                .Where(root => IsSamePathOrWithin(parentFolder, root, semantics))
-                .ToList();
-            if (allowedMutationRoots.Count == 0)
+            try
             {
-                allowedMutationRoots.Add(parentFolder);
+                result.DeletedParentFolder = await RetireOwnedDirectoryAsync(
+                    ownedParent,
+                    cancellationToken);
             }
-
-            if (!FileSystemSafety.TryDeleteEmptyDirectory(
-                    parentFolder,
-                    allowedMutationRoots,
-                    out var reason))
+            catch (Exception exception) when (exception is
+                IOException or UnauthorizedAccessException or InvalidOperationException)
             {
-                result.Warnings.Add("Failed to delete the empty author folder.");
                 _logger.LogWarning(
-                    "Failed to safely delete empty parent author folder {FolderPath}: {Reason}",
-                    LogRedaction.SanitizeFilePath(parentFolder),
-                    LogRedaction.SanitizeText(reason));
-                return;
+                    exception,
+                    "Failed to retire owned author folder {FolderPath}",
+                    LogRedaction.SanitizeFilePath(parentFolder));
+                throw;
             }
-
-            result.DeletedParentFolder = true;
             _logger.LogInformation("Deleted empty parent author folder {FolderPath}", LogRedaction.SanitizeFilePath(parentFolder));
         }
 
-        private async Task<HashSet<string>> GetProtectedRootPathsAsync()
+        private async Task<HashSet<string>> GetProtectedRootPathsAsync(
+            CancellationToken cancellationToken = default)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             var protectedRoots = new HashSet<string>(StringComparer.Ordinal);
 
             try
@@ -395,47 +484,6 @@ namespace Listenarr.Infrastructure.Library.Moving
             FileSystemPathSemantics semantics) =>
             FileSystemPathIdentity.IsSameOrInside(path, rootPath, semantics);
 
-        private static bool IsFilesystemRoot(
-            string? path,
-            FileSystemPathSemantics semantics)
-        {
-            if (string.IsNullOrWhiteSpace(path))
-            {
-                return false;
-            }
 
-            var fullPath = Path.GetFullPath(path);
-            var root = Path.GetPathRoot(fullPath);
-            return !string.IsNullOrWhiteSpace(root)
-                && FileSystemPathIdentity.AreEquivalent(root, fullPath, semantics);
-        }
-
-        private static bool IsAuthorFolder(string folderPath, string? authorName)
-        {
-            if (string.IsNullOrWhiteSpace(folderPath) || string.IsNullOrWhiteSpace(authorName))
-            {
-                return false;
-            }
-
-            var folderName = Path.GetFileName(folderPath);
-            return NormalizeName(folderName) == NormalizeName(authorName);
-        }
-
-        private static string NormalizeName(string? value)
-        {
-            if (string.IsNullOrWhiteSpace(value))
-            {
-                return string.Empty;
-            }
-
-            var cleaned = new string(value
-                .Where(c => char.IsLetterOrDigit(c) || char.IsWhiteSpace(c))
-                .ToArray());
-
-            return string.Join(
-                ' ',
-                cleaned.Split(new[] { ' ', '\t', '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries))
-                .ToLowerInvariant();
-        }
     }
 }

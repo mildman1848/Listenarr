@@ -101,7 +101,13 @@ public partial class RenameService
             var targetDirectory = Path.GetDirectoryName(destination);
             if (!string.IsNullOrWhiteSpace(targetDirectory))
             {
-                _fileSystem.CreateDirectory(targetDirectory);
+                await EnsureOwnedRenameHierarchyAsync(
+                    targetDirectory,
+                    allowedRoots,
+                    semantics,
+                    audiobook.Id,
+                    Guid.NewGuid(),
+                    cancellationToken);
             }
 
             if (!PathsEqual(source, destination, semantics))
@@ -228,7 +234,13 @@ public partial class RenameService
         var parent = Path.GetDirectoryName(normalizedNew);
         if (!string.IsNullOrWhiteSpace(parent))
         {
-            _fileSystem.CreateDirectory(parent);
+            await EnsureOwnedRenameHierarchyAsync(
+                parent,
+                allowedRoots,
+                targetSemantics,
+                audiobook.Id,
+                Guid.NewGuid(),
+                cancellationToken);
         }
 
         var moved = await _fileMover.MoveDirectoryAsync(

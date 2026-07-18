@@ -42,6 +42,9 @@ namespace Listenarr.Tests.Features.Infrastructure.Library.Moving
             var source = Path.Join(sourceRoot, "Author", "Series", "Title", "test");
             Directory.CreateDirectory(source);
             await FileService.GetFileAsync(source, "book.m4b", "audio");
+            await RecordOwnedDirectoryHierarchyAsync(
+                sourceRoot,
+                Path.GetDirectoryName(source)!);
             var target = Path.Join(FileService.GetTempPath(), $"move-processor-cleanup-dst-{Guid.NewGuid():N}");
             var rootFolderRepository = _provider.GetRequiredService<IRootFolderRepository>();
             await rootFolderRepository.AddAsync(new RootFolder { Name = "Cleanup Root", Path = sourceRoot });
@@ -66,6 +69,7 @@ namespace Listenarr.Tests.Features.Infrastructure.Library.Moving
             var source = Path.Join(oldTitle, "test");
             Directory.CreateDirectory(source);
             await FileService.GetFileAsync(source, "book.m4b", "audio");
+            await RecordOwnedDirectoryHierarchyAsync(series, oldTitle);
             var target = Path.Join(series, "A Parade of Horribles (2026)", "test");
             Directory.CreateDirectory(target);
             var audiobook = await _audiobookRepository.AddAsync(new Audiobook
@@ -94,6 +98,9 @@ namespace Listenarr.Tests.Features.Infrastructure.Library.Moving
             var source = Path.Join(sourceRoot, "Author", "Title");
             Directory.CreateDirectory(source);
             await FileService.GetFileAsync(source, "book.m4b", "audio");
+            await RecordOwnedDirectoryHierarchyAsync(
+                sourceRoot,
+                Path.GetDirectoryName(source)!);
             var target = Path.Join(FileService.GetTempPath(), $"move-processor-foreign-dst-{Guid.NewGuid():N}");
             var rootFolderRepository = _provider.GetRequiredService<IRootFolderRepository>();
             await rootFolderRepository.AddAsync(new RootFolder
@@ -217,6 +224,9 @@ namespace Listenarr.Tests.Features.Infrastructure.Library.Moving
             var src = Path.Join(sourceParent, " test");
             Directory.CreateDirectory(src);
             await FileService.GetFileAsync(src, "book.m4b", "audio");
+            await RecordOwnedDirectoryHierarchyAsync(
+                Path.GetDirectoryName(sourceParent)!,
+                sourceParent);
             var dst = Path.Join(FileService.GetTempPath(), "move-processor-cleaned-dst");
             var audiobook = await _audiobookRepository.AddAsync(new Audiobook { Title = "Move Processor Empty Parent", BasePath = src });
             var (queue, job) = await CreateQueuedMoveJobAsync(audiobook, dst, src);
@@ -1072,6 +1082,46 @@ namespace Listenarr.Tests.Features.Infrastructure.Library.Moving
             Assert.NotNull(leaseGeneration);
             job.LeaseOwner = LeaseOwner;
             job.LeaseGeneration = leaseGeneration.Value;
+        }
+
+        private async Task RecordOwnedDirectoryHierarchyAsync(
+            string managedBoundary,
+            string deepestOwnedDirectory)
+        {
+            var semantics = FileSystemPathSemantics.CurrentHostDefault;
+            var boundary = FileSystemPathIdentity.Canonicalize(
+                managedBoundary,
+                semantics.Syntax);
+            var current = FileSystemPathIdentity.Canonicalize(
+                deepestOwnedDirectory,
+                semantics.Syntax);
+            var directories = new List<string>();
+            while (!FileSystemPathIdentity.AreEquivalent(current, boundary, semantics))
+            {
+                if (!FileSystemPathIdentity.IsSameOrInside(current, boundary, semantics))
+                {
+                    throw new InvalidOperationException(
+                        "The test-owned directory escaped its managed boundary.");
+                }
+
+                directories.Add(current);
+                current = Path.GetDirectoryName(current)
+                    ?? throw new InvalidOperationException(
+                        "The test-owned directory has no parent.");
+            }
+
+            directories.Reverse();
+            var ownershipStore = _provider.GetRequiredService<ILibraryDirectoryOwnershipStore>();
+            var operationId = Guid.NewGuid();
+            foreach (var directory in directories)
+            {
+                await ownershipStore.RecordCreatedAsync(
+                    new LibraryDirectoryOwnershipClaim(
+                        directory,
+                        semantics,
+                        "test-fixture",
+                        operationId));
+            }
         }
 
         private async Task<(IMoveQueueService Queue, MoveJob Job)> CreateQueuedMoveJobAsync(

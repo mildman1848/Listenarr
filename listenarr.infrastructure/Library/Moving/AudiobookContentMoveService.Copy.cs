@@ -25,7 +25,8 @@ internal sealed partial class AudiobookContentMoveService
             targetSemantics,
             tempOwnership,
             quarantineOwnership: null,
-            allowPartialFiles: tempOwnership != null || directCopyOwnershipValidated);
+            allowPartialFiles: tempOwnership != null || directCopyOwnershipValidated,
+            targetDirectoryOwnership: request.TargetDirectoryOwnership);
 
         foreach (var manifestEntry in manifest.OrderBy(entry => entry.EntryType))
         {
@@ -117,13 +118,15 @@ internal sealed partial class AudiobookContentMoveService
         FileSystemPathSemantics targetSemantics,
         ValidatedTempOwnership? tempOwnership = null,
         ValidatedQuarantineOwnership? quarantineOwnership = null,
-        bool allowPartialFiles = true)
+        bool allowPartialFiles = true,
+        LibraryDirectoryOwnership? targetDirectoryOwnership = null)
     {
         if (!Directory.Exists(destinationRoot))
         {
             return;
         }
 
+        RevalidateTargetDirectoryOwnership(targetDirectoryOwnership);
         if (!FileSystemSafety.TryEnumerateTreeWithoutLinks(
             destinationRoot,
             out var files,
@@ -185,7 +188,11 @@ internal sealed partial class AudiobookContentMoveService
 
         foreach (var file in files)
         {
-            if (FileSystemPathIdentity.AreEquivalent(file, markerPath, targetSemantics)
+            if (IsValidatedTargetOwnershipMarker(
+                    file,
+                    targetDirectoryOwnership,
+                    targetSemantics)
+                || FileSystemPathIdentity.AreEquivalent(file, markerPath, targetSemantics)
                 || (tempOwnership != null
                     && FileSystemPathIdentity.AreEquivalent(
                         file,

@@ -128,15 +128,17 @@ namespace Listenarr.Application.Audiobooks.Jobs
                 job.SetSourceIdentity(command.SourceIdentity);
                 job.SetTargetIdentity(command.TargetIdentity);
 
+                token.ThrowIfCancellationRequested();
+                var commitToken = CancellationToken.None;
                 try
                 {
-                    await _persistence.AddAsync(job, token);
+                    await _persistence.AddAsync(job, commitToken);
                 }
                 catch (UniqueConstraintViolationException)
                 {
                     existingDb = await _persistence.GetActiveByKeyAsync(
                         deduplicationKey,
-                        token);
+                        commitToken);
                     if (existingDb != null)
                     {
                         jobToSchedule = existingDb;
@@ -157,12 +159,11 @@ namespace Listenarr.Application.Audiobooks.Jobs
 
             if (jobToSchedule != null)
             {
-                await ScheduleAsync(jobToSchedule, cancellationToken);
+                await ScheduleAsync(jobToSchedule);
                 await NotifyPersistedJobStateAsync(
                     jobToSchedule.Id,
                     jobToSchedule.Status,
-                    jobToSchedule.Error,
-                    cancellationToken);
+                    jobToSchedule.Error);
             }
 
             return jobId;

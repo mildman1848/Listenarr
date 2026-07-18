@@ -257,6 +257,33 @@ public sealed class EfMoveScanHandoffStoreTests : BaseTests
     }
 
     [Fact]
+    public async Task MarkDispatched_ExpiredClaimCannotPublishScanJob()
+    {
+        var handoff = await InsertPendingHandoffAsync();
+        var store = _provider.GetRequiredService<IMoveScanHandoffStore>();
+        var now = DateTimeOffset.UtcNow;
+        var claim = await store.TryClaimAsync(
+            handoff.Id,
+            "expired-dispatch-worker",
+            now,
+            now.AddSeconds(1));
+        Assert.NotNull(claim);
+
+        var dispatched = await store.MarkDispatchedAsync(
+            claim!.HandoffId,
+            claim.LeaseOwner,
+            claim.LeaseGeneration,
+            Guid.NewGuid(),
+            now.AddSeconds(2));
+
+        Assert.False(dispatched);
+        await using var db = await GetFactory().CreateDbContextAsync();
+        var persisted = await db.MoveScanHandoffs.AsNoTracking()
+            .SingleAsync(candidate => candidate.Id == handoff.Id);
+        Assert.Null(persisted.ActiveScanJobId);
+    }
+
+    [Fact]
     public async Task RenewAttemptLease_RequiresCurrentAttemptAndActiveScanJob()
     {
         var handoff = await InsertPendingHandoffAsync();
@@ -295,6 +322,87 @@ public sealed class EfMoveScanHandoffStoreTests : BaseTests
         var persisted = await db.MoveScanHandoffs.AsNoTracking()
             .SingleAsync(candidate => candidate.Id == handoff.Id);
         Assert.Equal(now.AddMinutes(6).UtcDateTime, persisted.LeaseExpiresAt);
+    }
+
+    [Fact]
+    public async Task RenewAttemptLease_ExpiredClaimCannotBeRevived()
+    {
+        var handoff = await InsertPendingHandoffAsync();
+        var store = _provider.GetRequiredService<IMoveScanHandoffStore>();
+        var now = DateTimeOffset.UtcNow;
+        var claim = await store.TryClaimAsync(
+            handoff.Id,
+            "expired-heartbeat-worker",
+            now,
+            now.AddSeconds(1));
+        Assert.NotNull(claim);
+        var scanJobId = Guid.NewGuid();
+        Assert.True(await store.MarkDispatchedAsync(
+            claim!.HandoffId,
+            claim.LeaseOwner,
+            claim.LeaseGeneration,
+            scanJobId,
+            now));
+
+        var renewal = await store.RenewAttemptLeaseAsync(
+            claim.HandoffId,
+            claim.AttemptGeneration,
+            scanJobId,
+            now.AddSeconds(2),
+            now.AddMinutes(5));
+
+        Assert.Equal(MoveScanLeaseRenewalOutcome.Superseded, renewal.Outcome);
+        await using var db = await GetFactory().CreateDbContextAsync();
+        var persisted = await db.MoveScanHandoffs.AsNoTracking()
+            .SingleAsync(candidate => candidate.Id == handoff.Id);
+        Assert.Equal(now.AddSeconds(1).UtcDateTime, persisted.LeaseExpiresAt);
+    }
+
+    [Fact]
+    public async Task CompleteAttempt_AfterLeaseExpiryIsSupersededAndRemainsReclaimable()
+    {
+        var handoff = await InsertPendingHandoffAsync();
+        var store = _provider.GetRequiredService<IMoveScanHandoffStore>();
+        var now = DateTimeOffset.UtcNow;
+        var claim = await store.TryClaimAsync(
+            handoff.Id,
+            "expired-completion-worker",
+            now,
+            now.AddSeconds(1));
+        Assert.NotNull(claim);
+        var scanJobId = Guid.NewGuid();
+        Assert.True(await store.MarkDispatchedAsync(
+            claim!.HandoffId,
+            claim.LeaseOwner,
+            claim.LeaseGeneration,
+            scanJobId,
+            now));
+
+        var completion = await store.CompleteAttemptAsync(
+            claim.HandoffId,
+            claim.AttemptGeneration,
+            scanJobId,
+            MoveScanTerminalOutcome.Succeeded,
+            error: null,
+            found: 1,
+            created: 1,
+            scanPath: handoff.TargetPath,
+            now.AddSeconds(2));
+
+        Assert.Equal(MoveScanAttemptOutcome.Superseded, completion.Outcome);
+        await using var db = await GetFactory().CreateDbContextAsync();
+        var persisted = await db.MoveScanHandoffs.AsNoTracking()
+            .SingleAsync(candidate => candidate.Id == handoff.Id);
+        Assert.Equal(MoveScanHandoffStatus.Claimed, persisted.Status);
+        Assert.Equal(scanJobId, persisted.ActiveScanJobId);
+        Assert.Equal(now.AddSeconds(1).UtcDateTime, persisted.LeaseExpiresAt);
+        Assert.Empty(await db.History.AsNoTracking()
+            .Where(history => history.IdempotencyKey ==
+                $"handoff:{handoff.Id:N}:attempt:{claim.AttemptGeneration}:terminal")
+            .ToListAsync());
+        Assert.Contains(
+            handoff.Id,
+            await store.GetClaimableIdsAsync(now.AddSeconds(2), 10));
     }
 
     [Fact]
@@ -389,6 +497,74 @@ public sealed class EfMoveScanHandoffStoreTests : BaseTests
         var eventEntry = Assert.Single(terminal);
         Assert.Equal(HistoryEvents.ScanCompleted, eventEntry.EventType);
         Assert.Equal(HistoryOutcome.Succeeded, eventEntry.Outcome);
+    }
+
+    [Fact]
+    public async Task TryClaim_MissingTargetIdentityFailsHandoffInsteadOfHotLoopingPending()
+    {
+        var handoff = await InsertPendingHandoffAsync();
+        await using (var db = await GetFactory().CreateDbContextAsync())
+        {
+            var move = await db.MoveJobs.SingleAsync(candidate => candidate.Id == handoff.MoveJobId);
+            move.TargetPathSyntax = null;
+            move.TargetCaseSensitivity = null;
+            move.TargetCaseSensitivityMode = null;
+            move.TargetIdentityBoundary = null;
+            await db.SaveChangesAsync();
+        }
+        var store = _provider.GetRequiredService<IMoveScanHandoffStore>();
+        var now = DateTimeOffset.UtcNow;
+
+        var claim = await store.TryClaimAsync(
+            handoff.Id,
+            "invalid-identity-worker",
+            now,
+            now.AddMinutes(5));
+
+        Assert.Null(claim);
+        await using var verification = await GetFactory().CreateDbContextAsync();
+        var persisted = await verification.MoveScanHandoffs.AsNoTracking()
+            .SingleAsync(candidate => candidate.Id == handoff.Id);
+        Assert.Equal(MoveScanHandoffStatus.Failed, persisted.Status);
+        Assert.Null(persisted.LeaseOwner);
+        Assert.Null(persisted.LeaseExpiresAt);
+        Assert.Contains("no authoritative target", persisted.LastError, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(
+            handoff.Id,
+            await store.GetClaimableIdsAsync(now.AddMinutes(10), 10));
+    }
+
+    [Fact]
+    public async Task TryClaim_InvalidTargetIdentityBoundaryFailsHandoffInsteadOfLeavingClaimed()
+    {
+        var handoff = await InsertPendingHandoffAsync();
+        await using (var db = await GetFactory().CreateDbContextAsync())
+        {
+            var move = await db.MoveJobs.SingleAsync(candidate => candidate.Id == handoff.MoveJobId);
+            move.TargetIdentityBoundary = FileSystemPathIdentity.ResolveNativeAbsolutePath(
+                Path.Join(Path.GetTempPath(), $"unrelated-handoff-boundary-{Guid.NewGuid():N}"));
+            await db.SaveChangesAsync();
+        }
+        var store = _provider.GetRequiredService<IMoveScanHandoffStore>();
+        var now = DateTimeOffset.UtcNow;
+
+        var claim = await store.TryClaimAsync(
+            handoff.Id,
+            "invalid-boundary-worker",
+            now,
+            now.AddMinutes(5));
+
+        Assert.Null(claim);
+        await using var verification = await GetFactory().CreateDbContextAsync();
+        var persisted = await verification.MoveScanHandoffs.AsNoTracking()
+            .SingleAsync(candidate => candidate.Id == handoff.Id);
+        Assert.Equal(MoveScanHandoffStatus.Failed, persisted.Status);
+        Assert.Null(persisted.LeaseOwner);
+        Assert.Null(persisted.LeaseExpiresAt);
+        Assert.Contains("identity is invalid", persisted.LastError, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(
+            handoff.Id,
+            await store.GetClaimableIdsAsync(now.AddMinutes(10), 10));
     }
 
     [Fact]

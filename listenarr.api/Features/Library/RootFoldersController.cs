@@ -25,6 +25,7 @@ namespace Listenarr.Api.Features.Library
         int Id,
         string Name,
         string Path,
+        string? PathSyntax,
         bool IsDefault,
         string CaseSensitivityMode,
         string ResolvedCaseSensitivity,
@@ -388,6 +389,11 @@ namespace Listenarr.Api.Features.Library
                 root.Id,
                 root.Name,
                 root.Path,
+                FileSystemPathIdentity.TryDetectAbsoluteSyntaxForHost(
+                    root.Path,
+                    out var pathSyntax)
+                        ? pathSyntax.ToString()
+                        : null,
                 root.IsDefault,
                 root.CaseSensitivityMode.ToString(),
                 root.ResolvedCaseSensitivity.ToString(),

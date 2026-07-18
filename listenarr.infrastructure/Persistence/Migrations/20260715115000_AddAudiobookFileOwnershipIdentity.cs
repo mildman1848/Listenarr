@@ -1,12 +1,9 @@
-using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Migrations;
 
 #nullable disable
 
 namespace Listenarr.Infrastructure.Persistence.Migrations
 {
-    [DbContext(typeof(ListenArrDbContext))]
-    [Migration("20260715115000_AddAudiobookFileOwnershipIdentity")]
     public partial class AddAudiobookFileOwnershipIdentity : Migration
     {
         protected override void Up(MigrationBuilder migrationBuilder)

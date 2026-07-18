@@ -27,6 +27,8 @@ import {
   hasControlCharacter,
   hasOuterWhitespace,
   hasPathSegmentOuterWhitespace,
+  hasWindowsDriveRelativePath,
+  hasIncompleteWindowsUncAuthority,
   hasWindowsTrailingSpaceOrPeriodSegment,
   hasWindowsInvalidCharacter,
   pathsOverlap,
@@ -36,6 +38,7 @@ import {
   validateLibraryDestinationPath,
   stripRootPrefix,
   detectPathKind,
+  joinPaths,
 } from '@/utils/path'
 
 describe('path utils', () => {
@@ -44,27 +47,78 @@ describe('path utils', () => {
     expect(toForward(null)).toBe('')
   })
 
-  it('trimTrailingSlash removes trailing slashes', () => {
+  it('trimTrailingSlash removes trailing slashes without collapsing drive roots', () => {
     expect(trimTrailingSlash('C:/path/')).toBe('C:/path')
     expect(trimTrailingSlash('C:\\path\\')).toBe('C:\\path')
     expect(trimTrailingSlash('no-slash')).toBe('no-slash')
     expect(trimTrailingSlash('/')).toBe('/')
     expect(trimTrailingSlash('C:\\')).toBe('C:\\')
+    expect(trimTrailingSlash('C:\\\\')).toBe('C:\\')
+    expect(trimTrailingSlash('C:////')).toBe('C:/')
   })
 
   it('normalizeForCompare lowercases and trims', () => {
     expect(normalizeForCompare('C:\\Temp\\Dir\\')).toBe('c:/temp/dir')
   })
 
-  it('isAbsolutePath detects absolute paths', () => {
+  it('isAbsolutePath respects explicit filesystem context', () => {
     expect(isAbsolutePath('C:\\some\\path')).toBe(true)
     expect(isAbsolutePath('/unix/path')).toBe(true)
+    expect(isAbsolutePath('\\library', 'windows')).toBe(false)
+    expect(isAbsolutePath('\\', 'windows')).toBe(true)
+    expect(isAbsolutePath('\\library', 'unix')).toBe(false)
+    expect(isAbsolutePath('C:\\library', 'unix')).toBe(false)
+    expect(isAbsolutePath('/library', 'windows')).toBe(false)
+    expect(isAbsolutePath('/', 'windows')).toBe(true)
     expect(isAbsolutePath('relative/path')).toBe(false)
+  })
+
+  it('classifies and rejects Windows drive-relative paths', () => {
+    expect(detectPathKind('C:')).toBe('windows')
+    expect(detectPathKind('C:relative')).toBe('windows')
+    expect(hasWindowsDriveRelativePath('C:')).toBe(true)
+    expect(hasWindowsDriveRelativePath('C:relative')).toBe(true)
+    expect(hasWindowsDriveRelativePath('C:\\')).toBe(false)
+    expect(validateLibraryDestinationPath('C:')).toContain('separator after the drive letter')
+    expect(validateLibraryDestinationPath('C:relative')).toContain(
+      'separator after the drive letter',
+    )
+    expect(validateLibraryDestinationPath('C:\\')).toBe(null)
+    expect(validateLibraryDestinationPath('C:/')).toBe(null)
+    expect(validateLibraryDestinationPath('Books', { requireAbsolute: true })).toContain(
+      'absolute directory path',
+    )
+    expect(
+      validateLibraryDestinationPath('\\library', {
+        pathKind: 'unix',
+        requireAbsolute: true,
+      }),
+    ).toContain('absolute directory path')
+    expect(validateLibraryDestinationPath('Books')).toBe(null)
+    expect(normalizeForCompare('C:\\\\', 'windows')).toBe('c:/')
+    expect(stripRootPrefix('C:\\', 'C:\\Books', 'Insensitive', 'windows')).toBe('Books')
+    expect(joinPaths('C:\\\\', 'Books', 'windows')).toBe('C:\\Books')
   })
 
   it('classifies absolute Unix paths with backslashes as Unix paths', () => {
     expect(detectPathKind('/books/Author\\Name')).toBe('unix')
     expect(normalizeForCompare('/books/Author\\Name')).toBe('/books/Author\\Name')
+  })
+
+  it('requires context for double-slash absolute paths', () => {
+    expect(detectPathKind('//server/share/Books')).toBe('unknown')
+    expect(detectPathKind('//server/share/Books', 'windows')).toBe('windows')
+    expect(detectPathKind('//server/share/Books', 'unix')).toBe('unix')
+    expect(hasEmptyMiddlePathSegment('//server/share/Books')).toBe(false)
+    expect(hasEmptyMiddlePathSegment('//server/share/Books', 'windows')).toBe(false)
+    expect(hasEmptyMiddlePathSegment('//server/share/Books', 'unix')).toBe(false)
+    expect(validateLibraryDestinationPath('//server/share/Books/Author')).toBe(null)
+    expect(
+      validateLibraryDestinationPath('//server/share/Books/CON', { pathKind: 'windows' }),
+    ).toContain('reserved Windows')
+    expect(validateLibraryDestinationPath('//server/share/Books/CON', { pathKind: 'unix' })).toBe(
+      null,
+    )
   })
 
   it('detects exact relative path segments without blocking periods in names', () => {
@@ -95,6 +149,38 @@ describe('path utils', () => {
     expect(hasEmptyMiddlePathSegment('\\\\server\\share\\\\Audiobooks')).toBe(true)
   })
 
+  it('validates Windows UNC authority structure', () => {
+    expect(hasIncompleteWindowsUncAuthority('\\\\server', 'windows')).toBe(true)
+    expect(hasIncompleteWindowsUncAuthority('\\\\server\\', 'windows')).toBe(true)
+    expect(hasIncompleteWindowsUncAuthority('\\\\server\\share', 'windows')).toBe(false)
+    expect(hasIncompleteWindowsUncAuthority('//server/share', 'windows')).toBe(false)
+    expect(hasIncompleteWindowsUncAuthority('//server', 'unix')).toBe(false)
+
+    expect(
+      validateLibraryDestinationPath('\\\\server', {
+        pathKind: 'windows',
+        requireAbsolute: true,
+      }),
+    ).toContain('server and share')
+    expect(
+      validateLibraryDestinationPath('\\\\server\\share', {
+        pathKind: 'windows',
+        requireAbsolute: true,
+      }),
+    ).toBe(null)
+    expect(
+      validateLibraryDestinationPath('\\\\server\\NUL\\Books', {
+        pathKind: 'windows',
+      }),
+    ).toContain('reserved Windows')
+    expect(
+      validateLibraryDestinationPath('\\\\NUL\\share\\Books', {
+        pathKind: 'windows',
+      }),
+    ).toContain('reserved Windows')
+    expect(validateLibraryDestinationPath('//server', { pathKind: 'unix' })).toBe(null)
+  })
+
   it('detects control characters and segment whitespace', () => {
     expect(hasControlCharacter('D:\\Books\\Title\n')).toBe(true)
     expect(hasControlCharacter('D:\\Books\\Title')).toBe(false)
@@ -121,6 +207,8 @@ describe('path utils', () => {
     expect(hasWindowsReservedDeviceSegment('D:\\Books\\CON')).toBe(true)
     expect(hasWindowsReservedDeviceSegment('D:\\Books\\NUL.txt')).toBe(true)
     expect(hasWindowsReservedDeviceSegment('D:\\Books\\COM1.folder')).toBe(true)
+    expect(hasWindowsReservedDeviceSegment('\\\\server\\NUL\\Books', 'windows')).toBe(true)
+    expect(hasWindowsReservedDeviceSegment('\\\\NUL\\share\\Books', 'windows')).toBe(true)
     expect(hasWindowsReservedDeviceSegment('D:\\Books\\Concert')).toBe(false)
   })
 
@@ -190,27 +278,40 @@ describe('path utils', () => {
     ).toBe(null)
   })
 
-  it('stripRootPrefix removes root prefix when present', () => {
+  it('stripRootPrefix removes only a complete root boundary', () => {
     const root = 'C:\\temp\\Isaac Asimov\\Foundation'
     const full = 'C:\\temp\\Isaac Asimov\\Foundation\\Prelude to Foundation'
-    const rel = stripRootPrefix(root, full)
-    expect(rel).toBe('Prelude to Foundation')
+    expect(stripRootPrefix(root, full)).toBe('Prelude to Foundation')
+    expect(stripRootPrefix(root, root)).toBe('')
 
-    // preserves backslash style when root uses backslashes
-    const root2 = 'C:/temp/Isaac Asimov/Foundation'
-    const full2 = 'C:/temp/Isaac Asimov/Foundation/Prelude to Foundation'
-    const rel2 = stripRootPrefix(root2, full2)
-    expect(rel2).toBe('Prelude to Foundation')
+    const forwardRoot = 'C:/temp/Isaac Asimov/Foundation'
+    const forwardFull = 'C:/temp/Isaac Asimov/Foundation/Prelude to Foundation'
+    expect(stripRootPrefix(forwardRoot, forwardFull)).toBe('Prelude to Foundation')
 
-    // returns null when no match
     expect(stripRootPrefix('C:/root/other', full)).toBe(null)
     expect(stripRootPrefix('C:/root/books', 'C:/root/bookshelf/Title')).toBe(null)
     expect(stripRootPrefix('C:/root/books/Extra', 'C:/other/root/bookshelf/Title')).toBe(null)
-
-    // matches using last segments
-    const root3 = 'C:/temp/Isaac Asimov/Foundation/Extra'
-    const full3 = 'C:/some/prefix/isaac asimov/foundation/Prelude'
-    const rel3 = stripRootPrefix(root3, full3)
-    expect(rel3).toBe('Prelude')
+    expect(
+      stripRootPrefix(
+        'C:/temp/Isaac Asimov/Foundation/Extra',
+        'C:/some/prefix/isaac asimov/foundation/Prelude',
+      ),
+    ).toBe(null)
+    expect(stripRootPrefix('C:/Books', 'D:/Books/Title')).toBe(null)
+    expect(stripRootPrefix('C:/Books', 'c:/books/Title', 'Sensitive')).toBe(null)
+    expect(stripRootPrefix('C:/Books', 'c:/books/Title', 'Insensitive')).toBe('Title')
+    expect(stripRootPrefix('\\\\server\\share\\Books', '//server/share/Books/Title')).toBe('Title')
+    expect(stripRootPrefix('\\\\server\\share\\Books', '//server/other/Books/Title')).toBe(null)
+    expect(
+      stripRootPrefix(
+        '//server/share/Books',
+        '//server/share/Books/Title',
+        'Insensitive',
+        'windows',
+      ),
+    ).toBe('Title')
+    expect(stripRootPrefix('//srv/library', '//srv/library/Title', 'Sensitive', 'unix')).toBe(
+      'Title',
+    )
   })
 })

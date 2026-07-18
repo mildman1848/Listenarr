@@ -109,6 +109,7 @@ public partial class ScanQueueService
             && string.Equals(candidate.CorrelationId, job.CorrelationId, StringComparison.Ordinal)
             && candidate.MoveScanHandoffId == job.MoveScanHandoffId
             && candidate.MoveScanAttemptGeneration == job.MoveScanAttemptGeneration
+            && PathsMatch(candidate, job)
             && IsActive(candidate.Status));
 
     private static bool PathsMatch(ScanJob left, ScanJob right)
@@ -118,18 +119,23 @@ public partial class ScanQueueService
             return left.Path == null && right.Path == null;
         }
 
+        if (left.PathIdentity.HasValue && right.PathIdentity.HasValue)
+        {
+            return FileSystemPathIdentity.AreEquivalentEndpoints(
+                left.Path,
+                left.PathIdentity.Value,
+                right.Path,
+                right.PathIdentity.Value);
+        }
+
         var identity = right.PathIdentity ?? left.PathIdentity;
         if (!identity.HasValue)
         {
             return string.Equals(left.Path, right.Path, StringComparison.Ordinal);
         }
 
-        if (left.PathIdentity.HasValue
-            && left.PathIdentity.Value.Syntax != identity.Value.Syntax)
-        {
-            return false;
-        }
-
+        identity.Value.ValidateForPath(
+            right.PathIdentity.HasValue ? right.Path : left.Path);
         return FileSystemPathIdentity.AreEquivalent(
             left.Path,
             right.Path,
@@ -198,7 +204,14 @@ public partial class ScanQueueService
 
         public bool Matches(MoveScanHandoffClaim other) =>
             Claim.HandoffId == other.HandoffId
+            && Claim.MoveJobId == other.MoveJobId
+            && Claim.AudiobookId == other.AudiobookId
             && Claim.AttemptGeneration == other.AttemptGeneration
-            && Claim.LeaseGeneration == other.LeaseGeneration;
+            && Claim.LeaseGeneration == other.LeaseGeneration
+            && FileSystemPathIdentity.AreEquivalentEndpoints(
+                Claim.TargetPath,
+                Claim.TargetIdentity,
+                other.TargetPath,
+                other.TargetIdentity);
     }
 }

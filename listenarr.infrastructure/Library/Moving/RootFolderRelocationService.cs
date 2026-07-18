@@ -320,7 +320,8 @@ public sealed partial class RootFolderRelocationService(
             }
 
             await db.SaveChangesAsync(cancellationToken);
-            await transaction.CommitAsync(cancellationToken);
+            cancellationToken.ThrowIfCancellationRequested();
+            await transaction.CommitAsync(CancellationToken.None);
             var metadataResult = new RootFolderPathChangeResult(
                 metadataRelocation?.Id,
                 root.Id,
@@ -413,7 +414,8 @@ public sealed partial class RootFolderRelocationService(
             await db.SaveChangesAsync(cancellationToken);
         }
 
-        await transaction.CommitAsync(cancellationToken);
+        cancellationToken.ThrowIfCancellationRequested();
+        await transaction.CommitAsync(CancellationToken.None);
         var result = Map(relocation, root.Path);
         return new StartOutcome(result, true);
     }

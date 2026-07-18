@@ -103,10 +103,11 @@ namespace Listenarr.Infrastructure.Library.Moving
         {
             if (string.IsNullOrWhiteSpace(source)
                 || !sourceSemantics.HasValue
-                || FileSystemPathIdentity.AreEquivalent(
+                || FileSystemPathIdentity.AreEquivalentEndpoints(
                     source,
+                    sourceSemantics.Value,
                     target,
-                    sourceSemantics.Value)
+                    targetSemantics)
                 || !HasFinalizedMoveEvidence(job, audiobook, target, targetSemantics)
                 || !AudiobookContentMoveService.CanAttemptFinalizedMoveVerification(
                     source,

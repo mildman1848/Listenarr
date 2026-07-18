@@ -209,19 +209,24 @@ namespace Listenarr.Application.Audiobooks.RootFolders
                     requestedSemantics);
                 try
                 {
-                    if (PathsAreEquivalentUnderEitherSemantics(existingRoot.Path, normalizedPath, requestedSemantics, existingSemantics))
+                    var boundaryConflict = FileSystemPathIdentity.EvaluateBoundaryConflict(
+                        normalizedPath,
+                        requestedSemantics,
+                        existingRoot.Path,
+                        existingSemantics);
+                    var conflictType = boundaryConflict switch
                     {
-                        return new RootFolderConflict(existingRoot, RootFolderConflictType.Duplicate);
-                    }
-
-                    if (PathIsInsideUnderEitherSemantics(normalizedPath, existingRoot.Path, requestedSemantics, existingSemantics))
+                        FileSystemPathBoundaryConflict.Equivalent => RootFolderConflictType.Duplicate,
+                        FileSystemPathBoundaryConflict.FirstInsideSecond =>
+                            RootFolderConflictType.RequestedRootIsNestedInsideExistingRoot,
+                        FileSystemPathBoundaryConflict.SecondInsideFirst =>
+                            RootFolderConflictType.ExistingRootIsNestedInsideRequestedRoot,
+                        FileSystemPathBoundaryConflict.Ambiguous => RootFolderConflictType.Ambiguous,
+                        _ => (RootFolderConflictType?)null
+                    };
+                    if (conflictType.HasValue)
                     {
-                        return new RootFolderConflict(existingRoot, RootFolderConflictType.RequestedRootIsNestedInsideExistingRoot);
-                    }
-
-                    if (PathIsInsideUnderEitherSemantics(existingRoot.Path, normalizedPath, requestedSemantics, existingSemantics))
-                    {
-                        return new RootFolderConflict(existingRoot, RootFolderConflictType.ExistingRootIsNestedInsideRequestedRoot);
+                        return new RootFolderConflict(existingRoot, conflictType.Value);
                     }
                 }
                 catch (ArgumentException exception)
@@ -316,22 +321,6 @@ namespace Listenarr.Application.Audiobooks.RootFolders
             }
         }
 
-        private static bool PathsAreEquivalentUnderEitherSemantics(
-            string left,
-            string right,
-            FileSystemPathSemantics requestedSemantics,
-            FileSystemPathSemantics existingSemantics) =>
-            FileSystemPathIdentity.AreEquivalent(left, right, requestedSemantics)
-            || FileSystemPathIdentity.AreEquivalent(left, right, existingSemantics);
-
-        private static bool PathIsInsideUnderEitherSemantics(
-            string candidate,
-            string root,
-            FileSystemPathSemantics requestedSemantics,
-            FileSystemPathSemantics existingSemantics) =>
-            FileSystemPathIdentity.IsSameOrInside(candidate, root, requestedSemantics)
-            || FileSystemPathIdentity.IsSameOrInside(candidate, root, existingSemantics);
-
         private static string BuildRootFolderConflictMessage(RootFolderConflict conflict)
         {
             return conflict.Type switch
@@ -341,6 +330,8 @@ namespace Listenarr.Application.Audiobooks.RootFolders
                     $"Root folder cannot be nested inside existing root '{conflict.Root.Name}'.",
                 RootFolderConflictType.ExistingRootIsNestedInsideRequestedRoot =>
                     $"Root folder cannot contain existing root '{conflict.Root.Name}'.",
+                RootFolderConflictType.Ambiguous =>
+                    $"Root folder path has an ambiguous filesystem overlap with existing root '{conflict.Root.Name}'.",
                 _ => "Root folder path conflicts with an existing root folder."
             };
         }
@@ -351,7 +342,8 @@ namespace Listenarr.Application.Audiobooks.RootFolders
         {
             Duplicate,
             RequestedRootIsNestedInsideExistingRoot,
-            ExistingRootIsNestedInsideRequestedRoot
+            ExistingRootIsNestedInsideRequestedRoot,
+            Ambiguous
         }
     }
 }

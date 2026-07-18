@@ -87,7 +87,9 @@ namespace Listenarr.Tests.Features.Api.Features.Downloads
             IFileMover fileMover = null,
             IAudiobookFileService audiobookFileService = null,
             IReadOnlyList<RootFolder> rootFolders = null,
-            IFileSystemSemanticsResolver semanticsResolver = null)
+            IFileSystemSemanticsResolver semanticsResolver = null,
+            IFilesystemMutationCoordinator filesystemMutationCoordinator = null,
+            ILibraryDirectoryOwnershipStore directoryOwnershipStore = null)
         {
             repoMock ??= GetRepoMock(book);
             scanMock ??= GetScanMock();
@@ -135,6 +137,21 @@ namespace Listenarr.Tests.Features.Api.Features.Downloads
             rootFolderMock.Setup(r => r.GetAllAsync()).ReturnsAsync(
                 rootFolders?.ToList() ?? []);
             semanticsResolver ??= new FileSystemSemanticsResolver();
+            if (directoryOwnershipStore == null)
+            {
+                var directoryOwnershipStoreMock = new Mock<ILibraryDirectoryOwnershipStore>();
+                directoryOwnershipStoreMock
+                    .Setup(store => store.EnsureCreatedHierarchyAsync(
+                        It.IsAny<string>(),
+                        It.IsAny<string>(),
+                        It.IsAny<FileSystemPathSemantics>(),
+                        It.IsAny<string>(),
+                        It.IsAny<Guid?>(),
+                        It.IsAny<int?>(),
+                        It.IsAny<CancellationToken>()))
+                    .ReturnsAsync([]);
+                directoryOwnershipStore = directoryOwnershipStoreMock.Object;
+            }
 
             return new ManualImportController(
                 Mock.Of<Microsoft.Extensions.Logging.ILogger<ManualImportController>>(),
@@ -148,9 +165,130 @@ namespace Listenarr.Tests.Features.Api.Features.Downloads
                 audiobookFileService,
                 new LocalFileSystem(),
                 semanticsResolver,
-                new FilesystemMutationCoordinator(),
-                _operationCoordinator
+                filesystemMutationCoordinator ?? new FilesystemMutationCoordinator(),
+                _operationCoordinator,
+                directoryOwnershipStore
             );
+        }
+
+        [Fact]
+        public async Task Start_CanceledWhileWaitingForFilesystemMutation_DoesNotImport()
+        {
+            var basePath = CreateTempDirectory("listenarr-manual-canceled-destination");
+            var sourceDirectory = CreateTempDirectory("listenarr-manual-canceled-source");
+            var sourceFile = Path.Join(sourceDirectory, "chapter.mp3");
+            await File.WriteAllTextAsync(sourceFile, "audio");
+            var book = new Audiobook
+            {
+                Id = 41,
+                Title = "Canceled Manual Import",
+                BasePath = basePath
+            };
+            var mutationCoordinator = new FilesystemMutationCoordinator();
+            var entered = new TaskCompletionSource(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+            var release = new TaskCompletionSource(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+            var holder = mutationCoordinator.ExecuteExclusiveAsync(async _ =>
+            {
+                entered.SetResult();
+                await release.Task;
+            });
+            await entered.Task;
+            var controller = GetController(
+                book,
+                new ApplicationSettings { OutputPath = basePath },
+                filesystemMutationCoordinator: mutationCoordinator);
+            var request = new ManualImportRequestDto
+            {
+                Path = sourceDirectory,
+                Mode = "interactive",
+                Action = FileAction.Copy,
+                Items =
+                [
+                    new ManualImportItemDto
+                    {
+                        FullPath = sourceFile,
+                        MatchedAudiobookId = book.Id
+                    }
+                ]
+            };
+            using var cancellation = new CancellationTokenSource();
+            var import = controller.Start(request, cancellation.Token);
+
+            cancellation.Cancel();
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => import);
+
+            Assert.Empty(Directory.EnumerateFileSystemEntries(basePath));
+            Assert.True(File.Exists(sourceFile));
+            release.SetResult();
+            await holder;
+        }
+
+        [Fact]
+        public async Task Start_CanceledAfterOwnershipPreparation_DoesNotMutateFile()
+        {
+            var basePath = CreateTempDirectory("listenarr-manual-canceled-after-ownership-destination");
+            var sourceDirectory = CreateTempDirectory("listenarr-manual-canceled-after-ownership-source");
+            var sourceFile = Path.Join(sourceDirectory, "chapter.mp3");
+            await File.WriteAllTextAsync(sourceFile, "audio");
+            var book = new Audiobook
+            {
+                Id = 45,
+                Title = "Canceled Before File Mutation",
+                BasePath = basePath
+            };
+            using var cancellation = new CancellationTokenSource();
+            var directoryOwnershipStore = new Mock<ILibraryDirectoryOwnershipStore>(MockBehavior.Strict);
+            directoryOwnershipStore
+                .Setup(store => store.EnsureCreatedHierarchyAsync(
+                    It.IsAny<string>(),
+                    It.IsAny<string>(),
+                    It.IsAny<FileSystemPathSemantics>(),
+                    It.IsAny<string>(),
+                    It.IsAny<Guid?>(),
+                    It.IsAny<int?>(),
+                    It.IsAny<CancellationToken>()))
+                .Callback(() => cancellation.Cancel())
+                .ReturnsAsync(Array.Empty<LibraryDirectoryOwnership>());
+            var fileMover = new Mock<IFileMover>(MockBehavior.Strict);
+            var controller = GetController(
+                book,
+                new ApplicationSettings
+                {
+                    OutputPath = basePath,
+                    FolderNamingPattern = "",
+                    FileNamingPattern = "{Title}"
+                },
+                fileMover: fileMover.Object,
+                directoryOwnershipStore: directoryOwnershipStore.Object);
+            var request = new ManualImportRequestDto
+            {
+                Path = sourceDirectory,
+                Mode = "interactive",
+                Action = FileAction.Copy,
+                Items =
+                [
+                    new ManualImportItemDto
+                    {
+                        FullPath = sourceFile,
+                        MatchedAudiobookId = book.Id
+                    }
+                ]
+            };
+
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+                controller.Start(request, cancellation.Token));
+
+            Assert.True(File.Exists(sourceFile));
+            Assert.Empty(Directory.GetFiles(basePath, "*", SearchOption.AllDirectories));
+            fileMover.Verify(
+                mover => mover.PerformActionOn(
+                    It.IsAny<FileAction>(),
+                    It.IsAny<string>(),
+                    It.IsAny<string>()),
+                Times.Never);
+            directoryOwnershipStore.VerifyAll();
         }
 
         [Fact]
@@ -557,6 +695,70 @@ namespace Listenarr.Tests.Features.Api.Features.Downloads
             Assert.True(File.Exists(Path.Join(destinationRoot, "Companion Book.mp3")));
             Assert.True(File.Exists(Path.Join(destinationRoot, "cover.jpg")));
             Assert.False(File.Exists(Path.Join(destinationRoot, "Different Book.mp3")));
+        }
+
+        [Fact]
+        public async Task InteractiveManualImport_RequestCancelledAfterFileMutationStillQueuesFocusedScan()
+        {
+            var basePath = CreateTempDirectory("listenarr-manual-post-mutation-cancel-dst");
+            var srcDir = CreateTempDirectory("listenarr-manual-post-mutation-cancel-src");
+            var source = Path.Join(srcDir, "book.mp3");
+            await File.WriteAllTextAsync(source, "audio");
+            var book = new Audiobook
+            {
+                Id = 500,
+                Title = "Post Mutation Cancellation",
+                BasePath = basePath
+            };
+            using var cancellation = new CancellationTokenSource();
+            var fileMover = new Mock<IFileMover>();
+            fileMover.Setup(mover => mover.PerformActionOn(
+                    FileAction.Copy,
+                    source,
+                    It.IsAny<string>()))
+                .Returns<FileAction, string, string?>((_, sourcePath, destination) =>
+                {
+                    Assert.NotNull(destination);
+                    Directory.CreateDirectory(Path.GetDirectoryName(destination!)!);
+                    File.Copy(sourcePath, destination!, overwrite: false);
+                    cancellation.Cancel();
+                    return Task.FromResult(true);
+                });
+            var scanMock = GetScanMock();
+            var controller = GetController(
+                book,
+                new ApplicationSettings
+                {
+                    OutputPath = basePath,
+                    FolderNamingPattern = "",
+                    FileNamingPattern = "{Title}"
+                },
+                scanMock: scanMock,
+                fileMover: fileMover.Object);
+            var request = new ManualImportRequestDto
+            {
+                Path = srcDir,
+                Mode = "interactive",
+                Action = FileAction.Copy,
+                Items =
+                [
+                    new ManualImportItemDto
+                    {
+                        FullPath = source,
+                        MatchedAudiobookId = book.Id
+                    }
+                ]
+            };
+
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+                controller.Start(request, cancellation.Token));
+
+            Assert.True(File.Exists(Path.Join(
+                basePath,
+                "Post Mutation Cancellation.mp3")));
+            scanMock.Verify(service => service.EnqueueScanAsync(
+                It.Is<Audiobook>(candidate => candidate.Id == book.Id),
+                basePath), Times.Once);
         }
 
         [Fact]

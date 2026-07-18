@@ -151,13 +151,6 @@ public sealed partial class RootFolderRelocationService
         return (affected, invalidStoredBasePaths);
     }
 
-    private static bool BoundariesOverlap(
-        string first,
-        string second,
-        FileSystemPathSemantics semantics) =>
-        FileSystemPathIdentity.IsSameOrInside(first, second, semantics)
-        || FileSystemPathIdentity.IsSameOrInside(second, first, semantics);
-
     private static bool PathTouchesBoundary(
         string? path,
         string boundaryPath,
@@ -179,14 +172,6 @@ public sealed partial class RootFolderRelocationService
         }
     }
 
-    private static bool BoundariesOverlapUnderEitherSemantics(
-        string first,
-        string second,
-        FileSystemPathSemantics requestedSemantics,
-        FileSystemPathSemantics existingSemantics) =>
-        BoundariesOverlap(first, second, requestedSemantics)
-        || BoundariesOverlap(first, second, existingSemantics);
-
     private static bool RootBoundaryConflictsWithTarget(
         RootFolder candidate,
         string targetPath,
@@ -199,11 +184,11 @@ public sealed partial class RootFolderRelocationService
         try
         {
             return candidate.PathIdentityKey == targetIdentityKey
-                || BoundariesOverlapUnderEitherSemantics(
+                || FileSystemPathIdentity.EvaluateBoundaryConflict(
                     targetPath,
-                    candidate.Path,
                     targetSemantics,
-                    candidateSemantics);
+                    candidate.Path,
+                    candidateSemantics) != FileSystemPathBoundaryConflict.None;
         }
         catch (ArgumentException)
         {
@@ -220,7 +205,11 @@ public sealed partial class RootFolderRelocationService
     {
         try
         {
-            if (BoundariesOverlap(targetPath, boundaryPath, targetSemantics))
+            if (FileSystemPathIdentity.EvaluateBoundaryConflict(
+                    targetPath,
+                    targetSemantics,
+                    boundaryPath,
+                    targetSemantics) != FileSystemPathBoundaryConflict.None)
             {
                 return true;
             }
@@ -244,7 +233,11 @@ public sealed partial class RootFolderRelocationService
         }
         if (boundaryResolution.State == PathIdentityState.Valid)
         {
-            return BoundariesOverlap(targetPath, boundaryPath, boundaryResolution.Semantics);
+            return FileSystemPathIdentity.EvaluateBoundaryConflict(
+                targetPath,
+                targetSemantics,
+                boundaryPath,
+                boundaryResolution.Semantics) != FileSystemPathBoundaryConflict.None;
         }
 
         // If an in-flight relocation boundary cannot be resolved, over-block
@@ -252,7 +245,11 @@ public sealed partial class RootFolderRelocationService
         var insensitiveTargetSemantics = new FileSystemPathSemantics(
             targetSemantics.Syntax,
             FileSystemCaseSensitivity.Insensitive);
-        return BoundariesOverlap(targetPath, boundaryPath, insensitiveTargetSemantics);
+        return FileSystemPathIdentity.EvaluateBoundaryConflict(
+            targetPath,
+            insensitiveTargetSemantics,
+            boundaryPath,
+            insensitiveTargetSemantics) != FileSystemPathBoundaryConflict.None;
     }
 
     private async Task FinalizeCompletedRelocationAsync(
@@ -447,10 +444,13 @@ public sealed partial class RootFolderRelocationService
                 result,
                 cancellationToken);
         }
-        catch (OperationCanceledException exception) when (!cancellationToken.IsCancellationRequested)
+        catch (OperationCanceledException exception)
         {
+            // The relocation state is already committed. Request or transport
+            // cancellation may suppress this best-effort publication, but it must
+            // not make the durable operation appear to have failed.
             System.Diagnostics.Trace.TraceWarning(
-                "Timed out broadcasting root relocation {0}: {1}",
+                "Canceled broadcasting root relocation {0}: {1}",
                 result.RelocationId,
                 exception.Message);
         }

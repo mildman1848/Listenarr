@@ -1393,7 +1393,7 @@ async function initializeForm(audiobook: Audiobook) {
     // Check if basePath starts with any configured root folder
     const matchingRoot = rootStore.folders
       .filter((folder) => {
-        const pathKind = detectPathKind(folder.path)
+        const pathKind = rootFolderPathKind(folder)
         const caseSensitivity = folder.resolvedCaseSensitivity ?? 'Unknown'
         return (
           pathsEqual(audiobook.basePath, folder.path, pathKind, caseSensitivity) ||
@@ -1458,6 +1458,7 @@ async function initializeForm(audiobook: Audiobook) {
         formData.value.basePath,
         chosenRoot,
         selectedDestinationCaseSensitivity(),
+        selectedDestinationPathKind(),
       )
     } else if (formData.value.basePath && !chosenRoot) {
       // No configured root — show the full base path so user can edit it
@@ -1514,7 +1515,21 @@ function resolveSelectedRootPath(): string | null {
   return rootPath.value || null
 }
 
+function rootFolderPathKind(folder: {
+  path: string
+  pathSyntax?: 'Windows' | 'Unix' | null
+}): PathKind {
+  if (folder.pathSyntax === 'Windows') return 'windows'
+  if (folder.pathSyntax === 'Unix') return 'unix'
+  return detectPathKind(folder.path)
+}
+
 function selectedDestinationPathKind(): PathKind {
+  if (selectedRootId.value && selectedRootId.value > 0) {
+    const folder = rootStore.folders.find((item) => item.id === selectedRootId.value)
+    if (folder) return rootFolderPathKind(folder)
+  }
+
   const root =
     resolveSelectedRootPath() || rootPath.value || baselineAudiobook.value?.basePath || ''
   return detectPathKind(root)
@@ -1586,11 +1601,12 @@ function deriveRelativeFromBase(
   base: string | null | undefined,
   root: string | null | undefined,
   caseSensitivity: PathCaseSensitivity = 'Unknown',
+  resolvedPathKind: PathKind = 'unknown',
 ): string {
   if (!base) return ''
   if (!root) return base
 
-  const pathKind = detectPathKind(root)
+  const pathKind = resolvedPathKind === 'unknown' ? detectPathKind(root) : resolvedPathKind
   const normBase = pathKind === 'windows' ? toForward(base) : base
   const normRoot = pathKind === 'windows' ? toForward(root) : root
   const rootWithSlash = normRoot.endsWith('/') ? normRoot : normRoot + '/'
@@ -1623,6 +1639,7 @@ function previewPath() {
         formData.value.basePath,
         chosenRoot,
         selectedDestinationCaseSensitivity(),
+        selectedDestinationPathKind(),
       )
     } else if (formData.value.basePath && !chosenRoot) {
       formData.value.relativePath = formData.value.basePath || ''
@@ -1674,42 +1691,26 @@ function finishEditingDestination() {
       return
     }
 
-    // If the relative contains the root segments, attempt to strip them before validating.
-    // Pasted absolute paths can otherwise look invalid while still being normalizable.
-    try {
-      const stripped = stripRootPrefix(chosenRoot, val)
-      if (stripped != null) formData.value.relativePath = stripped
-    } catch (err) {
-      logger.debug('Failed to strip root from relative input:', err)
-    }
-
-    const isAbsolute = isAbsolutePath(formData.value.relativePath || val || '')
-
-    // If user typed an absolute path or included the chosen root prefix, derive a relative path
-    const relOrVal = formData.value.relativePath || val || ''
-    if (
-      isAbsolute ||
-      (relOrVal &&
-        normalizeForCompare(
-          relOrVal,
-          detectPathKind(chosenRoot),
-          selectedDestinationCaseSensitivity(),
-        ).startsWith(
-          normalizeForCompare(
-            chosenRoot || '',
-            detectPathKind(chosenRoot),
-            selectedDestinationCaseSensitivity(),
-          ),
-        ))
-    ) {
-      formData.value.relativePath = deriveRelativeFromBase(
-        relOrVal || formData.value.basePath || '',
+    if (isAbsolutePath(val, selectedDestinationPathKind())) {
+      const stripped = stripRootPrefix(
         chosenRoot,
+        val,
         selectedDestinationCaseSensitivity(),
+        selectedDestinationPathKind(),
       )
+      if (stripped == null) {
+        toast.error(
+          'Invalid destination',
+          'An absolute destination must be inside the selected root folder.',
+        )
+        return
+      }
+
+      formData.value.relativePath = stripped
     } else {
-      // Keep the value as-is (user provided a relative path)
-      formData.value.relativePath = relOrVal
+      // Relative input is interpreted beneath the selected root without searching
+      // for matching directory names elsewhere in the value.
+      formData.value.relativePath = val
     }
 
     if (destinationPathValidationError.value) {

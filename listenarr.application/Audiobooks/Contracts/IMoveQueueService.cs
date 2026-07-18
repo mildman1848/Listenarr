@@ -55,7 +55,9 @@ namespace Listenarr.Application.Audiobooks.Contracts
             string? sourcePath = null,
             bool deleteEmptySource = true,
             string? sourceCleanupBoundary = null);
-        Task<Guid?> RequeueMoveAsync(Guid jobId);
+        Task<Guid?> RequeueMoveAsync(
+            Guid jobId,
+            CancellationToken cancellationToken = default);
         Task<int?> TryClaimJobAsync(Guid jobId, string leaseOwner, CancellationToken cancellationToken = default);
         Task<MoveHeartbeatOutcome> HeartbeatJobAsync(Guid jobId, string leaseOwner, int leaseGeneration, CancellationToken cancellationToken = default);
         Task RecoverActiveJobsAsync(CancellationToken cancellationToken = default);

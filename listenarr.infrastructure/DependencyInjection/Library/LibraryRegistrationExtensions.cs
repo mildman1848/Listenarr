@@ -26,6 +26,7 @@ internal static class LibraryRegistrationExtensions
         services.AddSingleton<IAudiobookUpdatePublisher, AudiobookUpdatePublisher>();
         services.AddSingleton<IRootFolderRelocationService, RootFolderRelocationService>();
         services.AddSingleton<IMoveCleanupBoundaryResolver, MoveCleanupBoundaryResolver>();
+        services.AddSingleton<ILibraryDirectoryOwnershipStore, EfLibraryDirectoryOwnershipStore>();
         services.AddSingleton<IMoveQueueService, MoveQueueService>();
         services.AddScoped<IAudiobookFilePathIdentityResolver, AudiobookFilePathIdentityResolver>();
         services.AddScoped<IAudiobookFileIdentityReconciler, AudiobookFileIdentityReconciler>();

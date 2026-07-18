@@ -122,23 +122,28 @@ public partial class AudiobookFileService
             return string.Empty;
         }
 
+        var nativeSyntax = OperatingSystem.IsWindows()
+            ? FileSystemPathSyntax.Windows
+            : FileSystemPathSyntax.Unix;
         if (FileSystemPathIdentity.TryDetectAbsoluteSyntax(
                 audiobook.FilePath,
-                out var absoluteSyntax))
+                nativeSyntax,
+                out _))
         {
-            if (!IsNativeSyntax(absoluteSyntax))
-            {
-                return string.Empty;
-            }
-
             return ResolveAbsolutePath(Path.GetDirectoryName(audiobook.FilePath));
+        }
+        if (FileSystemPathIdentity.TryDetectAbsoluteSyntax(
+                audiobook.FilePath,
+                out _))
+        {
+            return string.Empty;
         }
 
         if (string.IsNullOrWhiteSpace(audiobook.BasePath)
             || !FileSystemPathIdentity.TryDetectAbsoluteSyntax(
                 audiobook.BasePath,
+                nativeSyntax,
                 out var baseSyntax)
-            || !IsNativeSyntax(baseSyntax)
             || !FileSystemPathIdentity.TryResolveRelativePathWithinBase(
                 audiobook.BasePath,
                 audiobook.FilePath,
@@ -152,11 +157,6 @@ public partial class AudiobookFileService
 
         return ResolveAbsolutePath(Path.GetDirectoryName(absoluteFilePath));
     }
-
-    private static bool IsNativeSyntax(FileSystemPathSyntax syntax) =>
-        OperatingSystem.IsWindows()
-            ? syntax == FileSystemPathSyntax.Windows
-            : syntax == FileSystemPathSyntax.Unix;
 
     private sealed record AuthorizedClaimPath(
         string? Path,

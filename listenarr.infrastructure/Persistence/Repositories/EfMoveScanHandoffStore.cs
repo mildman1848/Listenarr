@@ -287,10 +287,10 @@ public sealed partial class EfMoveScanHandoffStore(
                 || !claimed.TargetCaseSensitivityMode.HasValue
                 || string.IsNullOrWhiteSpace(claimed.TargetIdentityBoundary))
             {
-                await ReleaseClaimAsync(
+                await FailUndispatchableClaimAsync(
                     claimed.Id,
-                    claimed.LeaseOwner!,
-                    claimed.LeaseGeneration,
+                    claimed.AttemptGeneration,
+                    claimed.TargetPath,
                     "The completed move has no authoritative target filesystem identity.",
                     now,
                     cancellationToken);
@@ -302,7 +302,22 @@ public sealed partial class EfMoveScanHandoffStore(
                 claimed.TargetCaseSensitivity.Value,
                 claimed.TargetCaseSensitivityMode.Value,
                 claimed.TargetIdentityBoundary);
-            targetIdentity.ValidateForPath(claimed.TargetPath);
+            try
+            {
+                targetIdentity.ValidateForPath(claimed.TargetPath);
+            }
+            catch (Exception exception) when (exception is
+                ArgumentException or InvalidOperationException or NotSupportedException or PathTooLongException)
+            {
+                await FailUndispatchableClaimAsync(
+                    claimed.Id,
+                    claimed.AttemptGeneration,
+                    claimed.TargetPath,
+                    $"The completed move target filesystem identity is invalid: {exception.Message}",
+                    now,
+                    cancellationToken);
+                return null;
+            }
             return new MoveScanHandoffClaim(
                 claimed.Id,
                 claimed.MoveJobId,
@@ -316,6 +331,32 @@ public sealed partial class EfMoveScanHandoffStore(
         catch (Exception exception) when (IsProviderFailure(exception))
         {
             throw new PersistenceException("Failed to claim a move scan handoff.", exception);
+        }
+    }
+
+    private async Task FailUndispatchableClaimAsync(
+        Guid handoffId,
+        int attemptGeneration,
+        string targetPath,
+        string error,
+        DateTimeOffset now,
+        CancellationToken cancellationToken)
+    {
+        var completion = await CompleteAttemptAsync(
+            handoffId,
+            attemptGeneration,
+            scanJobId: null,
+            MoveScanTerminalOutcome.Failed,
+            error,
+            found: 0,
+            created: 0,
+            scanPath: targetPath,
+            now,
+            cancellationToken);
+        if (completion.Outcome != MoveScanAttemptOutcome.Failed)
+        {
+            throw new InvalidOperationException(
+                "The undispatchable move scan handoff changed state before it could be failed safely.");
         }
     }
 

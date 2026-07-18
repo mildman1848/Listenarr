@@ -51,6 +51,33 @@ public sealed class FileSystemPathIdentityTests
             semantics));
     }
 
+    [Theory]
+    [InlineData(@"\\server\\share\Author\Book", @"\\server\share\Author\Book")]
+    [InlineData("//server//share/Author/Book", @"\\server\share\Author\Book")]
+    [InlineData(@"\\\server\share\Author\Book", @"\\server\share\Author\Book")]
+    public void WindowsIdentity_RepeatedUncSeparatorsDoNotCorruptShareOrRemainder(
+        string path,
+        string expected)
+    {
+        Assert.Equal(
+            expected,
+            FileSystemPathIdentity.Canonicalize(
+                path,
+                FileSystemPathSyntax.Windows));
+    }
+
+    [Theory]
+    [InlineData(@"\\server\..\Book")]
+    [InlineData(@"\\.\share\Book")]
+    public void WindowsIdentity_RejectsNavigationComponentsAsUncAuthority(
+        string path)
+    {
+        Assert.Throws<ArgumentException>(() =>
+            FileSystemPathIdentity.Canonicalize(
+                path,
+                FileSystemPathSyntax.Windows));
+    }
+
     [Fact]
     public void ResolveRelativePath_UnixBackslashRemainsInFilename()
     {
@@ -143,6 +170,41 @@ public sealed class FileSystemPathIdentityTests
     }
 
     [Fact]
+    public void EquivalentEndpoints_SemanticsOverloadUsesBothEndpointRules()
+    {
+        var sourceSemantics = new FileSystemPathSemantics(
+            FileSystemPathSyntax.Unix,
+            FileSystemCaseSensitivity.Sensitive);
+        var targetSemantics = new FileSystemPathSemantics(
+            FileSystemPathSyntax.Unix,
+            FileSystemCaseSensitivity.Insensitive);
+
+        Assert.True(FileSystemPathIdentity.AreEquivalentEndpoints(
+            "/library/Book",
+            sourceSemantics,
+            "/library/book/",
+            targetSemantics));
+    }
+
+    [Fact]
+    public void EquivalentEndpoints_SemanticsOverloadRejectsUnknownSensitivity()
+    {
+        var known = new FileSystemPathSemantics(
+            FileSystemPathSyntax.Unix,
+            FileSystemCaseSensitivity.Sensitive);
+        var unknown = new FileSystemPathSemantics(
+            FileSystemPathSyntax.Unix,
+            FileSystemCaseSensitivity.Unknown);
+
+        Assert.Throws<InvalidOperationException>(() =>
+            FileSystemPathIdentity.AreEquivalentEndpoints(
+                "/library/Book",
+                known,
+                "/library/Book",
+                unknown));
+    }
+
+    [Fact]
     public void EquivalentEndpoints_BothSensitiveIdentitiesPreserveCaseOnlyDifference()
     {
         var source = "/library/Book";
@@ -158,6 +220,91 @@ public sealed class FileSystemPathIdentityTests
             identity,
             target,
             identity));
+    }
+
+    [Theory]
+    [InlineData(
+        "/Library",
+        nameof(FileSystemCaseSensitivity.Sensitive),
+        "/library",
+        nameof(FileSystemCaseSensitivity.Insensitive),
+        nameof(FileSystemPathBoundaryConflict.Equivalent))]
+    [InlineData(
+        "/Library/Author",
+        nameof(FileSystemCaseSensitivity.Sensitive),
+        "/library",
+        nameof(FileSystemCaseSensitivity.Insensitive),
+        nameof(FileSystemPathBoundaryConflict.FirstInsideSecond))]
+    [InlineData(
+        "/Library",
+        nameof(FileSystemCaseSensitivity.Insensitive),
+        "/library/Author",
+        nameof(FileSystemCaseSensitivity.Sensitive),
+        nameof(FileSystemPathBoundaryConflict.SecondInsideFirst))]
+    [InlineData(
+        "/Library",
+        nameof(FileSystemCaseSensitivity.Sensitive),
+        "/library",
+        nameof(FileSystemCaseSensitivity.Sensitive),
+        nameof(FileSystemPathBoundaryConflict.None))]
+    public void BoundaryConflict_UsesBothEndpointSemantics(
+        string first,
+        string firstSensitivityName,
+        string second,
+        string secondSensitivityName,
+        string expectedName)
+    {
+        var firstSemantics = new FileSystemPathSemantics(
+            FileSystemPathSyntax.Unix,
+            Enum.Parse<FileSystemCaseSensitivity>(firstSensitivityName));
+        var secondSemantics = new FileSystemPathSemantics(
+            FileSystemPathSyntax.Unix,
+            Enum.Parse<FileSystemCaseSensitivity>(secondSensitivityName));
+
+        var conflict = FileSystemPathIdentity.EvaluateBoundaryConflict(
+            first,
+            firstSemantics,
+            second,
+            secondSemantics);
+
+        Assert.Equal(Enum.Parse<FileSystemPathBoundaryConflict>(expectedName), conflict);
+    }
+
+    [Fact]
+    public void BoundaryConflict_DifferentSyntaxesDoNotOverlap()
+    {
+        var windows = new FileSystemPathSemantics(
+            FileSystemPathSyntax.Windows,
+            FileSystemCaseSensitivity.Insensitive);
+        var unix = new FileSystemPathSemantics(
+            FileSystemPathSyntax.Unix,
+            FileSystemCaseSensitivity.Insensitive);
+
+        Assert.Equal(
+            FileSystemPathBoundaryConflict.None,
+            FileSystemPathIdentity.EvaluateBoundaryConflict(
+                @"C:\Library",
+                windows,
+                "/Library",
+                unix));
+    }
+
+    [Fact]
+    public void BoundaryConflict_UnknownSensitivityIsRejected()
+    {
+        var known = new FileSystemPathSemantics(
+            FileSystemPathSyntax.Unix,
+            FileSystemCaseSensitivity.Sensitive);
+        var unknown = new FileSystemPathSemantics(
+            FileSystemPathSyntax.Unix,
+            FileSystemCaseSensitivity.Unknown);
+
+        Assert.Throws<InvalidOperationException>(() =>
+            FileSystemPathIdentity.EvaluateBoundaryConflict(
+                "/library",
+                known,
+                "/library/author",
+                unknown));
     }
 
     [Fact]
@@ -179,6 +326,173 @@ public sealed class FileSystemPathIdentityTests
             sourceIdentity,
             "/c/Library/Book",
             targetIdentity));
+    }
+
+    [Theory]
+    [InlineData(@"C:\Downloads\Author\Book", FileSystemPathSyntax.Unix)]
+    [InlineData("/downloads/Author/Book", FileSystemPathSyntax.Windows)]
+    public void StoredAbsolutePath_ForeignSyntax_IsPreservedAndRejected(
+        string path,
+        FileSystemPathSyntax hostSyntax)
+    {
+        var resolved = FileSystemPathIdentity.TryCanonicalizeStoredAbsolutePathForHost(
+            path,
+            out var canonicalPath,
+            out var reason,
+            hostSyntax);
+
+        Assert.False(resolved);
+        Assert.Empty(canonicalPath);
+        Assert.Contains("filesystem syntax", reason, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Theory]
+    [InlineData("Downloads/Author/Book", FileSystemPathSyntax.Unix)]
+    [InlineData(@"Downloads\Author\Book", FileSystemPathSyntax.Windows)]
+    public void StoredAbsolutePath_RelativeSyntax_IsRejectedWithoutCurrentDirectoryExpansion(
+        string path,
+        FileSystemPathSyntax hostSyntax)
+    {
+        var resolved = FileSystemPathIdentity.TryCanonicalizeStoredAbsolutePathForHost(
+            path,
+            out var canonicalPath,
+            out var reason,
+            hostSyntax);
+
+        Assert.False(resolved);
+        Assert.Empty(canonicalPath);
+        Assert.Contains("not absolute", reason, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(Environment.CurrentDirectory, canonicalPath, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void StoredPathWithIdentity_ForeignIdentity_IsRejectedWithoutCanonicalization()
+    {
+        var identity = new PathIdentitySnapshot(
+            FileSystemPathSyntax.Windows,
+            FileSystemCaseSensitivity.Insensitive,
+            FileSystemCaseSensitivityMode.Insensitive,
+            @"C:\Library");
+
+        var resolved = FileSystemPathIdentity.TryCanonicalizeStoredPathWithIdentityForHost(
+            @"C:\Library\Book",
+            identity,
+            out var canonicalPath,
+            out var reason,
+            FileSystemPathSyntax.Unix);
+
+        Assert.False(resolved);
+        Assert.Empty(canonicalPath);
+        Assert.Contains("persisted identity", reason, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void StoredPathWithIdentity_PathSyntaxMismatch_IsRejected()
+    {
+        var identity = new PathIdentitySnapshot(
+            FileSystemPathSyntax.Windows,
+            FileSystemCaseSensitivity.Insensitive,
+            FileSystemCaseSensitivityMode.Insensitive,
+            @"C:\Library");
+
+        var resolved = FileSystemPathIdentity.TryCanonicalizeStoredPathWithIdentityForHost(
+            "/library/Book",
+            identity,
+            out var canonicalPath,
+            out var reason,
+            FileSystemPathSyntax.Windows);
+
+        Assert.False(resolved);
+        Assert.Empty(canonicalPath);
+        Assert.Contains("path uses Unix", reason, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void DoubleSlashAbsolutePath_RequiresFilesystemContext()
+    {
+        Assert.False(FileSystemPathIdentity.TryDetectAbsoluteSyntax(
+            "//server/share/Books/Title",
+            out _));
+    }
+
+    [Fact]
+    public void ForwardSlashUnc_IsDetectedAndCanonicalizedAsWindows()
+    {
+        Assert.True(FileSystemPathIdentity.TryDetectAbsoluteSyntax(
+            "//server/share/Books/Title",
+            FileSystemPathSyntax.Windows,
+            out var syntax));
+        Assert.Equal(FileSystemPathSyntax.Windows, syntax);
+
+        var resolved = FileSystemPathIdentity.TryCanonicalizeStoredAbsolutePathForHost(
+            "//server/share/Books/Title",
+            out var canonicalPath,
+            out var reason,
+            FileSystemPathSyntax.Windows);
+
+        Assert.True(resolved, reason);
+        Assert.Equal(@"\\server\share\Books\Title", canonicalPath);
+    }
+
+    [Fact]
+    public void DoubleSlashAbsolutePath_IsUnixWhenHostIsUnix()
+    {
+        Assert.True(FileSystemPathIdentity.TryDetectAbsoluteSyntaxForHost(
+            "//tmp/library/Title",
+            out var syntax,
+            FileSystemPathSyntax.Unix));
+        Assert.Equal(FileSystemPathSyntax.Unix, syntax);
+
+        var resolved = FileSystemPathIdentity.TryCanonicalizeStoredAbsolutePathForHost(
+            "//tmp/library/Title",
+            out var canonicalPath,
+            out var reason,
+            FileSystemPathSyntax.Unix);
+
+        Assert.True(resolved, reason);
+        Assert.Equal("/tmp/library/Title", canonicalPath);
+    }
+
+    [Theory]
+    [InlineData("/library/./Title", FileSystemPathSyntax.Unix)]
+    [InlineData("/library/../Title", FileSystemPathSyntax.Unix)]
+    [InlineData(@"C:\Library\.\Title", FileSystemPathSyntax.Windows)]
+    [InlineData(@"C:\Library\..\Title", FileSystemPathSyntax.Windows)]
+    [InlineData(@"C:/Library\../Title", FileSystemPathSyntax.Windows)]
+    public void StoredAbsolutePath_NavigationSegment_IsRejectedWithoutCanonicalization(
+        string path,
+        FileSystemPathSyntax hostSyntax)
+    {
+        var resolved = FileSystemPathIdentity.TryCanonicalizeStoredAbsolutePathForHost(
+            path,
+            out var canonicalPath,
+            out var reason,
+            hostSyntax);
+
+        Assert.False(resolved);
+        Assert.Empty(canonicalPath);
+        Assert.Contains("navigation segment", reason, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void StoredPathWithIdentity_NavigationBearingBoundary_IsRejected()
+    {
+        var identity = new PathIdentitySnapshot(
+            FileSystemPathSyntax.Unix,
+            FileSystemCaseSensitivity.Sensitive,
+            FileSystemCaseSensitivityMode.Sensitive,
+            "/library/../library");
+
+        var resolved = FileSystemPathIdentity.TryCanonicalizeStoredPathWithIdentityForHost(
+            "/library/Title",
+            identity,
+            out var canonicalPath,
+            out var reason,
+            FileSystemPathSyntax.Unix);
+
+        Assert.False(resolved);
+        Assert.Empty(canonicalPath);
+        Assert.Contains("identity boundary", reason, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]

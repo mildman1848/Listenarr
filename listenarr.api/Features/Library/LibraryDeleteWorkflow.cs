@@ -29,6 +29,7 @@ namespace Listenarr.Api.Features.Library
         private readonly IAudiobookFilesystemDeleteService _audiobookFilesystemDeleteService;
         private readonly string _contentRootPath;
         private readonly IFileSystem _fileSystem;
+        private readonly IFilesystemMutationCoordinator _filesystemMutationCoordinator;
         private readonly IAudiobookOperationCoordinator _audiobookOperationCoordinator;
         private readonly ILogger<LibraryDeleteWorkflow> _logger;
 
@@ -38,6 +39,7 @@ namespace Listenarr.Api.Features.Library
             IAudiobookFilesystemDeleteService audiobookFilesystemDeleteService,
             IApplicationPathService applicationPathService,
             IFileSystem fileSystem,
+            IFilesystemMutationCoordinator filesystemMutationCoordinator,
             IAudiobookOperationCoordinator audiobookOperationCoordinator,
             ILogger<LibraryDeleteWorkflow> logger)
         {
@@ -46,16 +48,32 @@ namespace Listenarr.Api.Features.Library
             _audiobookFilesystemDeleteService = audiobookFilesystemDeleteService;
             _contentRootPath = applicationPathService.ContentRootPath;
             _fileSystem = fileSystem;
+            _filesystemMutationCoordinator = filesystemMutationCoordinator ?? throw new ArgumentNullException(nameof(filesystemMutationCoordinator));
             _audiobookOperationCoordinator = audiobookOperationCoordinator ?? throw new ArgumentNullException(nameof(audiobookOperationCoordinator));
             _logger = logger;
         }
 
-        public Task<IActionResult> DeleteAsync(int id, bool deleteFiles, bool deleteFolder) =>
-            _audiobookOperationCoordinator.ExecuteExclusiveAsync(
-                id,
-                _ => DeleteCoreAsync(id, deleteFiles, deleteFolder));
+        public Task<IActionResult> DeleteAsync(
+            int id,
+            bool deleteFiles,
+            bool deleteFolder,
+            CancellationToken cancellationToken = default) =>
+            _filesystemMutationCoordinator.ExecuteExclusiveAsync(
+                globalToken => _audiobookOperationCoordinator.ExecuteExclusiveAsync(
+                    id,
+                    audiobookToken => DeleteCoreAsync(
+                        id,
+                        deleteFiles,
+                        deleteFolder,
+                        audiobookToken),
+                    globalToken),
+                cancellationToken);
 
-        private async Task<IActionResult> DeleteCoreAsync(int id, bool deleteFiles, bool deleteFolder)
+        private async Task<IActionResult> DeleteCoreAsync(
+            int id,
+            bool deleteFiles,
+            bool deleteFolder,
+            CancellationToken cancellationToken)
         {
             var audiobook = await _repo.GetByIdAsync(id);
             if (audiobook == null)
@@ -68,7 +86,10 @@ namespace Listenarr.Api.Features.Library
             AudiobookFilesystemDeleteResult? filesystemResult = null;
             if (deleteFiles)
             {
-                filesystemResult = await _audiobookFilesystemDeleteService.DeleteAsync(audiobook, deleteFolder);
+                filesystemResult = await _audiobookFilesystemDeleteService.DeleteAsync(
+                    audiobook,
+                    deleteFolder,
+                    cancellationToken);
             }
 
             await DeleteCachedImageAsync(audiobook);

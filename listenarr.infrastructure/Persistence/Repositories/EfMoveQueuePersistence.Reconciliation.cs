@@ -48,40 +48,62 @@ public sealed partial class EfMoveQueuePersistence
 
                 try
                 {
+                    var sourcePath = job.SourcePath;
                     if (job.TryGetSourceIdentity(out var persistedSourceIdentity))
                     {
-                        job.SourcePath = FileSystemPathIdentity.Canonicalize(
-                            job.SourcePath,
-                            persistedSourceIdentity.Syntax);
+                        if (!FileSystemPathIdentity.TryCanonicalizeStoredPathWithIdentityForHost(
+                            sourcePath,
+                            persistedSourceIdentity,
+                            out sourcePath,
+                            out var sourceReason))
+                        {
+                            throw new InvalidOperationException($"Source path cannot be reconciled: {sourceReason}");
+                        }
                     }
-                    else
+                    else if (!FileSystemPathIdentity.TryCanonicalizeStoredAbsolutePathForHost(
+                        sourcePath,
+                        out sourcePath,
+                        out var sourceReason))
                     {
-                        job.SourcePath = FileSystemPathIdentity.ResolveNativeAbsolutePath(
-                            job.SourcePath);
+                        throw new InvalidOperationException($"Source path cannot be reconciled: {sourceReason}");
                     }
 
+                    var targetPath = job.RequestedPath;
                     if (job.TryGetTargetIdentity(out var persistedTargetIdentity))
                     {
-                        job.RequestedPath = FileSystemPathIdentity.Canonicalize(
-                            job.RequestedPath,
-                            persistedTargetIdentity.Syntax);
+                        if (!FileSystemPathIdentity.TryCanonicalizeStoredPathWithIdentityForHost(
+                            targetPath,
+                            persistedTargetIdentity,
+                            out targetPath,
+                            out var targetReason))
+                        {
+                            throw new InvalidOperationException($"Target path cannot be reconciled: {targetReason}");
+                        }
                     }
-                    else
+                    else if (!FileSystemPathIdentity.TryCanonicalizeStoredAbsolutePathForHost(
+                        targetPath,
+                        out targetPath,
+                        out var targetReason))
                     {
-                        job.RequestedPath = FileSystemPathIdentity.ResolveNativeAbsolutePath(
-                            job.RequestedPath);
+                        throw new InvalidOperationException($"Target path cannot be reconciled: {targetReason}");
                     }
 
                     var sourceIdentity = await ResolveJobIdentityAsync(
                         job,
-                        job.SourcePath,
+                        sourcePath,
                         target: false,
                         cancellationToken);
                     var targetIdentity = await ResolveJobIdentityAsync(
                         job,
-                        job.RequestedPath,
+                        targetPath,
                         target: true,
                         cancellationToken);
+
+                    // Persist endpoint rewrites only after both paths and identities have been
+                    // validated. A foreign or relative legacy endpoint must remain intact as
+                    // durable operator evidence instead of being partially rewritten.
+                    job.SourcePath = sourcePath;
+                    job.RequestedPath = targetPath;
                     job.SetSourceIdentity(sourceIdentity);
                     job.SetTargetIdentity(targetIdentity);
                     job.IdentityKeyVersion = 3;
@@ -89,7 +111,7 @@ public sealed partial class EfMoveQueuePersistence
                         job,
                         FileSystemPathIdentity.CreateKey(
                             $"move:{job.AudiobookId}",
-                            job.RequestedPath,
+                            targetPath,
                             targetIdentity.Semantics,
                             version: 3),
                         targetIdentity));

@@ -13,6 +13,23 @@ Before making code, dependency, workflow, or documentation changes, review and f
 
 Repository-specific guidance takes precedence over general examples in this file. Keep infrastructure-shaped dependencies out of `listenarr.application`; define application-owned ports there and implement adapters in infrastructure/API.
 
+## Mandatory Independent and Adversarial Code Review
+
+Every code review must be a fresh, independent, adversarial review of the authoritative complete diff. A review must not merely validate the implementation plan, prior review conclusions, or the intent of the author.
+
+Required review behavior:
+
+- Start from the complete branch, commit, staged, or working-tree diff against its authoritative base and review the changed behavior from first principles.
+- Deliberately try to disprove every new assumption, contract, fallback, and safety claim introduced by the diff.
+- Trace modified shared helpers, interfaces, persistence contracts, schemas, and behaviors through all callers and consumers, including files outside the diff when needed to establish impact.
+- Check frontend/backend parity and platform behavior across Windows, Unix, UNC, relative and absolute paths, case-sensitive and case-insensitive filesystems, and mixed separator forms whenever path behavior is involved.
+- Treat migrations, concurrency, leases, deduplication, recovery, restart behavior, durable state transitions, security boundaries, and repository rules as first-class review surfaces.
+- Treat passing tests as supporting evidence, not proof of correctness. Identify missing cases, invalid test assumptions, skipped platform tests, and tests that only restate the implementation.
+- Require native validation for platform-specific claims. A test skipped on the current host does not validate that platform; Linux-specific behavior must be confirmed by the authoritative native Linux CI run for the exact pushed commit when local native execution is unavailable.
+- Keep implementation and review passes separate. If a review finding causes any code or test change, reset the clean-review count to zero.
+- Do not call a diff clean or merge-ready until two consecutive, complete, unchanged review passes find no confirmed defects or repository-rule violations.
+- Clearly distinguish confirmed findings, unverified risks, missing platform validation, process blockers, and non-blocking suggestions.
+
 As a security-aware developer, generate secure .NET code using ASP.NET Core that inherently prevents top security weaknesses.
 Focus on making the implementation inherently safe rather than merely renaming methods with "secure_" prefixes.
 Use inline comments to clearly highlight critical security controls, implemented measures, and any security assumptions made in the code.

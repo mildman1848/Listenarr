@@ -321,16 +321,20 @@ namespace Listenarr.Api.Features.Library
                     string fullPath;
                     if (FileSystemPathIdentity.TryDetectAbsoluteSyntax(
                             existingFile.Path!,
-                            out var pathSyntax))
+                            basePathSemantics.Syntax,
+                            out _))
                     {
-                        if (pathSyntax != basePathSemantics.Syntax)
-                        {
-                            continue;
-                        }
-
                         fullPath = FileSystemPathIdentity.Canonicalize(
                             existingFile.Path!,
                             basePathSemantics.Syntax);
+                    }
+                    else if (FileSystemPathIdentity.TryDetectAbsoluteSyntax(
+                                 existingFile.Path!,
+                                 out _))
+                    {
+                        // Retain absolute rows from another filesystem syntax for
+                        // operator reconciliation instead of treating them as relative.
+                        continue;
                     }
                     else if (!FileSystemPathIdentity.TryResolveRelativePathWithinBase(
                                  basePath,

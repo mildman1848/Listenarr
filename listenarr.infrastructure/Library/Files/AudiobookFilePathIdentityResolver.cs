@@ -79,8 +79,10 @@ public sealed class AudiobookFilePathIdentityResolver(
         foreach (var root in roots.Where(candidate => !string.IsNullOrWhiteSpace(candidate.Path)))
         {
             cancellationToken.ThrowIfCancellationRequested();
-            if (!FileSystemPathIdentity.TryDetectAbsoluteSyntax(root.Path, out var rootSyntax)
-                || rootSyntax != syntax)
+            if (!FileSystemPathIdentity.TryDetectAbsoluteSyntax(
+                    root.Path,
+                    syntax,
+                    out var rootSyntax))
             {
                 continue;
             }
@@ -135,23 +137,46 @@ public sealed class AudiobookFilePathIdentityResolver(
         string path,
         out FileSystemPathSyntax syntax)
     {
-        if (FileSystemPathIdentity.TryDetectAbsoluteSyntax(path, out syntax))
+        var hostSyntax = OperatingSystem.IsWindows()
+            ? FileSystemPathSyntax.Windows
+            : FileSystemPathSyntax.Unix;
+        FileSystemPathSyntax? baseSyntax = null;
+        if (!string.IsNullOrWhiteSpace(audiobook.BasePath))
+        {
+            if (FileSystemPathIdentity.TryDetectAbsoluteSyntax(
+                    audiobook.BasePath,
+                    hostSyntax,
+                    out var contextualBaseSyntax)
+                || FileSystemPathIdentity.TryDetectAbsoluteSyntax(
+                    audiobook.BasePath,
+                    out contextualBaseSyntax))
+            {
+                baseSyntax = contextualBaseSyntax;
+            }
+        }
+
+        var preferredSyntax = baseSyntax ?? hostSyntax;
+        if (FileSystemPathIdentity.TryDetectAbsoluteSyntax(
+                path,
+                preferredSyntax,
+                out syntax)
+            || FileSystemPathIdentity.TryDetectAbsoluteSyntax(path, out syntax))
         {
             return FileSystemPathIdentity.Canonicalize(path, syntax);
         }
 
-        if (string.IsNullOrWhiteSpace(audiobook.BasePath)
-            || !FileSystemPathIdentity.TryDetectAbsoluteSyntax(audiobook.BasePath, out syntax))
+        if (!baseSyntax.HasValue)
         {
             throw new InvalidOperationException(
                 "A relative audiobook file path requires an authoritative absolute audiobook base path.");
         }
 
+        syntax = baseSyntax.Value;
         var containmentSemantics = new FileSystemPathSemantics(
             syntax,
             FileSystemCaseSensitivity.Sensitive);
         if (!FileSystemPathIdentity.TryResolveRelativePathWithinBase(
-                audiobook.BasePath,
+                audiobook.BasePath!,
                 path,
                 containmentSemantics,
                 out var resolvedPath))
@@ -170,8 +195,10 @@ public sealed class AudiobookFilePathIdentityResolver(
     {
         try
         {
-            if (FileSystemPathIdentity.TryDetectAbsoluteSyntax(boundaryPath, out var boundarySyntax)
-                && boundarySyntax == semantics.Syntax)
+            if (FileSystemPathIdentity.TryDetectAbsoluteSyntax(
+                    boundaryPath,
+                    semantics.Syntax,
+                    out _))
             {
                 var canonicalBoundary = FileSystemPathIdentity.Canonicalize(
                     boundaryPath,

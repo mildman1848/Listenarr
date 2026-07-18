@@ -19,6 +19,7 @@ public sealed class ManualImportCompanionImporter
     private readonly IFileMover _fileMover;
     private readonly IFileSystem _fileSystem;
     private readonly IFileSystemSemanticsResolver _semanticsResolver;
+    private readonly ILibraryDirectoryOwnershipStore _directoryOwnershipStore;
     private readonly ILogger<ManualImportCompanionImporter> _logger;
 
     public ManualImportCompanionImporter(
@@ -26,23 +27,31 @@ public sealed class ManualImportCompanionImporter
         IFileMover fileMover,
         IFileSystem fileSystem,
         IFileSystemSemanticsResolver semanticsResolver,
+        ILibraryDirectoryOwnershipStore directoryOwnershipStore,
         ILogger<ManualImportCompanionImporter> logger)
     {
         _metadataService = metadataService;
         _fileMover = fileMover;
         _fileSystem = fileSystem;
         _semanticsResolver = semanticsResolver;
+        _directoryOwnershipStore = directoryOwnershipStore;
         _logger = logger;
     }
 
     public async Task<IReadOnlyCollection<FileUtils.AudioMatchProfile>> BuildAudioMatchProfilesAsync(
         IEnumerable<string> filePaths,
-        StringComparer sourcePathComparer)
+        StringComparer sourcePathComparer,
+        CancellationToken cancellationToken = default)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         return (await Task.WhenAll(filePaths
                 .Where(path => !string.IsNullOrWhiteSpace(path))
                 .Distinct(sourcePathComparer)
-                .Select(BuildAudioMatchProfileAsync)))
+                .Select(async path =>
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    return await BuildAudioMatchProfileAsync(path);
+                })))
             .Where(profile => profile != null)
             .Cast<FileUtils.AudioMatchProfile>()
             .ToList();
@@ -56,8 +65,10 @@ public sealed class ManualImportCompanionImporter
         IReadOnlyCollection<FileUtils.AudioMatchProfile> selectedAudioProfiles,
         ManualImportDestinationTracker destinationTracker,
         FileSystemPathSemantics sourceSemantics,
-        IEnumerable<string> importBlacklist)
+        IEnumerable<string> importBlacklist,
+        CancellationToken cancellationToken = default)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         var audiobookIds = orderedItems
             .Select(item => item.MatchedAudiobookId)
             .Distinct()
@@ -101,7 +112,9 @@ public sealed class ManualImportCompanionImporter
             .Distinct(sourceSemantics.Comparer)
             .ToList();
 
-        var destinationResolution = await _semanticsResolver.ResolveAsync(destinationRoot);
+        var destinationResolution = await _semanticsResolver.ResolveAsync(
+            destinationRoot,
+            cancellationToken: cancellationToken);
         if (destinationResolution.State != PathIdentityState.Valid)
         {
             _logger.LogWarning(
@@ -112,8 +125,10 @@ public sealed class ManualImportCompanionImporter
         }
 
         var importedCount = 0;
+        var operationId = Guid.NewGuid();
         foreach (var companionFile in companionFiles)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             try
             {
                 if (FileUtils.IsAudioFile(companionFile))
@@ -143,10 +158,27 @@ public sealed class ManualImportCompanionImporter
                     continue;
                 }
 
-                var destinationReservation = await destinationTracker.PlanUniqueAsync(destinationPath);
+                var destinationReservation = await destinationTracker.PlanUniqueAsync(
+                    destinationPath,
+                    cancellationToken);
                 destinationPath = destinationReservation.Path;
 
-                var success = await _fileMover.PerformActionOn(action, companionFile, destinationPath);
+                var destinationDirectory = Path.GetDirectoryName(destinationPath)
+                    ?? throw new InvalidOperationException(
+                        "The companion import destination has no parent directory.");
+                await _directoryOwnershipStore.EnsureCreatedHierarchyAsync(
+                    destinationDirectory,
+                    destinationRoot,
+                    destinationResolution.Semantics,
+                    "manual-import-companion",
+                    operationId,
+                    audiobookIds[0],
+                    cancellationToken);
+                cancellationToken.ThrowIfCancellationRequested();
+                var success = await _fileMover.PerformActionOn(
+                    action,
+                    companionFile,
+                    destinationPath);
                 if (success)
                 {
                     destinationTracker.Commit(destinationReservation);

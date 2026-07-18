@@ -41,6 +41,7 @@ public partial class ManualImportController : ControllerBase
     private readonly IAudiobookOperationCoordinator _audiobookOperationCoordinator;
     private readonly ManualImportPathPlanner _pathPlanner;
     private readonly ManualImportCompanionImporter _companionImporter;
+    private readonly ILibraryDirectoryOwnershipStore _directoryOwnershipStore;
 
     public ManualImportController(
         ILogger<ManualImportController> logger,
@@ -56,6 +57,7 @@ public partial class ManualImportController : ControllerBase
         IFileSystemSemanticsResolver semanticsResolver,
         IFilesystemMutationCoordinator filesystemMutationCoordinator,
         IAudiobookOperationCoordinator audiobookOperationCoordinator,
+        ILibraryDirectoryOwnershipStore directoryOwnershipStore,
         ManualImportPathPlanner? pathPlanner = null,
         ManualImportCompanionImporter? companionImporter = null)
     {
@@ -72,12 +74,14 @@ public partial class ManualImportController : ControllerBase
         _semanticsResolver = semanticsResolver;
         _filesystemMutationCoordinator = filesystemMutationCoordinator ?? throw new ArgumentNullException(nameof(filesystemMutationCoordinator));
         _audiobookOperationCoordinator = audiobookOperationCoordinator ?? throw new ArgumentNullException(nameof(audiobookOperationCoordinator));
+        _directoryOwnershipStore = directoryOwnershipStore ?? throw new ArgumentNullException(nameof(directoryOwnershipStore));
         _pathPlanner = pathPlanner ?? new ManualImportPathPlanner(fileNamingService);
         _companionImporter = companionImporter ?? new ManualImportCompanionImporter(
             metadataService,
             fileMover,
             fileSystem,
             semanticsResolver,
+            directoryOwnershipStore,
             Microsoft.Extensions.Logging.Abstractions.NullLogger<ManualImportCompanionImporter>.Instance);
     }
 
@@ -141,15 +145,19 @@ public partial class ManualImportController : ControllerBase
     /// Given a list of items, tries to import them all into the library
     /// </summary>
     /// <param name="request">Import configuration including source path, mode, import action (do nothing/copy/move/...), and selected file items.</param>
+    /// <param name="cancellationToken">Request cancellation token.</param>
     /// <returns>Summary of imported files with success/failure details per item.</returns>
     [HttpPost]
-    public async Task<ActionResult<object>> Start([FromBody] ManualImportRequestDto request)
+    public async Task<ActionResult<object>> Start(
+        [FromBody] ManualImportRequestDto request,
+        CancellationToken cancellationToken = default)
     {
         if (request == null || string.IsNullOrWhiteSpace(request.Path))
         {
             return BadRequest(new { error = "Invalid request" });
         }
 
+        cancellationToken.ThrowIfCancellationRequested();
         var sourceDirectory = Path.GetFullPath(request.Path);
         if (!_fileSystem.DirectoryExists(sourceDirectory))
         {
@@ -171,7 +179,8 @@ public partial class ManualImportController : ControllerBase
             var appSettings = await _configService.GetApplicationSettingsAsync();
             var sourceSemantics = await ResolvePathSemanticsAsync(
                 sourceDirectory,
-                "Source filesystem identity is unavailable.");
+                "Source filesystem identity is unavailable.",
+                cancellationToken);
             var orderedItems = ManualImportPathPlanner.BuildOrderedItems(
                 request.Items,
                 sourceSemantics.Comparer);
@@ -181,66 +190,95 @@ public partial class ManualImportController : ControllerBase
                         .Where(item => !string.IsNullOrWhiteSpace(item.FullPath))
                         .Select(item => item.FullPath!)
                         .Where(FileUtils.IsAudioFile),
-                    sourceSemantics.Comparer)
+                    sourceSemantics.Comparer,
+                    cancellationToken)
                 : Array.Empty<FileUtils.AudioMatchProfile>();
 
             _logger.LogDebug("Manual import batch: {ItemCount} items", orderedItems.Count);
 
             await ExecuteWithAudiobookLocksAsync(
                 orderedItems.Select(item => item.MatchedAudiobookId),
-                async () =>
+                async operationToken =>
                 {
-                    foreach (var item in orderedItems)
+                    OperationCanceledException? postMutationCancellation = null;
+                    try
                     {
-                        var fileCount = orderedItems.Count(candidate =>
-                            candidate.MatchedAudiobookId == item.MatchedAudiobookId);
-                        _logger.LogDebug(
-                            "Importing item {Index}: {Path} for audiobook {AudiobookId}, fileCount: {FileCount}",
-                            orderedItems.IndexOf(item),
-                            item.FullPath,
-                            item.MatchedAudiobookId,
-                            fileCount);
-                        var result = await ImportFileAsync(
-                            item,
-                            request.Action,
-                            sourceDirectory,
-                            sourceSemantics,
-                            destinationTracker,
-                            rootFolders,
-                            appSettings,
-                            fileCount > 1);
-                        _logger.LogDebug(
-                            "Import result {Index}: Success={Success}, Destination={Destination}, Error={Error}",
-                            orderedItems.IndexOf(item),
-                            result.Success,
-                            result.DestinationPath,
-                            result.Error);
-                        results.Add(result);
+                        foreach (var item in orderedItems)
+                        {
+                            operationToken.ThrowIfCancellationRequested();
+                            var fileCount = orderedItems.Count(candidate =>
+                                candidate.MatchedAudiobookId == item.MatchedAudiobookId);
+                            _logger.LogDebug(
+                                "Importing item {Index}: {Path} for audiobook {AudiobookId}, fileCount: {FileCount}",
+                                orderedItems.IndexOf(item),
+                                item.FullPath,
+                                item.MatchedAudiobookId,
+                                fileCount);
+                            var result = await ImportFileAsync(
+                                item,
+                                request.Action,
+                                sourceDirectory,
+                                sourceSemantics,
+                                destinationTracker,
+                                rootFolders,
+                                appSettings,
+                                fileCount > 1,
+                                operationToken);
+                            _logger.LogDebug(
+                                "Import result {Index}: Success={Success}, Destination={Destination}, Error={Error}",
+                                orderedItems.IndexOf(item),
+                                result.Success,
+                                result.DestinationPath,
+                                result.Error);
+                            results.Add(result);
+                        }
+
+                        if (request.IncludeCompanionFiles && request.Action != FileAction.None)
+                        {
+                            var companionImportCount = await _companionImporter.ImportAsync(
+                                request.Action,
+                                orderedItems,
+                                results,
+                                sourceDirectory,
+                                selectedAudioProfiles,
+                                destinationTracker,
+                                sourceSemantics,
+                                appSettings.ImportBlacklistExtensions,
+                                operationToken);
+                            _logger.LogInformation(
+                                "Manual import companion-file pass completed with {Count} imported companion file(s)",
+                                companionImportCount);
+                        }
+
+                        if (request.CleanupEmptySourceFolders)
+                        {
+                            operationToken.ThrowIfCancellationRequested();
+                            _fileSystem.DeleteEmptyDirectories(sourceDirectory);
+                        }
+                    }
+                    catch (OperationCanceledException exception) when (
+                        results.Any(result => result.Success))
+                    {
+                        postMutationCancellation = exception;
                     }
 
-                    if (request.IncludeCompanionFiles && request.Action != FileAction.None)
+                    var hasSuccessfulMutation = results.Any(result => result.Success);
+                    await EnqueueFocusedScansAsync(
+                        results,
+                        hasSuccessfulMutation
+                            ? CancellationToken.None
+                            : operationToken);
+
+                    if (postMutationCancellation != null)
                     {
-                        var companionImportCount = await _companionImporter.ImportAsync(
-                            request.Action,
-                            orderedItems,
-                            results,
-                            sourceDirectory,
-                            selectedAudioProfiles,
-                            destinationTracker,
-                            sourceSemantics,
-                            appSettings.ImportBlacklistExtensions);
-                        _logger.LogInformation(
-                            "Manual import companion-file pass completed with {Count} imported companion file(s)",
-                            companionImportCount);
+                        System.Runtime.ExceptionServices.ExceptionDispatchInfo
+                            .Capture(postMutationCancellation)
+                            .Throw();
                     }
 
-                    if (request.CleanupEmptySourceFolders)
-                    {
-                        _fileSystem.DeleteEmptyDirectories(sourceDirectory);
-                    }
-
-                    await EnqueueFocusedScansAsync(results);
-                });
+                    operationToken.ThrowIfCancellationRequested();
+                },
+                cancellationToken);
 
             var successCount = results.Count(r => r.Success);
             _logger.LogInformation("Manual import batch completed: {SuccessCount}/{TotalCount} succeeded, usedDestinations: {DestinationCount}", successCount, results.Count, destinationTracker.Count);
@@ -269,6 +307,7 @@ public partial class ManualImportController : ControllerBase
     /// <param name="rootFolders">Previously fetched list of configured root folders (to save DB hits)</param>
     /// <param name="settings">Application settings (to save DB hits)</param>
     /// <param name="hasMultipleFile">Indicates if this file is part of multiple files for a same audiobook</param>
+    /// <param name="cancellationToken">Request cancellation token.</param>
     /// <returns>Result of the importation</returns>
     /// <exception cref="IOException"></exception>
     private async Task<ManualImportResultDto> ImportFileAsync(
@@ -279,10 +318,12 @@ public partial class ManualImportController : ControllerBase
         ManualImportDestinationTracker destinationTracker,
         List<RootFolder> rootFolders,
         ApplicationSettings settings,
-        bool hasMultipleFile = false)
+        bool hasMultipleFile,
+        CancellationToken cancellationToken)
     {
         try
         {
+            cancellationToken.ThrowIfCancellationRequested();
             // Validate FullPath
             if (string.IsNullOrWhiteSpace(item.FullPath))
             {
@@ -310,7 +351,10 @@ public partial class ManualImportController : ControllerBase
                 sourceDirectory,
                 sourceSemantics);
 
-            var isUnderConfiguredRoot = await IsInsideAnyConfiguredRootAsync(item.FullPath, rootFolders);
+            var isUnderConfiguredRoot = await IsInsideAnyConfiguredRootAsync(
+                item.FullPath,
+                rootFolders,
+                cancellationToken);
 
             if (!isUnderSourceDirectory && !isUnderConfiguredRoot)
             {
@@ -332,7 +376,10 @@ public partial class ManualImportController : ControllerBase
                 return ManualImportResultDto.FailureResult("Failed to extract metadata from file", item.FullPath);
             }
 
-            var destinationSemantics = await ResolveDestinationSemanticsAsync(audiobook.BasePath);
+            var destinationResolution = await ResolveDestinationResolutionAsync(
+                audiobook.BasePath,
+                cancellationToken);
+            var destinationSemantics = destinationResolution.Semantics;
 
             // Generate destination path using the selected target root's identity semantics.
             var destinationPath = await _pathPlanner.GeneratePathAsync(
@@ -343,7 +390,9 @@ public partial class ManualImportController : ControllerBase
                 settings,
                 destinationSemantics,
                 hasMultipleFile);
-            var destinationReservation = await destinationTracker.PlanUniqueAsync(destinationPath);
+            var destinationReservation = await destinationTracker.PlanUniqueAsync(
+                destinationPath,
+                cancellationToken);
             destinationPath = destinationReservation.Path;
 
             if (action != FileAction.None)
@@ -374,7 +423,15 @@ public partial class ManualImportController : ControllerBase
                 }
             }
 
-            var success = await _fileMover.PerformActionOn(action, item.FullPath, destinationPath);
+            var success = await PerformOwnedManualImportActionAsync(
+                action,
+                item.FullPath,
+                destinationPath,
+                audiobook,
+                rootFolders,
+                destinationSemantics,
+                destinationResolution.BoundaryPath,
+                cancellationToken);
             if (success)
             {
                 destinationTracker.Commit(destinationReservation);

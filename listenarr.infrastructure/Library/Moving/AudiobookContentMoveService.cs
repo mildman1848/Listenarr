@@ -24,7 +24,8 @@ internal sealed record AudiobookContentMoveRequest(
     FileSystemPathSemantics SourceSemantics,
     FileSystemPathSemantics TargetSemantics,
     MoveLeaseToken LeaseToken,
-    string? SourceCleanupBoundary = null)
+    string? SourceCleanupBoundary = null,
+    LibraryDirectoryOwnership? TargetDirectoryOwnership = null)
 {
     public string LeaseOwner => LeaseToken.Owner;
     public int LeaseGeneration => LeaseToken.Generation;
@@ -45,11 +46,14 @@ internal sealed partial class AudiobookContentMoveService(
     IDbContextFactory<ListenArrDbContext> dbContextFactory,
     TimeProvider timeProvider,
     IMoveFaultInjector? faultInjector = null,
-    IMoveExecutionStore? moveExecutionStore = null)
+    IMoveExecutionStore? moveExecutionStore = null,
+    ILibraryDirectoryOwnershipStore? directoryOwnershipStore = null)
 {
     private const int MaxCopyAttempts = 5;
     private readonly IMoveExecutionStore executionStore =
         moveExecutionStore ?? new EfMoveExecutionStore(dbContextFactory, timeProvider);
+    private readonly ILibraryDirectoryOwnershipStore directoryOwnershipStore =
+        directoryOwnershipStore ?? new EfLibraryDirectoryOwnershipStore(dbContextFactory, timeProvider);
 
     internal void OnCompletionHandoff(
         Guid jobId,
@@ -70,7 +74,11 @@ internal sealed partial class AudiobookContentMoveService(
         var targetSemantics = request.TargetSemantics;
         if (IsFilesystemRoot(source, sourceSemantics)
             || IsFilesystemRoot(target, targetSemantics)
-            || FileSystemPathIdentity.AreEquivalent(source, target, sourceSemantics))
+            || FileSystemPathIdentity.AreEquivalentEndpoints(
+                source,
+                sourceSemantics,
+                target,
+                targetSemantics))
         {
             throw new MoveNeedsAttentionException(
                 "Move source and target must be distinct non-root directories.");
@@ -155,11 +163,32 @@ internal sealed partial class AudiobookContentMoveService(
         }
 
         var resumingDirectCopy = recoveryStage == CopyStartedStage && persistedManifest.Count > 0;
+        var targetDirectoryOwnership = Directory.Exists(target)
+            ? await LoadValidatedTargetDirectoryOwnershipAsync(
+                target,
+                targetSemantics,
+                cancellationToken)
+            : null;
+        request = request with { TargetDirectoryOwnership = targetDirectoryOwnership };
         RejectUnownedPartialArtifacts(
             target,
             request.JobId,
             recoveryMarker?.StructuredMarker != null);
-        EnsureTargetCanReceiveContents(source, target, sourceInsideTarget, resumingDirectCopy, targetSemantics);
+        EnsureTargetCanReceiveContents(
+            source,
+            target,
+            sourceInsideTarget,
+            resumingDirectCopy,
+            targetSemantics,
+            targetDirectoryOwnership);
+        var ownedSourceDirectories = await LoadValidatedOwnedSourceDirectoriesAsync(
+            source,
+            sourceSemantics,
+            cancellationToken);
+        var ownedSourceMarkerPaths = GetOwnedSourceMarkerPaths(
+            source,
+            ownedSourceDirectories,
+            sourceSemantics);
         var targetStructuralSpine = GetTargetStructuralSpine(
             source,
             target,
@@ -176,7 +205,8 @@ internal sealed partial class AudiobookContentMoveService(
             cancellationToken,
             sourceRecoveryMarker == null ? null : sourceRecoveryMarkerPath,
             targetScaffolding.Select(directory => directory.Path).ToList(),
-            targetStructuralSpine);
+            targetStructuralSpine,
+            ownedSourceMarkerPaths);
 
         var tempName = Path.Join(targetParent, Path.GetFileName(target) + ".tmp-" + request.JobId.ToString("N"));
         if (!FileSystemSafety.TryValidateMutationTarget(tempName, [targetParent], out tempName, out var tempReason))
@@ -220,18 +250,20 @@ internal sealed partial class AudiobookContentMoveService(
 
         try
         {
-            var atomicResult = await TryMoveByAtomicRenameAsync(
-                request,
-                source,
-                target,
-                tempName,
-                targetInsideSource,
-                sourceInsideTarget,
-                recoveryStage,
-                manifest,
-                sourceSemantics,
-                targetSemantics,
-                cancellationToken);
+            var atomicResult = ownedSourceDirectories.Count == 0
+                ? await TryMoveByAtomicRenameAsync(
+                    request,
+                    source,
+                    target,
+                    tempName,
+                    targetInsideSource,
+                    sourceInsideTarget,
+                    recoveryStage,
+                    manifest,
+                    sourceSemantics,
+                    targetSemantics,
+                    cancellationToken)
+                : null;
             if (atomicResult != null)
             {
                 return atomicResult;
@@ -307,7 +339,8 @@ internal sealed partial class AudiobookContentMoveService(
                 targetSemantics,
                 tempOwnership,
                 quarantineOwnership: null,
-                allowPartialFiles: false);
+                allowPartialFiles: false,
+                targetDirectoryOwnership: request.TargetDirectoryOwnership);
             await VerifyPublishedManifestAsync(copyDestination, manifest, targetSemantics, cancellationToken);
             await UpdateCopyStateAsync(request.JobId, request.LeaseToken, cancellationToken);
 
@@ -375,6 +408,7 @@ internal sealed partial class AudiobookContentMoveService(
                 manifest,
                 sourceSemantics,
                 targetSemantics,
+                request.TargetDirectoryOwnership,
                 request.SourceCleanupBoundary,
                 cancellationToken);
             VerifySourceCleanupState(request, source, target);
@@ -431,40 +465,4 @@ internal sealed partial class AudiobookContentMoveService(
         }
     }
 
-    private static bool IsSameOrInside(
-        string candidate,
-        string root,
-        FileSystemPathSemantics semantics)
-    {
-        if (string.IsNullOrWhiteSpace(candidate) || string.IsNullOrWhiteSpace(root))
-        {
-            return false;
-        }
-
-        var normalizedCandidate = Path.GetFullPath(candidate);
-        var normalizedRoot = Path.GetFullPath(root);
-
-        return FileSystemPathIdentity.IsSameOrInside(
-            normalizedCandidate,
-            normalizedRoot,
-            semantics);
-    }
-
-    private static bool IsFilesystemRoot(
-        string path,
-        FileSystemPathSemantics? resolvedSemantics = null)
-    {
-        if (string.IsNullOrWhiteSpace(path))
-        {
-            return false;
-        }
-
-        var fullPath = Path.GetFullPath(path);
-        var root = Path.GetPathRoot(fullPath);
-        return !string.IsNullOrWhiteSpace(root)
-            && FileSystemPathIdentity.AreEquivalent(
-                fullPath,
-                root,
-                resolvedSemantics ?? throw new InvalidOperationException("Filesystem semantics are required for filesystem root checks."));
-    }
 }

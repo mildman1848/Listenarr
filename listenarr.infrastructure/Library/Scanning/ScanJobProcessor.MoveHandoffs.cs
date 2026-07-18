@@ -127,29 +127,36 @@ public partial class ScanJobProcessor
         return new ScanTerminalDecision("Failed", error, MoveOwned: false);
     }
 
-    private async Task<ScanTerminalDecision> RecordMoveScanSupersededAsync(
+    private Task<ScanTerminalDecision> RecordMoveScanSupersededAsync(
         ScanJob job,
         string error,
-        CancellationToken cancellationToken)
-    {
-        if (!job.MoveScanHandoffId.HasValue || _moveScanHandoffStore == null)
-        {
-            return new ScanTerminalDecision("Superseded", error, MoveOwned: false);
-        }
+        CancellationToken cancellationToken) =>
+        CommitTerminalDecisionAsync(
+            job,
+            async commitToken =>
+            {
+                if (!job.MoveScanHandoffId.HasValue || _moveScanHandoffStore == null)
+                {
+                    return new ScanTerminalDecision(
+                        "Superseded",
+                        error,
+                        MoveOwned: false);
+                }
 
-        var result = await _moveScanHandoffStore.CompleteAttemptAsync(
-            job.MoveScanHandoffId.Value,
-            job.MoveScanAttemptGeneration,
-            job.Id,
-            MoveScanTerminalOutcome.Superseded,
-            error,
-            found: 0,
-            created: 0,
-            scanPath: job.Path,
-            _timeProvider.GetUtcNow(),
+                var result = await _moveScanHandoffStore.CompleteAttemptAsync(
+                    job.MoveScanHandoffId.Value,
+                    job.MoveScanAttemptGeneration,
+                    job.Id,
+                    MoveScanTerminalOutcome.Superseded,
+                    error,
+                    found: 0,
+                    created: 0,
+                    scanPath: job.Path,
+                    _timeProvider.GetUtcNow(),
+                    commitToken);
+                return ToTerminalDecision(result);
+            },
             cancellationToken);
-        return ToTerminalDecision(result);
-    }
 
     private async Task<ScanTerminalDecision> RecordMoveScanFailureAsync(
         IHistoryRepository historyRepository,
@@ -158,14 +165,37 @@ public partial class ScanJobProcessor
         string error,
         CancellationToken cancellationToken)
     {
-        var decision = await RecordScanFailureHistoryAsync(
-            historyRepository,
+        return await CommitTerminalDecisionAsync(
             job,
-            audiobook,
-            error,
+            commitToken => RecordScanFailureHistoryAsync(
+                historyRepository,
+                job,
+                audiobook,
+                error,
+                commitToken),
             cancellationToken);
-        ApplyTerminalStatus(job, decision);
-        return decision;
+    }
+
+    private async Task<ScanTerminalDecision> CommitTerminalDecisionAsync(
+        ScanJob job,
+        Func<CancellationToken, Task<ScanTerminalDecision>> persistTerminalDecision,
+        CancellationToken cancellationToken)
+    {
+        ScanTerminalDecision? committedDecision = null;
+        await _queue.CommitTerminalJobStatusAsync(
+            job.Id,
+            async () =>
+            {
+                committedDecision = await persistTerminalDecision(
+                    CancellationToken.None);
+                return (
+                    committedDecision.Status,
+                    committedDecision.Error);
+            },
+            cancellationToken);
+        return committedDecision
+            ?? throw new InvalidOperationException(
+                "Terminal scan persistence completed without a terminal decision.");
     }
 
     private static ScanTerminalDecision ToTerminalDecision(MoveScanAttemptResult result) =>

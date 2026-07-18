@@ -96,6 +96,32 @@ public sealed class EfAudiobookFileRepositoryTests : BaseTests
     }
 
     [Fact]
+    public async Task UpdateAsync_AttachedEntityCannotMutatePathOrAudiobookOwnership()
+    {
+        var options = new DbContextOptionsBuilder<ListenArrDbContext>()
+            .UseInMemoryDatabase(Guid.NewGuid().ToString())
+            .Options;
+        var fileId = await SeedFileAsync(options);
+        await using var metadataContext = new ListenArrDbContext(options);
+        var repository = new EfAudiobookFileRepository(metadataContext);
+        var trackedFile = Assert.IsType<AudiobookFile>(
+            await repository.GetByIdAsync(fileId));
+        var originalAudiobookId = trackedFile.AudiobookId;
+        trackedFile.Path = "/library/foreign/book.m4b";
+        trackedFile.AudiobookId = originalAudiobookId + 1000;
+        trackedFile.DurationSeconds = 321;
+
+        await repository.UpdateAsync(trackedFile);
+
+        await using var verification = new ListenArrDbContext(options);
+        var persisted = await verification.AudiobookFiles.SingleAsync(
+            file => file.Id == fileId);
+        Assert.Equal("/library/source/book.m4b", persisted.Path);
+        Assert.Equal(originalAudiobookId, persisted.AudiobookId);
+        Assert.Equal(321, persisted.DurationSeconds);
+    }
+
+    [Fact]
     public async Task UpdateAsync_DetachedMetadataChange_DoesNotOverwriteNewerPath()
     {
         var options = new DbContextOptionsBuilder<ListenArrDbContext>().UseInMemoryDatabase(Guid.NewGuid().ToString()).Options;

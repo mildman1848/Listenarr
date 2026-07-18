@@ -10,6 +10,9 @@ internal sealed partial class AudiobookContentMoveService
     {
         ArgumentNullException.ThrowIfNull(request);
         cancellationToken.ThrowIfCancellationRequested();
+        request = await WithValidatedTargetDirectoryOwnershipAsync(
+            request,
+            cancellationToken);
 
         var source = NormalizeMoveDirectoryEndpoint(request.Source);
         var target = NormalizeMoveDirectoryEndpoint(request.Target);
@@ -50,7 +53,11 @@ internal sealed partial class AudiobookContentMoveService
 
         if (IsFilesystemRoot(source, sourceSemantics)
             || IsFilesystemRoot(target, targetSemantics)
-            || FileSystemPathIdentity.AreEquivalent(source, target, sourceSemantics))
+            || FileSystemPathIdentity.AreEquivalentEndpoints(
+                source,
+                sourceSemantics,
+                target,
+                targetSemantics))
         {
             throw new MoveNeedsAttentionException(
                 "Move recovery artifacts reference a filesystem root or identical source and target.");
@@ -93,7 +100,8 @@ internal sealed partial class AudiobookContentMoveService
                 manifest,
                 request.JobId,
                 targetSemantics,
-                allowPartialFiles: false);
+                allowPartialFiles: false,
+                targetDirectoryOwnership: request.TargetDirectoryOwnership);
             await VerifyPublishedManifestAsync(
                 target,
                 manifest,
@@ -149,7 +157,8 @@ internal sealed partial class AudiobookContentMoveService
             targetSemantics,
             tempOwnership,
             quarantineOwnership,
-            allowPartialFiles: false);
+            allowPartialFiles: false,
+            targetDirectoryOwnership: request.TargetDirectoryOwnership);
         await VerifyPublishedManifestAsync(
             target,
             manifest,
@@ -181,6 +190,9 @@ internal sealed partial class AudiobookContentMoveService
         AudiobookContentMoveResult result,
         CancellationToken cancellationToken)
     {
+        request = await WithValidatedTargetDirectoryOwnershipAsync(
+            request,
+            cancellationToken);
         if (result.SourceCleanupCompleted)
         {
             return result;
@@ -205,6 +217,7 @@ internal sealed partial class AudiobookContentMoveService
             manifest,
             request.SourceSemantics,
             request.TargetSemantics,
+            request.TargetDirectoryOwnership,
             request.SourceCleanupBoundary,
             cancellationToken);
         VerifySourceCleanupState(request, result.Source, result.Target);

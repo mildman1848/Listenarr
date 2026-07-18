@@ -139,11 +139,28 @@ namespace Listenarr.Domain.Common
                 }
             }
 
-            var rootLength = GetWindowsRootLength(path);
-            if (rootLength <= 0)
+            var isUncPath = HasWindowsUncPrefix(path);
+            int rootLength;
+            if (isUncPath)
             {
-                reason = "Path must be an absolute directory path.";
-                return false;
+                if (!TryParseWindowsUncRoot(
+                    path,
+                    rejectRepeatedSeparators: true,
+                    out rootLength,
+                    out _,
+                    out reason))
+                {
+                    return false;
+                }
+            }
+            else
+            {
+                rootLength = GetWindowsRootLength(path);
+                if (rootLength <= 0)
+                {
+                    reason = "Path must be an absolute directory path.";
+                    return false;
+                }
             }
 
             var pathWithoutRoot = path[rootLength..];
@@ -153,16 +170,17 @@ namespace Listenarr.Domain.Common
                 return false;
             }
 
-            if (!ValidateWindowsDirectorySegments(pathWithoutRoot, rejectParentTraversal, out reason))
+            if (!ValidateWindowsUserProvidedDirectoryStructure(pathWithoutRoot, out reason)
+                || !ValidateWindowsDirectorySegments(pathWithoutRoot, rejectParentTraversal, out reason))
             {
                 return false;
             }
 
             try
             {
-                normalizedPath = OperatingSystem.IsWindows()
-                    ? Path.GetFullPath(path)
-                    : NormalizeWindowsDirectoryPathSyntax(path);
+                normalizedPath = isUncPath || !OperatingSystem.IsWindows()
+                    ? NormalizeWindowsDirectoryPathSyntax(path)
+                    : Path.GetFullPath(path);
 
                 if (IsWindowsRootOnly(normalizedPath) && !allowFileSystemRoot)
                 {
@@ -252,6 +270,7 @@ namespace Listenarr.Domain.Common
             var trimmedStart = path.TrimStart();
             return Path.IsPathRooted(trimmedStart)
                 || IsWindowsCurrentDriveRoot(trimmedStart)
+                || HasWindowsUncPrefix(trimmedStart)
                 || GetWindowsRootLength(trimmedStart) > 0;
         }
 
@@ -267,81 +286,14 @@ namespace Listenarr.Domain.Common
                 return 3;
             }
 
-            if (!path.StartsWith(@"\\", StringComparison.Ordinal) && !path.StartsWith("//", StringComparison.Ordinal))
-            {
-                return 0;
-            }
-
-            var parts = path.Split(new[] { '\\', '/' }, StringSplitOptions.RemoveEmptyEntries);
-            if (parts.Length < 2)
-            {
-                return 0;
-            }
-
-            var index = 2;
-            var separatorsSeen = 0;
-            while (index < path.Length && separatorsSeen < 2)
-            {
-                if (path[index] is '\\' or '/')
-                {
-                    separatorsSeen++;
-                }
-
-                index++;
-            }
-
-            return index;
-        }
-
-        private static bool ValidateWindowsDirectorySegments(string pathWithoutRoot, bool rejectParentTraversal, out string reason)
-        {
-            reason = string.Empty;
-            var segments = pathWithoutRoot.Split(new[] { '\\', '/' }, StringSplitOptions.RemoveEmptyEntries);
-            foreach (var segment in segments)
-            {
-                if (segment == ".")
-                {
-                    reason = "Path cannot contain current directory segments.";
-                    return false;
-                }
-
-                if (segment == ".." && rejectParentTraversal)
-                {
-                    reason = "Path cannot traverse to a parent directory.";
-                    return false;
-                }
-
-                if (segment == "..")
-                {
-                    continue;
-                }
-
-                if (segment.Any(IsInvalidWindowsDirectorySegmentCharacter))
-                {
-                    reason = "Path contains invalid characters.";
-                    return false;
-                }
-
-                if (segment.EndsWith(' ') || segment.EndsWith('.'))
-                {
-                    reason = "Path segments cannot end with a space or period on Windows.";
-                    return false;
-                }
-
-                var stem = segment.Split('.', 2)[0];
-                if (WindowsReservedDeviceNamePattern.IsMatch(stem))
-                {
-                    reason = "Path contains a reserved Windows device name.";
-                    return false;
-                }
-            }
-
-            return true;
-        }
-
-        private static bool IsInvalidWindowsDirectorySegmentCharacter(char character)
-        {
-            return character < 32 || character is '<' or '>' or ':' or '"' or '|' or '?' or '*';
+            return TryParseWindowsUncRoot(
+                path,
+                rejectRepeatedSeparators: false,
+                out var rootLength,
+                out _,
+                out _)
+                ? rootLength
+                : 0;
         }
 
         public static bool ContainsParentDirectorySegment(string path, params char[] separators)
@@ -369,8 +321,31 @@ namespace Listenarr.Domain.Common
         private static string NormalizeWindowsDirectoryPathSyntax(string path)
         {
             var normalizedPath = path.Replace('/', '\\');
-            var rootLength = GetWindowsRootLength(normalizedPath);
-            var root = normalizedPath[..rootLength];
+            string normalizedRoot;
+            int rootLength;
+            if (HasWindowsUncPrefix(normalizedPath))
+            {
+                if (!TryParseWindowsUncRoot(
+                    normalizedPath,
+                    rejectRepeatedSeparators: false,
+                    out rootLength,
+                    out normalizedRoot,
+                    out var reason))
+                {
+                    throw new ArgumentException(reason, nameof(path));
+                }
+            }
+            else
+            {
+                rootLength = GetWindowsRootLength(normalizedPath);
+                if (rootLength <= 0)
+                {
+                    throw new ArgumentException("Windows path must be absolute.", nameof(path));
+                }
+
+                normalizedRoot = NormalizeWindowsRootForStorage(normalizedPath[..rootLength]);
+            }
+
             var pathWithoutRoot = normalizedPath[rootLength..];
             var segments = new List<string>();
 
@@ -394,7 +369,6 @@ namespace Listenarr.Domain.Common
                 segments.Add(segment);
             }
 
-            var normalizedRoot = NormalizeWindowsRootForStorage(root);
             return segments.Count == 0
                 ? normalizedRoot
                 : normalizedRoot.TrimEnd('\\') + "\\" + string.Join("\\", segments);
@@ -402,6 +376,16 @@ namespace Listenarr.Domain.Common
 
         private static string NormalizeWindowsRootForStorage(string root)
         {
+            if (TryParseWindowsUncRoot(
+                root,
+                rejectRepeatedSeparators: false,
+                out _,
+                out var normalizedUncRoot,
+                out _))
+            {
+                return normalizedUncRoot;
+            }
+
             var normalizedRoot = root.Replace('/', '\\');
             if (Regex.IsMatch(normalizedRoot, "^[A-Za-z]:$"))
             {
@@ -418,21 +402,20 @@ namespace Listenarr.Domain.Common
 
         private static bool IsWindowsRootOnly(string path)
         {
+            if (HasWindowsUncPrefix(path))
+            {
+                return TryParseWindowsUncRoot(
+                    path,
+                    rejectRepeatedSeparators: false,
+                    out var rootLength,
+                    out _,
+                    out _)
+                    && path[rootLength..].All(IsWindowsDirectorySeparator);
+            }
+
             var pathWithWindowsSeparators = path.Replace('/', '\\');
             var normalizedPath = pathWithWindowsSeparators.TrimEnd('\\');
-            if (Regex.IsMatch(normalizedPath, "^[A-Za-z]:$"))
-            {
-                return true;
-            }
-
-            var rootLength = GetWindowsRootLength(pathWithWindowsSeparators);
-            if (rootLength <= 0)
-            {
-                return false;
-            }
-
-            var root = pathWithWindowsSeparators[..rootLength].TrimEnd('\\');
-            return string.Equals(normalizedPath, root, StringComparison.OrdinalIgnoreCase);
+            return Regex.IsMatch(normalizedPath, "^[A-Za-z]:$");
         }
 
         private static string NormalizeUnixDirectoryPathSyntax(string path)

@@ -573,6 +573,98 @@ namespace Listenarr.Infrastructure.Persistence.Migrations
                     b.ToTable("AuthorCacheEntries");
                 });
 
+            modelBuilder.Entity("Listenarr.Domain.Audiobooks.LibraryDirectoryOwnership", b =>
+                {
+                    b.Property<long>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("INTEGER");
+
+                    b.Property<int?>("AudiobookId")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("CanonicalPath")
+                        .IsRequired()
+                        .HasMaxLength(4096)
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid?>("CreationOperationId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("CreationWorkflow")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("OwnershipToken")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Path")
+                        .IsRequired()
+                        .HasMaxLength(2000)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("PathCaseSensitivity")
+                        .IsRequired()
+                        .HasMaxLength(16)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("PathCaseSensitivityMode")
+                        .IsRequired()
+                        .HasMaxLength(16)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("PathIdentityBoundary")
+                        .IsRequired()
+                        .HasMaxLength(4096)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("PathIdentityLookupKey")
+                        .IsRequired()
+                        .HasMaxLength(160)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("PathOwnershipKey")
+                        .HasMaxLength(160)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("PathSyntax")
+                        .IsRequired()
+                        .HasMaxLength(16)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("State")
+                        .IsRequired()
+                        .HasMaxLength(16)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("StateReason")
+                        .HasMaxLength(1024)
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime>("UpdatedAt")
+                        .HasColumnType("TEXT");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("OwnershipToken")
+                        .IsUnique();
+
+                    b.HasIndex("PathIdentityLookupKey");
+
+                    b.HasIndex("PathOwnershipKey")
+                        .IsUnique()
+                        .HasFilter("\"PathOwnershipKey\" IS NOT NULL");
+
+                    b.HasIndex("CreationOperationId", "State");
+
+                    b.ToTable("LibraryDirectoryOwnerships", (string)null);
+                });
+
             modelBuilder.Entity("Listenarr.Domain.Audiobooks.MonitoredAuthor", b =>
                 {
                     b.Property<int>("Id")

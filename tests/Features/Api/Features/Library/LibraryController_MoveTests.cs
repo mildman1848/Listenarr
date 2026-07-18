@@ -571,6 +571,54 @@ namespace Listenarr.Tests.Features.Api.Features.Library
         }
 
         [Fact]
+        public async Task MoveAudiobook_CancelledWhileWaitingForFilesystemMutationDoesNotEnqueue()
+        {
+            var coordinator = new FilesystemMutationCoordinator();
+            var moveQueue = new Mock<IMoveQueueService>();
+            Init(services => services
+                .WithSingleton(moveQueue.Object)
+                .WithSingleton<IFilesystemMutationCoordinator>(coordinator));
+            var outputPath = FileService.GetTempDirectory("listenarr-move-cancel-output");
+            await _applicationSettingsRepository.SaveAsync(new ApplicationSettingsBuilder()
+                .WithOutputPath(outputPath)
+                .Build());
+            var sourcePath = FileService.GetTempDirectory("listenarr-move-cancel-src");
+            await FileService.GetFileAsync(sourcePath, "book.m4b", "audio");
+            var audiobook = await _audiobookRepository.AddAsync(new AudiobookBuilder()
+                .WithTitle("Cancelled Physical Gate")
+                .WithBasePath(sourcePath)
+                .Build());
+            var lockEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var releaseLock = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var lockTask = coordinator.ExecuteExclusiveAsync(async _ =>
+            {
+                lockEntered.SetResult();
+                await releaseLock.Task;
+            });
+            await lockEntered.Task;
+            using var cancellation = new CancellationTokenSource();
+
+            var moveTask = _provider.GetRequiredService<LibraryController>().EnqueueMove(
+                audiobook.Id,
+                new LibraryController.MoveRequest
+                {
+                    DestinationPath = Path.Join(outputPath, "cancelled-target"),
+                    SourcePath = sourcePath,
+                    MoveFiles = true
+                },
+                cancellation.Token);
+            await Task.Delay(50);
+            cancellation.Cancel();
+
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => moveTask);
+            releaseLock.SetResult();
+            await lockTask;
+            moveQueue.Verify(service => service.EnqueueMoveAsync(
+                It.IsAny<MoveEnqueueCommand>(),
+                It.IsAny<CancellationToken>()), Times.Never);
+        }
+
+        [Fact]
         public async Task MoveAudiobook_MetadataOnlyWaitsForFilesystemMutationCoordinator()
         {
             var coordinator = new FilesystemMutationCoordinator();

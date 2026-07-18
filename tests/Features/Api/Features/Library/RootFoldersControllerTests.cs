@@ -142,6 +142,11 @@ namespace Listenarr.Tests.Features.Api.Features.Library
             var ok = Assert.IsType<Microsoft.AspNetCore.Mvc.OkObjectResult>(res);
             var list = Assert.IsAssignableFrom<List<RootFolderDto>>(ok.Value);
             Assert.Equal(2, list.Count);
+            Assert.All(
+                list,
+                item => Assert.Equal(
+                    OperatingSystem.IsWindows() ? "Windows" : "Unix",
+                    item.PathSyntax));
         }
 
         [Fact]

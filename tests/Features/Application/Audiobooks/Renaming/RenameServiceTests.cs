@@ -1595,6 +1595,17 @@ namespace Listenarr.Tests.Features.Application.Audiobooks.Renaming
                 identityResolver = identityResolverMock.Object;
             }
 
+            var directoryOwnershipStore = new Mock<ILibraryDirectoryOwnershipStore>();
+            directoryOwnershipStore
+                .Setup(store => store.EnsureCreatedHierarchyAsync(
+                    It.IsAny<string>(),
+                    It.IsAny<string>(),
+                    It.IsAny<FileSystemPathSemantics>(),
+                    It.IsAny<string>(),
+                    It.IsAny<Guid?>(),
+                    It.IsAny<int?>(),
+                    It.IsAny<CancellationToken>()))
+                .ReturnsAsync([]);
             var service = new RenameService(
                 config.Object,
                 fileNaming,
@@ -1607,6 +1618,7 @@ namespace Listenarr.Tests.Features.Application.Audiobooks.Renaming
                 NullLogger<RenameService>.Instance,
                 semanticsResolver,
                 operationCoordinator ?? _operationCoordinator,
+                directoryOwnershipStore.Object,
                 rootFolderServiceOverride);
 
             return (service, db, dbName);

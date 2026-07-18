@@ -656,7 +656,7 @@ import { apiService, ensureImageCached } from '@/services/api'
 import { isApiImagesUrl } from '@/services/apiBase'
 import { handleImageError } from '@/utils/imageFallback'
 import { getPlaceholderUrl } from '@/utils/placeholder'
-import { joinPaths, isAbsolutePath } from '@/utils/path'
+import { detectPathKind, joinPaths, isAbsolutePath } from '@/utils/path'
 import { signalRService } from '@/services/signalr'
 import type {
   Audiobook,
@@ -1750,10 +1750,12 @@ function toggleFileAccordion(fileId: number): void {
 function getFullPath(relativePath?: string): string {
   if (!relativePath) return 'Unknown'
 
-  const isAbsolute = isAbsolutePath(relativePath)
+  const basePath = audiobook.value?.basePath
+  const pathKind = detectPathKind(basePath)
+  const isAbsolute = isAbsolutePath(relativePath, pathKind)
   if (isAbsolute) return relativePath
-  if (!audiobook.value?.basePath) return relativePath
-  return joinPaths(audiobook.value.basePath, relativePath)
+  if (!basePath) return relativePath
+  return joinPaths(basePath, relativePath, pathKind)
 }
 
 function formatDate(dateString?: string): string {

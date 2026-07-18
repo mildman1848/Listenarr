@@ -134,19 +134,38 @@ public static partial class FileSystemPathIdentity
     {
         sourceIdentity.ValidateForPath(source);
         targetIdentity.ValidateForPath(target);
-        if (sourceIdentity.Syntax != targetIdentity.Syntax)
+        return AreEquivalentEndpoints(
+            source,
+            sourceIdentity.Semantics,
+            target,
+            targetIdentity.Semantics);
+    }
+
+    public static bool AreEquivalentEndpoints(
+        string source,
+        FileSystemPathSemantics sourceSemantics,
+        string target,
+        FileSystemPathSemantics targetSemantics)
+    {
+        if (sourceSemantics.CaseSensitivity == FileSystemCaseSensitivity.Unknown
+            || targetSemantics.CaseSensitivity == FileSystemCaseSensitivity.Unknown)
+        {
+            throw new InvalidOperationException(
+                "Both endpoint case-sensitivity rules must be resolved before comparison.");
+        }
+        if (sourceSemantics.Syntax != targetSemantics.Syntax)
         {
             return false;
         }
 
-        var comparisonSensitivity = sourceIdentity.CaseSensitivity == FileSystemCaseSensitivity.Insensitive
-            || targetIdentity.CaseSensitivity == FileSystemCaseSensitivity.Insensitive
+        var comparisonSensitivity = sourceSemantics.CaseSensitivity == FileSystemCaseSensitivity.Insensitive
+            || targetSemantics.CaseSensitivity == FileSystemCaseSensitivity.Insensitive
                 ? FileSystemCaseSensitivity.Insensitive
                 : FileSystemCaseSensitivity.Sensitive;
         return AreEquivalent(
             source,
             target,
-            new FileSystemPathSemantics(sourceIdentity.Syntax, comparisonSensitivity));
+            new FileSystemPathSemantics(sourceSemantics.Syntax, comparisonSensitivity));
     }
 
     public static FileSystemPathSemantics ResolveComparisonSemantics(
@@ -238,6 +257,14 @@ public static partial class FileSystemPathIdentity
         {
             syntax = FileSystemPathSyntax.Windows;
             return true;
+        }
+
+        // A double-forward-slash path is valid Unix syntax and is also commonly
+        // used as a Windows UNC spelling. Without an owning filesystem context,
+        // choosing either interpretation would be an identity-changing guess.
+        if (IsForwardSlashUncPath(path))
+        {
+            return false;
         }
 
         if (path.StartsWith("/", StringComparison.Ordinal))
@@ -352,8 +379,24 @@ public static partial class FileSystemPathIdentity
     private static bool IsRooted(string path, FileSystemPathSyntax syntax)
     {
         return syntax == FileSystemPathSyntax.Windows
-            ? WindowsDrivePattern.IsMatch(path) || path.StartsWith("\\\\", StringComparison.Ordinal)
+            ? WindowsDrivePattern.IsMatch(path)
+                || path.StartsWith("\\\\", StringComparison.Ordinal)
+                || IsForwardSlashUncPath(path)
             : path.StartsWith("/", StringComparison.Ordinal);
+    }
+
+    private static bool IsForwardSlashUncPath(string path)
+    {
+        if (!path.StartsWith("//", StringComparison.Ordinal)
+            || path.StartsWith("///", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        var parts = path[2..].Split(
+            ['/', '\\'],
+            StringSplitOptions.RemoveEmptyEntries);
+        return parts.Length >= 2;
     }
 
     private static string CanonicalizeUnix(string path)
@@ -389,15 +432,39 @@ public static partial class FileSystemPathIdentity
             throw new ArgumentException("Windows filesystem identity requires an absolute path.", nameof(path));
         }
 
-        var parts = path[2..].Split('\\', StringSplitOptions.RemoveEmptyEntries);
-        if (parts.Length < 2)
+        var position = 2;
+        while (position < path.Length && path[position] == '\\')
         {
-            throw new ArgumentException("UNC paths require a server and share.", nameof(path));
+            position++;
         }
 
-        var root = $"\\\\{parts[0]}\\{parts[1]}";
-        var consumedLength = 2 + parts[0].Length + 1 + parts[1].Length;
-        return (root, path.Length > consumedLength ? path[consumedLength..] : string.Empty);
+        var serverStart = position;
+        while (position < path.Length && path[position] != '\\')
+        {
+            position++;
+        }
+        var server = path[serverStart..position];
+
+        while (position < path.Length && path[position] == '\\')
+        {
+            position++;
+        }
+
+        var shareStart = position;
+        while (position < path.Length && path[position] != '\\')
+        {
+            position++;
+        }
+        var share = path[shareStart..position];
+        if (string.IsNullOrWhiteSpace(server)
+            || string.IsNullOrWhiteSpace(share)
+            || server is "." or ".."
+            || share is "." or "..")
+        {
+            throw new ArgumentException("UNC paths require a valid server and share.", nameof(path));
+        }
+
+        return ($"\\\\{server}\\{share}", path[position..]);
     }
 
     private static List<string> CollapseSegments(IEnumerable<string> source)

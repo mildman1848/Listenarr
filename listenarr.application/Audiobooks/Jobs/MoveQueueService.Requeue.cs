@@ -6,10 +6,13 @@ namespace Listenarr.Application.Audiobooks.Jobs;
 
 public partial class MoveQueueService
 {
-    public async Task<Guid?> RequeueMoveAsync(Guid jobId)
+    public async Task<Guid?> RequeueMoveAsync(
+        Guid jobId,
+        CancellationToken requestCancellationToken = default)
     {
-        await EnsureIdentityKeysReconciledAsync(CancellationToken.None);
+        await EnsureIdentityKeysReconciledAsync(requestCancellationToken);
         MoveJob? jobToSchedule = null;
+        MoveJob? jobToNotify = null;
         var result = await _mutationCoordinator.ExecuteExclusiveAsync<Guid?>(async cancellationToken =>
         {
             MoveJob? job;
@@ -48,32 +51,78 @@ public partial class MoveQueueService
             PathIdentitySnapshot sourceIdentity;
             if (!job.TryGetSourceIdentity(out sourceIdentity))
             {
-                sourcePath = FileSystemPathIdentity.ResolveNativeAbsolutePath(sourcePath);
+                if (!FileSystemPathIdentity.TryCanonicalizeStoredAbsolutePathForHost(
+                    sourcePath,
+                    out sourcePath,
+                    out var sourceReason))
+                {
+                    if (await MarkUnsafeStoredPathNeedsAttentionAsync(
+                            job,
+                            $"Move source path cannot be requeued safely: {sourceReason}",
+                            cancellationToken))
+                    {
+                        jobToNotify = job;
+                    }
+                    return null;
+                }
+
                 sourceIdentity = await ResolveIdentitySnapshotAsync(
                     sourcePath,
                     cancellationToken: cancellationToken);
             }
-            else
+            else if (!FileSystemPathIdentity.TryCanonicalizeStoredPathWithIdentityForHost(
+                sourcePath,
+                sourceIdentity,
+                out sourcePath,
+                out var sourceReason))
             {
-                sourcePath = FileSystemPathIdentity.Canonicalize(
-                    sourcePath,
-                    sourceIdentity.Syntax);
+                if (await MarkUnsafeStoredPathNeedsAttentionAsync(
+                        job,
+                        $"Move source path cannot be requeued safely: {sourceReason}",
+                        cancellationToken))
+                {
+                    jobToNotify = job;
+                }
+                return null;
             }
 
             var targetPath = job.RequestedPath;
             PathIdentitySnapshot targetIdentity;
             if (!job.TryGetTargetIdentity(out targetIdentity))
             {
-                targetPath = FileSystemPathIdentity.ResolveNativeAbsolutePath(targetPath);
+                if (!FileSystemPathIdentity.TryCanonicalizeStoredAbsolutePathForHost(
+                    targetPath,
+                    out targetPath,
+                    out var targetReason))
+                {
+                    if (await MarkUnsafeStoredPathNeedsAttentionAsync(
+                            job,
+                            $"Move target path cannot be requeued safely: {targetReason}",
+                            cancellationToken))
+                    {
+                        jobToNotify = job;
+                    }
+                    return null;
+                }
+
                 targetIdentity = await ResolveIdentitySnapshotAsync(
                     targetPath,
                     cancellationToken: cancellationToken);
             }
-            else
+            else if (!FileSystemPathIdentity.TryCanonicalizeStoredPathWithIdentityForHost(
+                targetPath,
+                targetIdentity,
+                out targetPath,
+                out var targetReason))
             {
-                targetPath = FileSystemPathIdentity.Canonicalize(
-                    targetPath,
-                    targetIdentity.Syntax);
+                if (await MarkUnsafeStoredPathNeedsAttentionAsync(
+                        job,
+                        $"Move target path cannot be requeued safely: {targetReason}",
+                        cancellationToken))
+                {
+                    jobToNotify = job;
+                }
+                return null;
             }
 
             await ThrowIfRelocationBoundaryProtectedAsync(
@@ -99,6 +148,7 @@ public partial class MoveQueueService
                 job.AudiobookId,
                 targetPath,
                 targetIdentity);
+            cancellationToken.ThrowIfCancellationRequested();
             var requeue = await _persistence.RequeueAsync(
                 new RequeueMoveCommand(
                     job.Id,
@@ -109,7 +159,7 @@ public partial class MoveQueueService
                     targetIdentity,
                     deduplicationKey,
                     _timeProvider.GetUtcNow()),
-                cancellationToken);
+                CancellationToken.None);
             switch (requeue.Outcome)
             {
                 case MoveRequeueOutcome.Requeued:
@@ -135,7 +185,7 @@ public partial class MoveQueueService
                     throw new InvalidOperationException(
                         $"Unsupported move requeue outcome {requeue.Outcome}.");
             }
-        });
+        }, requestCancellationToken);
 
         if (jobToSchedule != null)
         {
@@ -144,6 +194,13 @@ public partial class MoveQueueService
                 jobToSchedule.Id,
                 jobToSchedule.Status,
                 jobToSchedule.Error);
+        }
+        else if (jobToNotify != null)
+        {
+            await NotifyPersistedJobStateAsync(
+                jobToNotify.Id,
+                jobToNotify.Status,
+                jobToNotify.Error);
         }
 
         return result;
@@ -168,6 +225,35 @@ public partial class MoveQueueService
             requestedPath,
             targetIdentity.Semantics,
             version: 3);
+
+    private async Task<bool> MarkUnsafeStoredPathNeedsAttentionAsync(
+        MoveJob job,
+        string error,
+        CancellationToken cancellationToken)
+    {
+        var updated = await _persistence.MarkNeedsAttentionAsync(
+            job.Id,
+            job.Status,
+            error,
+            _timeProvider.GetUtcNow(),
+            cancellationToken);
+        if (!updated)
+        {
+            _logger.LogInformation(
+                "Move job {JobId} changed state while an unsafe persisted path was being rejected",
+                job.Id);
+            return false;
+        }
+
+        job.Status = MoveJobStatus.NeedsAttention;
+        job.Error = error;
+        job.FailureKind = MoveFailureKind.Verification;
+        job.ActiveDeduplicationKey = null;
+        job.LeaseOwner = null;
+        job.LeaseExpiresAt = null;
+        _logger.LogWarning("Move job {JobId} requires attention: {Error}", job.Id, error);
+        return true;
+    }
 
     private async Task<PathIdentitySnapshot> ResolveIdentitySnapshotAsync(
         string path,

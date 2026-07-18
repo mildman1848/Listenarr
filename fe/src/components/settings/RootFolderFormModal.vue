@@ -115,6 +115,13 @@ import { PhFolder } from '@phosphor-icons/vue'
 import { useRootFoldersStore } from '@/stores/rootFolders'
 import { useToast } from '@/services/toastService'
 import type { RootFolder } from '@/types'
+import {
+  detectPathKind,
+  pathsEqual,
+  validateLibraryDestinationPath,
+  type PathCaseSensitivity,
+  type PathKind,
+} from '@/utils/path'
 
 const { root } = defineProps<{ root?: RootFolder }>()
 const emit = defineEmits<{
@@ -149,16 +156,59 @@ function close() {
   emit('close')
 }
 
+function persistedRootPathKind(): PathKind {
+  if (root?.pathSyntax === 'Windows') return 'windows'
+  if (root?.pathSyntax === 'Unix') return 'unix'
+  return detectPathKind(root?.path)
+}
+
+function rootPathKind(): PathKind {
+  const sourceKind = persistedRootPathKind()
+  const detected = detectPathKind(form.value.path, sourceKind)
+  return detected === 'unknown' ? sourceKind : detected
+}
+
+function persistedRootCaseSensitivity(): PathCaseSensitivity {
+  if (root?.resolvedCaseSensitivity && root.resolvedCaseSensitivity !== 'Unknown') {
+    return root.resolvedCaseSensitivity
+  }
+  if (root?.caseSensitivityMode === 'Sensitive') return 'Sensitive'
+  if (root?.caseSensitivityMode === 'Insensitive') return 'Insensitive'
+  return 'Unknown'
+}
+
+function rootPathChanged(): boolean {
+  if (!root) return false
+
+  const sourceKind = persistedRootPathKind()
+  const candidateKind = detectPathKind(form.value.path, sourceKind)
+  if (sourceKind !== 'unknown' && candidateKind !== 'unknown' && sourceKind !== candidateKind) {
+    return true
+  }
+
+  return !pathsEqual(form.value.path, root.path, sourceKind, persistedRootCaseSensitivity())
+}
+
 async function save() {
   if (!form.value.name || !form.value.path) {
     toast.error('Validation Error', 'Name and Path are required')
     return
   }
+
+  const pathValidationError = validateLibraryDestinationPath(form.value.path, {
+    pathKind: rootPathKind(),
+    requireAbsolute: true,
+  })
+  if (pathValidationError) {
+    toast.error('Validation Error', pathValidationError)
+    return
+  }
+
   try {
     let newRoot
     if (root?.id) {
       // If path changed, show confirmation to choose whether to move files
-      if (form.value.path !== root.path) {
+      if (rootPathChanged()) {
         showConfirm.value = true
         return
       }

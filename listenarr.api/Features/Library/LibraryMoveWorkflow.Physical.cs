@@ -9,8 +9,10 @@ public sealed partial class LibraryMoveWorkflow
 {
     private async Task<IActionResult> EnqueuePhysicalAsync(
         int id,
-        LibraryController.MoveRequest request)
+        LibraryController.MoveRequest request,
+        CancellationToken cancellationToken)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         var audiobook = await _repo.GetByIdAsync(id);
         if (audiobook == null)
         {
@@ -24,13 +26,15 @@ public sealed partial class LibraryMoveWorkflow
             var rootFolderService = scope.ServiceProvider.GetRequiredService<IRootFolderService>();
             var settings = await configService.GetApplicationSettingsAsync();
             var rootFolders = await rootFolderService.GetAllAsync();
+            cancellationToken.ThrowIfCancellationRequested();
 
             var allowedMoveRoots = new List<MoveRootBoundary>();
             var normalizedOutputPath = TryNormalizeMoveRoot(settings.OutputPath, "configured output path");
             await AddAllowedMoveRootAsync(
                 allowedMoveRoots,
                 normalizedOutputPath,
-                FileSystemCaseSensitivityMode.Auto);
+                FileSystemCaseSensitivityMode.Auto,
+                cancellationToken);
 
             string? defaultRootPath = null;
             foreach (var rootFolder in rootFolders)
@@ -46,7 +50,8 @@ public sealed partial class LibraryMoveWorkflow
                 await AddAllowedMoveRootAsync(
                     allowedMoveRoots,
                     normalizedRootPath,
-                    rootFolder.CaseSensitivityMode);
+                    rootFolder.CaseSensitivityMode,
+                    cancellationToken);
                 if (rootFolder.IsDefault && defaultRootPath == null)
                 {
                     defaultRootPath = normalizedRootPath;
@@ -120,7 +125,9 @@ public sealed partial class LibraryMoveWorkflow
             var targetBoundary = FindAllowedMoveRoot(final, allowedMoveRoots);
             if (targetBoundary == null && customPhysicalDestination)
             {
-                var customTargetResolution = await _semanticsResolver.ResolveAsync(final);
+                var customTargetResolution = await _semanticsResolver.ResolveAsync(
+                    final,
+                    cancellationToken: cancellationToken);
                 if (customTargetResolution.State != PathIdentityState.Valid)
                 {
                     return new BadRequestObjectResult(new
@@ -213,7 +220,9 @@ public sealed partial class LibraryMoveWorkflow
             }
             else
             {
-                var sourceResolution = await _semanticsResolver.ResolveAsync(sourceFull);
+                var sourceResolution = await _semanticsResolver.ResolveAsync(
+                    sourceFull,
+                    cancellationToken: cancellationToken);
                 if (sourceResolution.State != PathIdentityState.Valid)
                 {
                     return new BadRequestObjectResult(new
@@ -290,7 +299,8 @@ public sealed partial class LibraryMoveWorkflow
                 var cleanupBoundary = await _cleanupBoundaryResolver.ResolveAsync(
                     sourcePath,
                     final,
-                    rootFolders);
+                    rootFolders,
+                    cancellationToken: cancellationToken);
                 sourceCleanupBoundary = cleanupBoundary.Boundary;
                 if (!cleanupBoundary.IsAvailable)
                 {
@@ -345,7 +355,7 @@ public sealed partial class LibraryMoveWorkflow
                         enqueueCommand,
                         lockedToken);
                 },
-                CancellationToken.None);
+                cancellationToken);
 
             return new AcceptedResult(
                 string.Empty,

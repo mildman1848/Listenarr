@@ -260,15 +260,17 @@ public partial class RenameService
 
         try
         {
-            if (FileSystemPathIdentity.TryDetectAbsoluteSyntax(storedPath, out var syntax))
+            if (FileSystemPathIdentity.TryDetectAbsoluteSyntax(
+                    storedPath,
+                    semantics.Syntax,
+                    out _))
             {
-                if (syntax != semantics.Syntax)
-                {
-                    error = "Tracked audiobook file path uses an unexpected filesystem syntax.";
-                    return string.Empty;
-                }
-
                 return FileSystemPathIdentity.Canonicalize(storedPath, semantics.Syntax);
+            }
+            if (FileSystemPathIdentity.TryDetectAbsoluteSyntax(storedPath, out _))
+            {
+                error = "Tracked audiobook file path uses an unexpected filesystem syntax.";
+                return string.Empty;
             }
 
             if (string.IsNullOrWhiteSpace(audiobook.BasePath)

@@ -59,7 +59,10 @@ namespace Listenarr.Api.Features.Library
             _moveQueueService = moveQueueService;
         }
 
-        public async Task<IActionResult> EnqueueAsync(int id, LibraryController.MoveRequest request)
+        public async Task<IActionResult> EnqueueAsync(
+            int id,
+            LibraryController.MoveRequest request,
+            CancellationToken cancellationToken = default)
         {
             if (_moveQueueService == null) return new NotFoundObjectResult(new { message = "Move queue not available" });
             if (request == null) return new BadRequestObjectResult(new { message = "Request body is required" });
@@ -84,7 +87,8 @@ namespace Listenarr.Api.Features.Library
                     await _destinationRewriteService.RewriteDestinationAsync(
                         id,
                         request.DestinationPath,
-                        request.SourcePath);
+                        request.SourcePath,
+                        cancellationToken);
                     return new OkObjectResult(new { message = "Destination updated" });
                 }
                 catch (ListenarrApplicationException ex)
@@ -102,7 +106,8 @@ namespace Listenarr.Api.Features.Library
             }
 
             return await _mutationCoordinator.ExecuteExclusiveAsync(
-                _ => EnqueuePhysicalAsync(id, request));
+                token => EnqueuePhysicalAsync(id, request, token),
+                cancellationToken);
         }
 
         public async Task<IActionResult> GetStatusAsync(
@@ -121,7 +126,9 @@ namespace Listenarr.Api.Features.Library
             return new NotFoundObjectResult(new { message = "Job not found" });
         }
 
-        public async Task<IActionResult> RequeueAsync(string jobId)
+        public async Task<IActionResult> RequeueAsync(
+            string jobId,
+            CancellationToken cancellationToken = default)
         {
             if (_moveQueueService == null) return new NotFoundObjectResult(new { message = "Move queue not available" });
             if (!Guid.TryParse(jobId, out var gid)) return new BadRequestObjectResult(new { message = "Invalid jobId" });
@@ -129,7 +136,9 @@ namespace Listenarr.Api.Features.Library
             Guid? newJobId;
             try
             {
-                newJobId = await _moveQueueService.RequeueMoveAsync(gid);
+                newJobId = await _moveQueueService.RequeueMoveAsync(
+                    gid,
+                    cancellationToken);
             }
             catch (MoveRelocationConflictException ex)
             {

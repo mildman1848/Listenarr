@@ -20,7 +20,8 @@ internal sealed partial class AudiobookContentMoveService
         CancellationToken cancellationToken,
         string? ownedRecoveryMarkerPath = null,
         IReadOnlyCollection<string>? ownedScaffoldPaths = null,
-        IReadOnlyCollection<string>? structuralSpinePaths = null)
+        IReadOnlyCollection<string>? structuralSpinePaths = null,
+        IReadOnlyCollection<string>? ownedDirectoryMarkerPaths = null)
     {
         if (!Directory.Exists(source))
         {
@@ -58,6 +59,19 @@ internal sealed partial class AudiobookContentMoveService
                             "A target structural directory became a file.");
                     }
 
+                    continue;
+                }
+
+                var isOwnedDirectoryMarker = ownedDirectoryMarkerPaths?.Any(path =>
+                    FileSystemPathIdentity.AreEquivalent(path, entry, sourceSemantics)) == true;
+                if (isOwnedDirectoryMarker)
+                {
+                    if (!File.Exists(entry)
+                        || (File.GetAttributes(entry) & FileAttributes.ReparsePoint) != 0)
+                    {
+                        throw new MoveNeedsAttentionException(
+                            "A validated directory ownership marker changed type or became linked.");
+                    }
                     continue;
                 }
 
@@ -124,6 +138,9 @@ internal sealed partial class AudiobookContentMoveService
         || name.StartsWith(".listenarr-temporary-directory-", StringComparison.Ordinal)
         || string.Equals(name, ".listenarr-temp-owner.json", StringComparison.Ordinal)
         || string.Equals(name, ".listenarr-quarantine-owner.json", StringComparison.Ordinal)
+        || string.Equals(name, LibraryDirectoryOwnershipMarker.FileName, StringComparison.Ordinal)
+        || name.StartsWith(".listenarr-directory-owner-", StringComparison.Ordinal)
+            && name.EndsWith(".json", StringComparison.Ordinal)
         || name.Contains(".listenarr-", StringComparison.Ordinal)
             && name.EndsWith(".partial", StringComparison.Ordinal);
 

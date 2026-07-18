@@ -16,6 +16,16 @@ namespace Listenarr.Infrastructure.FileSystem
         {
             try
             {
+                if (!TryRecoverInterruptedCopiedSourceCleanup(
+                        sourceDir,
+                        out var recoveryReason))
+                {
+                    _logger.LogWarning(
+                        "Blocked directory copy because interrupted source cleanup could not be recovered: {Reason}",
+                        recoveryReason);
+                    return false;
+                }
+
                 if (await IsSameFilesystemPathAsync(sourceDir, destDir))
                 {
                     LogMutation(
@@ -27,7 +37,7 @@ namespace Listenarr.Infrastructure.FileSystem
                     return true;
                 }
 
-                CopyDirRecursive(sourceDir, destDir);
+                await CopyDirRecursiveAsync(sourceDir, destDir);
                 LogMutation(FileMutationOutcome.Success, FileAction.Copy, sourceDir, destDir);
                 return true;
             }
@@ -183,7 +193,7 @@ namespace Listenarr.Infrastructure.FileSystem
             }
         }
 
-        private void CopyDirRecursive(string src, string dst)
+        private async Task CopyDirRecursiveAsync(string src, string dst)
         {
             Directory.CreateDirectory(dst);
             foreach (var dir in Directory.GetDirectories(src, "*", SearchOption.TopDirectoryOnly))
@@ -194,7 +204,7 @@ namespace Listenarr.Infrastructure.FileSystem
                     throw new IOException($"Directory copy destination escaped root: {relative}");
                 }
 
-                CopyDirRecursive(dir, sub);
+                await CopyDirRecursiveAsync(dir, sub);
             }
 
             foreach (var file in Directory.GetFiles(src, "*.*", SearchOption.TopDirectoryOnly))
@@ -205,7 +215,8 @@ namespace Listenarr.Infrastructure.FileSystem
                     throw new IOException($"File copy destination escaped root: {relative}");
                 }
 
-                if (File.Exists(destFile) && FileSystemSafety.FilesHaveSameContentAsync(file, destFile).GetAwaiter().GetResult())
+                if (File.Exists(destFile)
+                    && await FileSystemSafety.FilesHaveSameContentAsync(file, destFile))
                 {
                     LogMutation(FileMutationOutcome.Skipped, FileAction.Copy, file, destFile, "Destination already has identical content");
                     continue;

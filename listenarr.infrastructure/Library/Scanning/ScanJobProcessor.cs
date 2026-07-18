@@ -115,11 +115,10 @@ namespace Listenarr.Infrastructure.Library.Scanning
                             job.Path,
                             targetIdentity.Semantics))
                     {
-                        var superseded = await RecordMoveScanSupersededAsync(
+                        await RecordMoveScanSupersededAsync(
                             job,
                             "A newer audiobook destination superseded this move scan handoff.",
                             stoppingToken);
-                        ApplyTerminalStatus(job, superseded);
                         _metrics.Increment("worker.scan.job.skipped");
                         return;
                     }
@@ -432,15 +431,17 @@ namespace Listenarr.Infrastructure.Library.Scanning
                     return;
                 }
 
-                var terminalDecision = await RecordScanCompletionAsync(
-                    historyRepository,
+                var terminalDecision = await CommitTerminalDecisionAsync(
                     job,
-                    audiobook,
-                    foundFiles.Count,
-                    createdFiles,
-                    scanRoot,
+                    commitToken => RecordScanCompletionAsync(
+                        historyRepository,
+                        job,
+                        audiobook,
+                        foundFiles.Count,
+                        createdFiles,
+                        scanRoot,
+                        commitToken),
                     stoppingToken);
-                ApplyTerminalStatus(job, terminalDecision);
                 if (!string.Equals(terminalDecision.Status, "Completed", StringComparison.OrdinalIgnoreCase))
                 {
                     _metrics.Increment("worker.scan.job.skipped");

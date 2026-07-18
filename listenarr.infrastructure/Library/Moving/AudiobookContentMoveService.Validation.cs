@@ -19,18 +19,25 @@ internal sealed partial class AudiobookContentMoveService
         string target,
         bool sourceInsideTarget,
         bool resumingOwnedDirectCopy,
-        FileSystemPathSemantics semantics)
+        FileSystemPathSemantics semantics,
+        LibraryDirectoryOwnership? targetDirectoryOwnership)
     {
         if (!Directory.Exists(target) || resumingOwnedDirectCopy)
         {
             return;
         }
 
+        RevalidateTargetDirectoryOwnership(targetDirectoryOwnership);
         // When moving a child folder back into its parent, the target necessarily contains
         // the source subtree. That subtree is not a collision because it is the content being moved.
         var targetHasBlockingContent = Directory
             .EnumerateFileSystemEntries(target)
-            .Any(entry => !(sourceInsideTarget && IsTargetEntryAllowedBySourceSubtree(entry, source, semantics)));
+            .Any(entry => !IsValidatedTargetOwnershipMarker(
+                    entry,
+                    targetDirectoryOwnership,
+                    semantics)
+                && !(sourceInsideTarget
+                    && IsTargetEntryAllowedBySourceSubtree(entry, source, semantics)));
         if (targetHasBlockingContent)
         {
             throw new MoveNeedsAttentionException(sourceInsideTarget

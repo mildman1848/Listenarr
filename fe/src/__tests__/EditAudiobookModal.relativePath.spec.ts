@@ -19,6 +19,16 @@ import { mount } from '@vue/test-utils'
 import { vi, describe, it, expect } from 'vitest'
 import { nextTick } from 'vue'
 
+const toastMocks = vi.hoisted(() => ({
+  error: vi.fn(),
+  info: vi.fn(),
+  success: vi.fn(),
+}))
+
+vi.mock('@/services/toastService', () => ({
+  useToast: () => toastMocks,
+}))
+
 vi.mock('@/services/api', () => ({
   apiService: {
     getAudiobook: vi.fn().mockImplementation(async (id: number) => ({ id })),
@@ -173,6 +183,109 @@ describe('EditAudiobookModal relative path calculation', () => {
 
     // After normalization the internal relativePath should be the short relative
     expect((wrapper.vm as unknown).formData.relativePath).toBe('New Author\\New Title')
+  })
+
+  it('rejects an unrelated absolute path without redirecting it beneath the selected root', async () => {
+    const wrapper = mount(EditAudiobookModal, {
+      props: {
+        isOpen: true,
+        audiobook,
+      },
+      attachTo: document.body,
+      global: {
+        plugins: [(await import('pinia')).createPinia()],
+      },
+    })
+
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    ;(wrapper.vm as unknown).startEditingDestination()
+    ;(wrapper.vm as unknown).formData.relativePath = 'D:\\Backup\\root\\Redirected Title'
+
+    await (wrapper.vm as unknown).finishEditingDestination()
+
+    expect((wrapper.vm as unknown).formData.relativePath).toBe('D:\\Backup\\root\\Redirected Title')
+    expect((wrapper.vm as unknown).editingDestination).toBe(true)
+    expect(toastMocks.error).toHaveBeenCalledWith(
+      'Invalid destination',
+      'An absolute destination must be inside the selected root folder.',
+    )
+  })
+
+  it('accepts forward-slash UNC roots and normalizes matching absolute input', async () => {
+    vi.mocked(apiService.getRootFolders).mockResolvedValueOnce([
+      {
+        id: 7,
+        name: 'UNC root',
+        path: '//server/share/Books',
+        pathSyntax: 'Windows',
+        isDefault: true,
+        resolvedCaseSensitivity: 'Insensitive',
+      },
+    ])
+    const wrapper = mount(EditAudiobookModal, {
+      props: {
+        isOpen: true,
+        audiobook: {
+          ...audiobook,
+          basePath: '//server/share/Books/Author/Title',
+        },
+      },
+      attachTo: document.body,
+      global: {
+        plugins: [(await import('pinia')).createPinia()],
+      },
+    })
+
+    await new Promise((resolve) => setTimeout(resolve, 10))
+
+    expect((wrapper.vm as unknown).selectedRootId).toBe(7)
+    expect((wrapper.vm as unknown).formData.relativePath).toBe('Author/Title')
+    ;(wrapper.vm as unknown).startEditingDestination()
+    ;(wrapper.vm as unknown).formData.relativePath = '\\\\SERVER\\SHARE\\Books\\Other Title'
+    await (wrapper.vm as unknown).finishEditingDestination()
+
+    expect((wrapper.vm as unknown).formData.relativePath).toBe('Other Title')
+    expect((wrapper.vm as unknown).editingDestination).toBe(false)
+  })
+
+  it('treats a leading backslash as relative under an explicit Unix root', async () => {
+    vi.mocked(apiService.getRootFolders).mockResolvedValueOnce([
+      {
+        id: 8,
+        name: 'Unix root',
+        path: '/library',
+        pathSyntax: 'Unix',
+        isDefault: true,
+        resolvedCaseSensitivity: 'Sensitive',
+      },
+    ])
+    const wrapper = mount(EditAudiobookModal, {
+      props: {
+        isOpen: true,
+        audiobook: {
+          ...audiobook,
+          basePath: '/library/Author/Title',
+        },
+      },
+      attachTo: document.body,
+      global: {
+        plugins: [(await import('pinia')).createPinia()],
+      },
+    })
+
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    toastMocks.error.mockClear()
+    ;(wrapper.vm as unknown).startEditingDestination()
+    ;(wrapper.vm as unknown).formData.relativePath = '\\Chapter'
+
+    await (wrapper.vm as unknown).finishEditingDestination()
+
+    expect((wrapper.vm as unknown).formData.relativePath).toBe('\\Chapter')
+    expect((wrapper.vm as unknown).editingDestination).toBe(false)
+    expect(toastMocks.error).not.toHaveBeenCalledWith(
+      'Invalid destination',
+      'An absolute destination must be inside the selected root folder.',
+    )
   })
 
   it('preserves a user-typed relative path after Done and reopen', async () => {

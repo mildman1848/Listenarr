@@ -356,8 +356,9 @@ public partial class ScanQueueService : IScanQueueService
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(persistTerminalState);
+        cancellationToken.ThrowIfCancellationRequested();
         var terminalState = await persistTerminalState();
-        await _enqueueGate.WaitAsync(cancellationToken);
+        await _enqueueGate.WaitAsync(CancellationToken.None);
         try
         {
             UpdateJobStatusCore(jobId, terminalState.Status, terminalState.Error);
