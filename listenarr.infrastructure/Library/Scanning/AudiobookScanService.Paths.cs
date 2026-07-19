@@ -99,11 +99,12 @@ internal sealed partial class AudiobookScanService
             return audiobook.BasePath;
         }
 
-        var planned = ScanPathPlanner.CalculateBasePath(
-            discovery.AttributedFiles,
-            semantics,
-            discovery.CommonProvenBookBoundary(semantics),
-            command.ScanRoot);
+        var planned = discovery.SelectedStableIdentifierBoundary
+            ?? ScanPathPlanner.CalculateBasePath(
+                discovery.AttributedFiles,
+                semantics,
+                discovery.CommonProvenBookBoundary(semantics),
+                command.ScanRoot);
         if (string.IsNullOrWhiteSpace(planned))
         {
             return audiobook.BasePath;

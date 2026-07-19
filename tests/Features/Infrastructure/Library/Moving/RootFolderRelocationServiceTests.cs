@@ -58,7 +58,8 @@ public sealed class RootFolderRelocationServiceTests : IAsyncLifetime
             rootId = root.Id;
         }
 
-        var service = CreateService();
+        var manifestScopes = CreateMoveSourceManifestService();
+        var service = CreateService(manifestScopes);
         Assert.True(FileSystemPathIdentity.IsSameOrInside(
             Path.Join(source, "Author", "Title"),
             source,
@@ -95,6 +96,8 @@ public sealed class RootFolderRelocationServiceTests : IAsyncLifetime
         Assert.True(await service.IsBoundaryProtectedAsync(
             source,
             FileSystemPathSemantics.CurrentHostDefault));
+        Assert.Equal(1, manifestScopes.CreatedScopeCount);
+        Assert.Equal(1, manifestScopes.DisposedScopeCount);
     }
 
     [Fact]
@@ -128,7 +131,10 @@ public sealed class RootFolderRelocationServiceTests : IAsyncLifetime
             rootId = root.Id;
         }
 
-        await CreateService().StartAsync(rootId, BuildRelocationCommand(target));
+        var manifestScopes = CreateMoveSourceManifestService();
+        await CreateService(manifestScopes).StartAsync(
+            rootId,
+            BuildRelocationCommand(target));
 
         await using var verification = await _factory.CreateDbContextAsync();
         var job = await verification.MoveJobs
@@ -171,7 +177,10 @@ public sealed class RootFolderRelocationServiceTests : IAsyncLifetime
             rootId = root.Id;
         }
 
-        await CreateService().StartAsync(rootId, BuildRelocationCommand(target));
+        var manifestScopes = CreateMoveSourceManifestService();
+        await CreateService(manifestScopes).StartAsync(
+            rootId,
+            BuildRelocationCommand(target));
 
         await using var verification = await _factory.CreateDbContextAsync();
         var jobs = await verification.MoveJobs
@@ -190,6 +199,9 @@ public sealed class RootFolderRelocationServiceTests : IAsyncLifetime
             new[] { "First.m4b", "Second.m4b" },
             jobs.Select(job => job.Entries.Single().RelativePath).OrderBy(path => path));
         Assert.NotEqual(jobs[0].ActiveDeduplicationKey, jobs[1].ActiveDeduplicationKey);
+        Assert.Equal(1, manifestScopes.CreatedScopeCount);
+        Assert.Equal(1, manifestScopes.DisposedScopeCount);
+        Assert.Equal(2, manifestScopes.BuildCount);
     }
 
     [Fact]
@@ -272,14 +284,50 @@ public sealed class RootFolderRelocationServiceTests : IAsyncLifetime
             rootId = root.Id;
         }
 
+        var manifestScopes = CreateMoveSourceManifestService();
+        var service = CreateService(manifestScopes);
         var exception = await Assert.ThrowsAsync<
             Listenarr.Application.Common.Exceptions.ApplicationConflictException>(() =>
-            CreateService().StartAsync(rootId, BuildRelocationCommand(target)));
+            service.StartAsync(rootId, BuildRelocationCommand(target)));
+        await Assert.ThrowsAsync<
+            Listenarr.Application.Common.Exceptions.ApplicationConflictException>(() =>
+            service.StartAsync(rootId, BuildRelocationCommand(target)));
 
         Assert.Equal("move_source_unverified", exception.Code);
         await using var verification = await _factory.CreateDbContextAsync();
         Assert.Empty(await verification.RootFolderRelocations.ToListAsync());
         Assert.Empty(await verification.MoveJobs.ToListAsync());
+        Assert.Equal(2, manifestScopes.CreatedScopeCount);
+        Assert.Equal(2, manifestScopes.DisposedScopeCount);
+        Assert.Equal(2, manifestScopes.ResolvedServices.Distinct().Count());
+    }
+
+    [Fact]
+    public async Task StartRelocation_CancellationDuringManifestBuild_DisposesOperationScope()
+    {
+        var (rootId, _, _, target) = await SeedRelocationScenarioAsync();
+        using var cancellation = new CancellationTokenSource();
+        var manifestService = new Mock<IMoveSourceManifestService>(MockBehavior.Strict);
+        manifestService.Setup(service => service.BuildAsync(
+                It.IsAny<Audiobook>(),
+                It.IsAny<CancellationToken>()))
+            .Returns<Audiobook, CancellationToken>((_, _) =>
+            {
+                cancellation.Cancel();
+                return Task.FromCanceled<MoveSourceManifest>(cancellation.Token);
+            });
+        var manifestScopes = new ManifestServiceScopeFactory(
+            () => manifestService.Object);
+        var service = CreateService(manifestScopes);
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+            service.StartAsync(
+                rootId,
+                BuildRelocationCommand(target),
+                cancellation.Token));
+
+        Assert.Equal(1, manifestScopes.CreatedScopeCount);
+        Assert.Equal(1, manifestScopes.DisposedScopeCount);
     }
 
     [Fact]
@@ -2501,16 +2549,17 @@ public sealed class RootFolderRelocationServiceTests : IAsyncLifetime
             CancellationToken cancellationToken = default) => Task.CompletedTask;
     }
 
-    private RootFolderRelocationService CreateService() => new(
+    private RootFolderRelocationService CreateService(
+        IServiceScopeFactory? manifestScopeFactory = null) => new(
         _factory,
         new FileSystemSemanticsResolver(),
         new NoopHubBroadcaster(),
         TimeProvider.System,
         new FilesystemMutationCoordinator(),
         _operationCoordinator,
-        CreateMoveSourceManifestService());
+        manifestScopeFactory ?? CreateMoveSourceManifestService());
 
-    private IMoveSourceManifestService CreateMoveSourceManifestService()
+    private ManifestServiceScopeFactory CreateMoveSourceManifestService()
     {
         var repository = new Mock<IAudiobookFileRepository>();
         repository
@@ -2525,7 +2574,78 @@ public sealed class RootFolderRelocationServiceTests : IAsyncLifetime
                     .Where(file => file.AudiobookId == audiobookId)
                     .ToListAsync(cancellationToken);
             });
-        return new MoveSourceManifestService(repository.Object);
+        return new ManifestServiceScopeFactory(
+            () => new MoveSourceManifestService(repository.Object));
+    }
+
+    private sealed class ManifestServiceScopeFactory(
+        Func<IMoveSourceManifestService> serviceFactory) : IServiceScopeFactory
+    {
+        public int CreatedScopeCount { get; private set; }
+        public int DisposedScopeCount { get; private set; }
+        public int BuildCount { get; private set; }
+        public List<IMoveSourceManifestService> ResolvedServices { get; } = [];
+
+        public IServiceScope CreateScope()
+        {
+            CreatedScopeCount++;
+            var service = new TrackingManifestService(
+                serviceFactory(),
+                () => BuildCount++);
+            ResolvedServices.Add(service);
+            return new ManifestServiceScope(
+                service,
+                () => DisposedScopeCount++);
+        }
+
+        private sealed class TrackingManifestService(
+            IMoveSourceManifestService inner,
+            Action onBuild) : IMoveSourceManifestService
+        {
+            public Task<MoveSourceManifest> BuildAsync(
+                Audiobook audiobook,
+                CancellationToken cancellationToken = default)
+            {
+                onBuild();
+                return inner.BuildAsync(audiobook, cancellationToken);
+            }
+        }
+
+        private sealed class ManifestServiceScope(
+            IMoveSourceManifestService service,
+            Action onDispose) : IServiceScope, IAsyncDisposable
+        {
+            private bool _disposed;
+
+            public IServiceProvider ServiceProvider { get; } =
+                new ManifestServiceProvider(service);
+
+            public void Dispose()
+            {
+                if (_disposed)
+                {
+                    return;
+                }
+
+                _disposed = true;
+                onDispose();
+            }
+
+            public ValueTask DisposeAsync()
+            {
+                Dispose();
+                return ValueTask.CompletedTask;
+            }
+        }
+
+        private sealed class ManifestServiceProvider(
+            IMoveSourceManifestService service) : IServiceProvider
+        {
+            public object? GetService(Type serviceType) =>
+                serviceType == typeof(IMoveSourceManifestService)
+                    ? service
+                    : null;
+        }
     }
 
     private sealed class TestDbContextFactory(DbContextOptions<ListenArrDbContext> options)

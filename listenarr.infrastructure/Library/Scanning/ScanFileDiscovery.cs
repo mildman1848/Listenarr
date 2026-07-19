@@ -151,14 +151,36 @@ internal static partial class ScanFileDiscovery
         else if (identifierBoundaries.Count == 1)
         {
             var selectedBoundary = identifierBoundaries[0];
-            preliminary.RemoveAll(evidence =>
-                evidence.Kind != AttributionEvidenceKind.ExistingOwnership
-                && !string.IsNullOrWhiteSpace(evidence.Boundary)
-                && !FileSystemPathIdentity.AreEquivalent(
-                    evidence.Boundary,
-                    selectedBoundary,
-                    semantics));
             strongBoundaries = [selectedBoundary];
+        }
+
+        var selectedStableIdentifierBoundary = identifierBoundaries.Count == 1
+            ? identifierBoundaries[0]
+            : null;
+        if (selectedStableIdentifierBoundary != null)
+        {
+            var rejectedEvidence = preliminary
+                .Where(evidence => evidence.Kind != AttributionEvidenceKind.ExistingOwnership)
+                .Where(evidence => !CanClaimNewPath(
+                    evidence.Path,
+                    selectedStableIdentifierBoundary,
+                    owned,
+                    semantics))
+                .ToList();
+            foreach (var rejected in rejectedEvidence)
+            {
+                issues.Add(new ScanDiscoveryIssue(
+                    ScanDiscoveryIssueKind.OutsideStableIdentifierBoundary,
+                    rejected.Path,
+                    "The candidate was outside the selected stable-identifier directory and was not attributed."));
+            }
+
+            preliminary.RemoveAll(evidence =>
+                !CanClaimNewPath(
+                    evidence.Path,
+                    selectedStableIdentifierBoundary,
+                    owned,
+                    semantics));
         }
 
         var attributed = new HashSet<string>(semantics.Comparer);
@@ -168,7 +190,14 @@ internal static partial class ScanFileDiscovery
             attributed.Add(evidence.Path);
             if (!string.IsNullOrWhiteSpace(evidence.Boundary))
             {
-                boundaries[evidence.Path] = evidence.Boundary;
+                if (selectedStableIdentifierBoundary == null
+                    || FileSystemPathIdentity.IsSameOrInside(
+                        evidence.Path,
+                        selectedStableIdentifierBoundary,
+                        semantics))
+                {
+                    boundaries[evidence.Path] = evidence.Boundary;
+                }
             }
         }
 
@@ -186,7 +215,12 @@ internal static partial class ScanFileDiscovery
                     continue;
                 }
 
-                if (FileSystemPathIdentity.IsSameOrInside(
+                if (CanClaimNewPath(
+                        candidate,
+                        selectedStableIdentifierBoundary,
+                        owned,
+                        semantics)
+                    && FileSystemPathIdentity.IsSameOrInside(
                         candidate,
                         boundary,
                         semantics))
@@ -202,7 +236,26 @@ internal static partial class ScanFileDiscovery
             attributed.OrderBy(path => path, semantics.Comparer).ToList(),
             boundaries,
             enumeration.EnumeratedDirectories,
+            selectedStableIdentifierBoundary,
+            identifierBoundaries.Count > 1,
             issues);
+    }
+
+    internal static bool CanClaimNewPath(
+        string path,
+        string? selectedStableIdentifierBoundary,
+        IReadOnlySet<string> ownedCanonicalPaths,
+        FileSystemPathSemantics semantics)
+    {
+        var canonicalPath = FileSystemPathIdentity.Canonicalize(
+            path,
+            semantics.Syntax);
+        return ownedCanonicalPaths.Contains(canonicalPath)
+            || string.IsNullOrWhiteSpace(selectedStableIdentifierBoundary)
+            || FileSystemPathIdentity.IsSameOrInside(
+                canonicalPath,
+                selectedStableIdentifierBoundary,
+                semantics);
     }
 
     private sealed record AttributionEvidence(

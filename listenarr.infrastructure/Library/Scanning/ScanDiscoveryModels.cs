@@ -7,7 +7,8 @@ internal enum ScanDiscoveryIssueKind
     EnumerationFailure,
     LinkSkipped,
     AttributionConflict,
-    MetadataUnavailable
+    MetadataUnavailable,
+    OutsideStableIdentifierBoundary
 }
 
 internal sealed record ScanDiscoveryIssue(
@@ -20,6 +21,8 @@ internal sealed record ScanDiscoveryResult(
     IReadOnlyList<string> AttributedFiles,
     IReadOnlyDictionary<string, string> ProvenBookBoundaries,
     IReadOnlyList<string> EnumeratedDirectories,
+    string? SelectedStableIdentifierBoundary,
+    bool HasStableIdentifierBoundaryConflict,
     IReadOnlyList<ScanDiscoveryIssue> Issues)
 {
     public bool IsComplete => Issues.All(issue =>
@@ -35,6 +38,11 @@ internal sealed record ScanDiscoveryResult(
 
     public string? CommonProvenBookBoundary(FileSystemPathSemantics semantics)
     {
+        if (!string.IsNullOrWhiteSpace(SelectedStableIdentifierBoundary))
+        {
+            return SelectedStableIdentifierBoundary;
+        }
+
         var boundaries = AttributedFiles
             .Select(path => ProvenBookBoundaries.TryGetValue(path, out var boundary)
                 ? boundary

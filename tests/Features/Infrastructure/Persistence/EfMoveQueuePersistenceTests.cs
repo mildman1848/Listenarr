@@ -10,6 +10,7 @@
 
 using System.Text.Json;
 using Listenarr.Infrastructure.Persistence.Repositories;
+using Listenarr.Tests.Mocks;
 using Microsoft.EntityFrameworkCore;
 
 namespace Listenarr.Tests.Features.Infrastructure.Persistence;
@@ -131,7 +132,179 @@ public sealed class EfMoveQueuePersistenceTests : IAsyncLifetime
         Assert.True(
             jobs[1].Status == MoveJobStatus.Running,
             jobs[1].Error ?? $"Unexpected status: {jobs[1].Status}");
-        Assert.StartsWith("v4:move-source:42:", jobs[1].ActiveDeduplicationKey);
+        Assert.StartsWith("v5:move-source:42:", jobs[1].ActiveDeduplicationKey);
+    }
+
+    [Fact]
+    public async Task ReconcileIdentityKeys_Version4ActiveJob_RebuildsVersion5KeyForDeduplication()
+    {
+        var sourcePath = Path.GetFullPath(Path.Join(
+            Path.GetTempPath(),
+            "listenarr-reconcile-v4-source",
+            Guid.NewGuid().ToString("N")));
+        var targetPath = Path.GetFullPath(Path.Join(
+            Path.GetTempPath(),
+            "listenarr-reconcile-v4-target",
+            Guid.NewGuid().ToString("N")));
+        var legacy = new MoveJob
+        {
+            AudiobookId = 42,
+            SourcePath = sourcePath,
+            RequestedPath = targetPath,
+            Status = MoveJobStatus.Queued,
+            Phase = MoveJobPhase.Planned,
+            IdentityKeyVersion = 4,
+            ActiveDeduplicationKey = $"v4:legacy:{Guid.NewGuid():N}",
+            Entries = [CreateManifestEntry()]
+        };
+        await using (var db = await _factory.CreateDbContextAsync())
+        {
+            db.MoveJobs.Add(legacy);
+            await db.SaveChangesAsync();
+        }
+
+        var persistence = CreatePersistence();
+        await persistence.ReconcileIdentityKeysAsync();
+
+        var reconciled = await persistence.GetByIdAsync(legacy.Id);
+        Assert.NotNull(reconciled);
+        Assert.Equal(5, reconciled.IdentityKeyVersion);
+        Assert.True(reconciled.TryGetSourceIdentity(out var sourceIdentity));
+        Assert.True(reconciled.TryGetTargetIdentity(out var targetIdentity));
+        var expectedKey = MoveManifestIdentity.CreateDeduplicationKey(
+            reconciled.AudiobookId,
+            reconciled.SourcePath!,
+            sourceIdentity,
+            reconciled.RequestedPath!,
+            targetIdentity,
+            reconciled.Entries);
+        Assert.Equal(expectedKey, reconciled.ActiveDeduplicationKey);
+        Assert.Equal(
+            legacy.Id,
+            (await persistence.GetActiveByKeyAsync(expectedKey))?.Id);
+    }
+
+    [Fact]
+    public async Task MoveQueueStartup_Version4ActiveJob_DeduplicatesIdenticalVersion5Enqueue()
+    {
+        var sourcePath = Path.GetFullPath(Path.Join(
+            Path.GetTempPath(),
+            "listenarr-queue-v4-source",
+            Guid.NewGuid().ToString("N")));
+        var targetPath = Path.GetFullPath(Path.Join(
+            Path.GetTempPath(),
+            "listenarr-queue-v4-target",
+            Guid.NewGuid().ToString("N")));
+        var legacy = new MoveJob
+        {
+            AudiobookId = 42,
+            SourcePath = sourcePath,
+            RequestedPath = targetPath,
+            Status = MoveJobStatus.Queued,
+            Phase = MoveJobPhase.Planned,
+            IdentityKeyVersion = 4,
+            ActiveDeduplicationKey = $"v4:legacy:{Guid.NewGuid():N}",
+            Entries = [CreateManifestEntry()]
+        };
+        await using (var db = await _factory.CreateDbContextAsync())
+        {
+            db.MoveJobs.Add(legacy);
+            await db.SaveChangesAsync();
+        }
+
+        var relocationService = new Mock<IRootFolderRelocationService>();
+        relocationService.Setup(service => service.ReconcileActiveAsync(
+                It.IsAny<CancellationToken>()))
+            .Returns(Task.CompletedTask);
+        relocationService.Setup(service => service.IsBoundaryProtectedAsync(
+                It.IsAny<string>(),
+                It.IsAny<FileSystemPathSemantics>(),
+                It.IsAny<CancellationToken>()))
+            .ReturnsAsync(false);
+        var persistence = CreatePersistence();
+        var queue = new MoveQueueService(
+            Mock.Of<ILogger<MoveQueueService>>(),
+            persistence,
+            new NoopHubBroadcaster(),
+            TimeProvider.System,
+            BuildSemanticsResolver(),
+            relocationService.Object,
+            new FilesystemMutationCoordinator());
+
+        await queue.RecoverActiveJobsAsync();
+        var reconciled = await persistence.GetByIdAsync(legacy.Id);
+        Assert.NotNull(reconciled);
+        Assert.True(reconciled.TryGetSourceIdentity(out var sourceIdentity));
+        Assert.True(reconciled.TryGetTargetIdentity(out var targetIdentity));
+        var returnedId = await queue.EnqueueMoveAsync(new MoveEnqueueCommand(
+            reconciled.AudiobookId,
+            reconciled.SourcePath!,
+            sourceIdentity,
+            [
+                new MoveSourceManifestEntry(
+                    "book.m4b",
+                    MoveJobEntryType.File,
+                    1,
+                    DateTime.UnixEpoch,
+                    new string('A', 64))
+            ],
+            reconciled.RequestedPath!,
+            targetIdentity));
+
+        Assert.Equal(legacy.Id, returnedId);
+        await using var verification = await _factory.CreateDbContextAsync();
+        Assert.Single(await verification.MoveJobs.ToListAsync());
+        Assert.Equal(
+            5,
+            (await verification.MoveJobs.SingleAsync()).IdentityKeyVersion);
+    }
+
+    [Fact]
+    public async Task ReconcileIdentityKeys_Version5WriteFailure_RollsBackClearedActiveKey()
+    {
+        var sourcePath = Path.GetFullPath(Path.Join(
+            Path.GetTempPath(),
+            "listenarr-reconcile-rollback-source",
+            Guid.NewGuid().ToString("N")));
+        var targetPath = Path.GetFullPath(Path.Join(
+            Path.GetTempPath(),
+            "listenarr-reconcile-rollback-target",
+            Guid.NewGuid().ToString("N")));
+        var originalKey = $"v4:legacy:{Guid.NewGuid():N}";
+        var legacy = new MoveJob
+        {
+            AudiobookId = 42,
+            SourcePath = sourcePath,
+            RequestedPath = targetPath,
+            Status = MoveJobStatus.Queued,
+            Phase = MoveJobPhase.Planned,
+            IdentityKeyVersion = 4,
+            ActiveDeduplicationKey = originalKey,
+            Entries = [CreateManifestEntry()]
+        };
+        await using (var db = await _factory.CreateDbContextAsync())
+        {
+            db.MoveJobs.Add(legacy);
+            await db.SaveChangesAsync();
+            await db.Database.ExecuteSqlRawAsync(
+                """
+                CREATE TRIGGER fail_version_5_identity_key
+                BEFORE UPDATE OF ActiveDeduplicationKey ON MoveJobs
+                WHEN NEW.ActiveDeduplicationKey LIKE 'v5:%'
+                BEGIN
+                    SELECT RAISE(ABORT, 'simulated version 5 write failure');
+                END;
+                """);
+        }
+
+        await Assert.ThrowsAsync<PersistenceException>(() =>
+            CreatePersistence().ReconcileIdentityKeysAsync());
+
+        await using var verification = await _factory.CreateDbContextAsync();
+        var persisted = await verification.MoveJobs.SingleAsync();
+        Assert.Equal(originalKey, persisted.ActiveDeduplicationKey);
+        Assert.Equal(4, persisted.IdentityKeyVersion);
+        Assert.Equal(MoveJobStatus.Queued, persisted.Status);
     }
 
     [Fact]
@@ -527,7 +700,7 @@ public sealed class EfMoveQueuePersistenceTests : IAsyncLifetime
         Assert.Contains("Move path identity could not be reconciled", bad.Error, StringComparison.Ordinal);
         Assert.Null(bad.ActiveDeduplicationKey);
         Assert.Equal(MoveJobStatus.Queued, good.Status);
-        Assert.StartsWith("v4:move-source:43:", good.ActiveDeduplicationKey);
+        Assert.StartsWith("v5:move-source:43:", good.ActiveDeduplicationKey);
     }
 
     [Fact]

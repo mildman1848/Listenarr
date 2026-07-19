@@ -8,6 +8,169 @@ namespace Listenarr.Tests.Features.Infrastructure.Library.Scanning;
 public sealed class AudiobookScanServiceTests : BaseTests
 {
     [Fact]
+    public async Task ScanAsync_StableIdentifierBoundary_DoesNotClaimOutsideExactTitleFile()
+    {
+        var root = FileService.GetTempDirectory("scan-service-identifier-title");
+        var identifierDirectory = Path.Join(root, "Author", "Book B012345678");
+        var siblingDirectory = Path.Join(root, "Author", "Sibling");
+        Directory.CreateDirectory(identifierDirectory);
+        Directory.CreateDirectory(siblingDirectory);
+        var inside = await FileService.GetFileAsync(identifierDirectory, "01.m4b", "audio");
+        var outside = await FileService.GetFileAsync(siblingDirectory, "Book.m4b", "audio");
+        var audiobookToAdd = new AudiobookBuilder()
+            .WithTitle("Book")
+            .WithAuthor("Author")
+            .Build();
+        audiobookToAdd.Asin = "B012345678";
+        var audiobook = await _audiobookRepository.AddAsync(audiobookToAdd);
+
+        var result = await ScanAsync(audiobook, root);
+
+        var tracked = Assert.Single(
+            await _audiobookFileRepository.GetByAudiobookIdAsync(audiobook.Id));
+        Assert.Equal(inside, tracked.Path);
+        Assert.DoesNotContain(outside, result.AttributedFiles);
+        Assert.Contains(result.Diagnostics, diagnostic =>
+            diagnostic.Code == "OutsideStableIdentifierBoundary"
+            && diagnostic.Path == outside);
+
+        using var scope = _provider.CreateScope();
+        var manifest = await scope.ServiceProvider
+            .GetRequiredService<IMoveSourceManifestService>()
+            .BuildAsync(result.Audiobook);
+        var entry = Assert.Single(manifest.Entries, candidate =>
+            candidate.EntryType == MoveJobEntryType.File);
+        Assert.Equal(Path.GetFileName(inside), entry.RelativePath);
+    }
+
+    [Fact]
+    public async Task ScanAsync_StableIdentifierBoundary_DoesNotClaimOutsideMetadataMatch()
+    {
+        var root = FileService.GetTempDirectory("scan-service-identifier-metadata");
+        var identifierDirectory = Path.Join(root, "Author", "Book B012345678");
+        var siblingDirectory = Path.Join(root, "Author", "Sibling");
+        Directory.CreateDirectory(identifierDirectory);
+        Directory.CreateDirectory(siblingDirectory);
+        var inside = await FileService.GetFileAsync(identifierDirectory, "01.m4b", "audio");
+        var outside = await FileService.GetFileAsync(siblingDirectory, "unrelated.m4b", "audio");
+        var metadata = new Mock<IMetadataService>(MockBehavior.Strict);
+        metadata.Setup(service => service.ExtractFileMetadataAsync(inside))
+            .ReturnsAsync(new AudioMetadata
+            {
+                Duration = TimeSpan.FromSeconds(1),
+                Format = "m4b"
+            });
+        metadata.Setup(service => service.ExtractFileMetadataAsync(outside))
+            .ReturnsAsync(new AudioMetadata
+            {
+                Asin = "B012345678",
+                Title = "Book",
+                Artist = "Author",
+                Duration = TimeSpan.FromSeconds(1),
+                Format = "m4b"
+            });
+        Init(services => services.WithSingleton<IMetadataService>(metadata.Object));
+        var audiobookToAdd = new AudiobookBuilder()
+            .WithTitle("Book")
+            .WithAuthor("Author")
+            .Build();
+        audiobookToAdd.Asin = "B012345678";
+        var audiobook = await _audiobookRepository.AddAsync(audiobookToAdd);
+
+        var result = await ScanAsync(audiobook, root);
+
+        var tracked = Assert.Single(
+            await _audiobookFileRepository.GetByAudiobookIdAsync(audiobook.Id));
+        Assert.Equal(inside, tracked.Path);
+        Assert.DoesNotContain(outside, result.AttributedFiles);
+        metadata.Verify(
+            service => service.ExtractFileMetadataAsync(outside),
+            Times.Never);
+    }
+
+    [Fact]
+    public async Task ScanAsync_StableIdentifierBoundary_ClaimsInsideMetadataMatch()
+    {
+        var root = FileService.GetTempDirectory("scan-service-inside-metadata");
+        var identifierDirectory = Path.Join(root, "Author", "Book B012345678");
+        Directory.CreateDirectory(identifierDirectory);
+        var identifierFile = await FileService.GetFileAsync(
+            identifierDirectory,
+            "01.m4b",
+            "audio");
+        var metadataFile = await FileService.GetFileAsync(
+            identifierDirectory,
+            "unrelated.m4b",
+            "audio");
+        var metadata = new Mock<IMetadataService>(MockBehavior.Strict);
+        metadata.Setup(service => service.ExtractFileMetadataAsync(identifierFile))
+            .ReturnsAsync(new AudioMetadata
+            {
+                Duration = TimeSpan.FromSeconds(1),
+                Format = "m4b"
+            });
+        metadata.Setup(service => service.ExtractFileMetadataAsync(metadataFile))
+            .ReturnsAsync(new AudioMetadata
+            {
+                Asin = "B012345678",
+                Title = "Book",
+                Artist = "Author",
+                Duration = TimeSpan.FromSeconds(1),
+                Format = "m4b"
+            });
+        Init(services => services.WithSingleton<IMetadataService>(metadata.Object));
+        var audiobookToAdd = new AudiobookBuilder()
+            .WithTitle("Book")
+            .WithAuthor("Author")
+            .Build();
+        audiobookToAdd.Asin = "B012345678";
+        var audiobook = await _audiobookRepository.AddAsync(audiobookToAdd);
+
+        var result = await ScanAsync(audiobook, root);
+
+        Assert.Equal(
+            [identifierFile, metadataFile],
+            result.AttributedFiles.OrderBy(path => path).ToArray());
+        Assert.Equal(
+            2,
+            (await _audiobookFileRepository.GetByAudiobookIdAsync(audiobook.Id)).Count);
+        Assert.Equal(identifierDirectory, result.BasePath);
+    }
+
+    [Fact]
+    public async Task ScanAsync_StableIdentifierBoundary_PreservesExistingOwnedOutsideFileWithoutWideningBasePath()
+    {
+        var root = FileService.GetTempDirectory("scan-service-owned-outside");
+        var identifierDirectory = Path.Join(root, "Author", "Book B012345678");
+        var legacyDirectory = Path.Join(root, "Author", "Legacy");
+        Directory.CreateDirectory(identifierDirectory);
+        Directory.CreateDirectory(legacyDirectory);
+        var inside = await FileService.GetFileAsync(identifierDirectory, "01.m4b", "audio");
+        var outside = await FileService.GetFileAsync(legacyDirectory, "legacy.m4b", "audio");
+        var audiobookToAdd = new AudiobookBuilder()
+            .WithTitle("Book")
+            .WithAuthor("Author")
+            .WithBasePath(identifierDirectory)
+            .Build();
+        audiobookToAdd.Asin = "B012345678";
+        var audiobook = await _audiobookRepository.AddAsync(audiobookToAdd);
+        await _audiobookFileRepository.AddAsync(new AudiobookFileBuilder()
+            .WithAudiobook(audiobook)
+            .WithPath(outside)
+            .Build());
+
+        var result = await ScanAsync(audiobook, root);
+
+        Assert.Equal(identifierDirectory, result.BasePath);
+        Assert.Equal(
+            [inside, outside],
+            result.AttributedFiles.OrderBy(path => path).ToArray());
+        Assert.Equal(
+            2,
+            (await _audiobookFileRepository.GetByAudiobookIdAsync(audiobook.Id)).Count);
+    }
+
+    [Fact]
     public async Task ScanAsync_SameAuthorSiblingBooks_ClaimsOnlyRequestedBook()
     {
         var root = FileService.GetTempDirectory("shared-scan-service");

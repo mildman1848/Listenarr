@@ -21,8 +21,24 @@ internal sealed partial class AudiobookScanService
             semantics.Comparer);
         var issues = discovery.Issues.ToList();
         var metadataMatches = new List<string>();
+        var owned = new HashSet<string>(
+            ownedPaths.Select(path => FileSystemPathIdentity.Canonicalize(
+                path,
+                semantics.Syntax)),
+            semantics.Comparer);
 
-        foreach (var candidate in discovery.Candidates.Where(path => !attributed.Contains(path)))
+        if (discovery.HasStableIdentifierBoundaryConflict)
+        {
+            return discovery with { Issues = issues };
+        }
+
+        foreach (var candidate in discovery.Candidates.Where(path =>
+            !attributed.Contains(path)
+            && ScanFileDiscovery.CanClaimNewPath(
+                path,
+                discovery.SelectedStableIdentifierBoundary,
+                owned,
+                semantics)))
         {
             cancellationToken.ThrowIfCancellationRequested();
             try
@@ -48,14 +64,18 @@ internal sealed partial class AudiobookScanService
             return discovery with { Issues = issues };
         }
 
-        var strongPaths = ownedPaths
-            .Concat(metadataMatches)
-            .Distinct(semantics.Comparer)
-            .ToList();
-        var metadataBoundary = CalculateMetadataBoundary(
-            strongPaths,
-            scanRoot,
-            semantics);
+        var metadataBoundary = discovery.SelectedStableIdentifierBoundary;
+        if (metadataBoundary == null)
+        {
+            var strongPaths = ownedPaths
+                .Concat(metadataMatches)
+                .Distinct(semantics.Comparer)
+                .ToList();
+            metadataBoundary = CalculateMetadataBoundary(
+                strongPaths,
+                scanRoot,
+                semantics);
+        }
         if (metadataBoundary == null)
         {
             issues.Add(new ScanDiscoveryIssue(

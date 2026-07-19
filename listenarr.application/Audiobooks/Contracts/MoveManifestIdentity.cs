@@ -1,3 +1,4 @@
+using System.Buffers.Binary;
 using System.Security.Cryptography;
 using System.Text;
 using Listenarr.Domain.Common;
@@ -6,7 +7,7 @@ namespace Listenarr.Application.Audiobooks.Contracts;
 
 public static class MoveManifestIdentity
 {
-    public const int Version = 4;
+    public const int Version = 5;
 
     public static string CreateDeduplicationKey(
         int audiobookId,
@@ -83,21 +84,74 @@ public static class MoveManifestIdentity
         IEnumerable<ManifestIdentityEntry> entries,
         FileSystemPathSemantics semantics)
     {
-        var canonical = string.Join(
-            '\n',
-            entries
-                .Select(entry => NormalizeEntry(entry, semantics))
-                .OrderBy(entry => entry.RelativePath, StringComparer.Ordinal)
-                .ThenBy(entry => entry.EntryType)
-                .Select(entry => string.Join(
-                    '|',
-                    entry.RelativePath,
-                    (int)entry.EntryType,
-                    entry.Length,
-                    entry.LastWriteTimeUtc.Ticks,
-                    entry.Sha256 ?? string.Empty)));
-        return Convert.ToHexString(
-            SHA256.HashData(Encoding.UTF8.GetBytes(canonical)));
+        ArgumentNullException.ThrowIfNull(entries);
+        var normalizedEntries = entries
+            .Select(entry => NormalizeEntry(entry, semantics))
+            .OrderBy(entry => entry.RelativePath, StringComparer.Ordinal)
+            .ThenBy(entry => entry.EntryType)
+            .ThenBy(entry => entry.Length)
+            .ThenBy(entry => entry.LastWriteTimeUtc.Ticks)
+            .ThenBy(entry => entry.Sha256, StringComparer.Ordinal)
+            .ToList();
+
+        using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        hash.AppendData("LISTENARR-MOVE-MANIFEST"u8);
+        AppendInt32(hash, Version);
+        AppendInt32(hash, normalizedEntries.Count);
+        foreach (var entry in normalizedEntries)
+        {
+            AppendUtf8(hash, entry.RelativePath);
+            AppendInt32(hash, (int)entry.EntryType);
+            AppendInt64(hash, entry.Length);
+            AppendInt64(hash, entry.LastWriteTimeUtc.Ticks);
+            AppendHash(hash, entry.Sha256);
+        }
+
+        return Convert.ToHexString(hash.GetHashAndReset());
+    }
+
+    private static void AppendUtf8(IncrementalHash hash, string value)
+    {
+        var bytes = Encoding.UTF8.GetBytes(value);
+        AppendInt32(hash, bytes.Length);
+        hash.AppendData(bytes);
+    }
+
+    private static void AppendHash(IncrementalHash hash, string? sha256)
+    {
+        Span<byte> presence = stackalloc byte[1];
+        if (sha256 == null)
+        {
+            presence[0] = 0;
+            hash.AppendData(presence);
+            return;
+        }
+
+        if (sha256.Length != 64 || !sha256.All(Uri.IsHexDigit))
+        {
+            throw new InvalidOperationException(
+                "A move manifest identity contains invalid SHA-256 evidence.");
+        }
+
+        presence[0] = 1;
+        hash.AppendData(presence);
+        var bytes = Convert.FromHexString(sha256);
+        AppendInt32(hash, bytes.Length);
+        hash.AppendData(bytes);
+    }
+
+    private static void AppendInt32(IncrementalHash hash, int value)
+    {
+        Span<byte> bytes = stackalloc byte[sizeof(int)];
+        BinaryPrimitives.WriteInt32BigEndian(bytes, value);
+        hash.AppendData(bytes);
+    }
+
+    private static void AppendInt64(IncrementalHash hash, long value)
+    {
+        Span<byte> bytes = stackalloc byte[sizeof(long)];
+        BinaryPrimitives.WriteInt64BigEndian(bytes, value);
+        hash.AppendData(bytes);
     }
 
     private static ManifestIdentityEntry NormalizeEntry(

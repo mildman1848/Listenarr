@@ -90,16 +90,142 @@ public sealed class ScanFileDiscoveryTests : IDisposable
             result.OrderBy(path => path, StringComparer.Ordinal).ToArray());
     }
 
+    [Fact]
+    public void Discover_StableIdentifierBoundary_RejectsOutsideExactTitleFile()
+    {
+        var inside = CreateAudioFile(
+            "Shared Author",
+            "Requested Book B012345678",
+            "01.m4b");
+        var outside = CreateAudioFile(
+            "Shared Author",
+            "Unrelated Sibling",
+            "Requested Book.m4b");
+        var audiobook = new AudiobookBuilder()
+            .WithTitle("Requested Book")
+            .WithAuthor("Shared Author")
+            .Build();
+        audiobook.Asin = "B012345678";
+
+        var discovery = DiscoverResult(audiobook);
+
+        Assert.Equal(inside, Assert.Single(discovery.AttributedFiles));
+        Assert.DoesNotContain(outside, discovery.AttributedFiles);
+        Assert.Contains(discovery.Issues, issue =>
+            issue.Path == outside
+            && issue.Kind == ScanDiscoveryIssueKind.OutsideStableIdentifierBoundary);
+    }
+
+    [Fact]
+    public void Discover_ConflictingStableIdentifierBoundaries_FailsClosed()
+    {
+        _ = CreateAudioFile("Author", "Book B012345678", "01.m4b");
+        _ = CreateAudioFile("Author", "Alternate B012345678", "02.m4b");
+        var audiobook = new AudiobookBuilder()
+            .WithTitle("Book")
+            .WithAuthor("Author")
+            .Build();
+        audiobook.Asin = "B012345678";
+
+        var discovery = DiscoverResult(audiobook);
+
+        Assert.Empty(discovery.AttributedFiles);
+        Assert.Null(discovery.SelectedStableIdentifierBoundary);
+        Assert.True(discovery.HasStableIdentifierBoundaryConflict);
+        Assert.Contains(discovery.Issues, issue =>
+            issue.Kind == ScanDiscoveryIssueKind.AttributionConflict);
+    }
+
+    [Fact]
+    public void Discover_ExistingOwnedFileOutsideStableIdentifierBoundary_IsPreservedWithoutBoundaryEvidence()
+    {
+        var inside = CreateAudioFile("Author", "Book B012345678", "01.m4b");
+        var outside = CreateAudioFile("Author", "Legacy", "legacy.m4b");
+        var audiobook = new AudiobookBuilder()
+            .WithTitle("Book")
+            .WithAuthor("Author")
+            .Build();
+        audiobook.Asin = "B012345678";
+
+        var discovery = ScanFileDiscovery.Discover(
+            new LocalFileSystem(),
+            _root,
+            audiobook,
+            Guid.NewGuid(),
+            NullLogger.Instance,
+            FileSystemPathSemantics.CurrentHostDefault,
+            [outside]);
+
+        Assert.Equal(
+            [inside, outside],
+            discovery.AttributedFiles.OrderBy(path => path).ToArray());
+        Assert.NotNull(discovery.SelectedStableIdentifierBoundary);
+        Assert.False(discovery.ProvenBookBoundaries.ContainsKey(outside));
+    }
+
+    [Theory]
+    [InlineData(FileSystemCaseSensitivity.Sensitive, false)]
+    [InlineData(FileSystemCaseSensitivity.Insensitive, true)]
+    public void CanClaimNewPath_UsesPersistedFilesystemCaseSemantics(
+        FileSystemCaseSensitivity caseSensitivity,
+        bool expected)
+    {
+        var semantics = new FileSystemPathSemantics(
+            FileSystemPathSyntax.Unix,
+            caseSensitivity);
+
+        var result = ScanFileDiscovery.CanClaimNewPath(
+            "/library/book/file.m4b",
+            "/Library/Book",
+            new HashSet<string>(semantics.Comparer),
+            semantics);
+
+        Assert.Equal(expected, result);
+    }
+
+    [Fact]
+    public void Discover_LinkedDirectoryInsideIdentifierBoundary_IsNotTraversed()
+    {
+        if (!OperatingSystem.IsLinux())
+        {
+            return;
+        }
+
+        var identifierDirectory = Path.Join(_root, "Author", "Book B012345678");
+        var foreignDirectory = Path.Join(_root, "foreign");
+        Directory.CreateDirectory(identifierDirectory);
+        Directory.CreateDirectory(foreignDirectory);
+        var foreign = Path.Join(foreignDirectory, "foreign.m4b");
+        File.WriteAllText(foreign, "audio");
+        File.WriteAllText(Path.Join(identifierDirectory, "01.m4b"), "audio");
+        var link = Path.Join(identifierDirectory, "linked-disc");
+        Directory.CreateSymbolicLink(link, foreignDirectory);
+        var audiobook = new AudiobookBuilder()
+            .WithTitle("Book")
+            .WithAuthor("Author")
+            .Build();
+        audiobook.Asin = "B012345678";
+
+        var discovery = DiscoverResult(audiobook);
+
+        Assert.Equal(identifierDirectory, discovery.SelectedStableIdentifierBoundary);
+        Assert.DoesNotContain(foreign, discovery.Candidates);
+        Assert.Contains(discovery.Issues, issue =>
+            issue.Kind == ScanDiscoveryIssueKind.LinkSkipped
+            && issue.Path == link);
+    }
+
     private List<string> Discover(Audiobook audiobook) =>
+        DiscoverResult(audiobook).AttributedFiles.ToList();
+
+    private ScanDiscoveryResult DiscoverResult(Audiobook audiobook) =>
         ScanFileDiscovery.Discover(
             new LocalFileSystem(),
             _root,
             audiobook,
             Guid.NewGuid(),
             NullLogger.Instance,
-            FileSystemPathSemantics.CurrentHostDefault)
-        .AttributedFiles
-        .ToList();
+            FileSystemPathSemantics.CurrentHostDefault);
 
     private string CreateAudioFile(params string[] segments)
     {

@@ -1,6 +1,7 @@
 using Listenarr.Domain.Common;
 using Listenarr.Infrastructure.Persistence;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.DependencyInjection;
 
 namespace Listenarr.Infrastructure.Library.Moving;
 
@@ -11,13 +12,15 @@ public sealed partial class RootFolderRelocationService(
     TimeProvider timeProvider,
     IFilesystemMutationCoordinator mutationCoordinator,
     IAudiobookOperationCoordinator audiobookOperationCoordinator,
-    IMoveSourceManifestService moveSourceManifestService) : IRootFolderRelocationService
+    IServiceScopeFactory manifestScopeFactory) : IRootFolderRelocationService
 {
     private readonly SemaphoreSlim _rootIdentityGate = new(1, 1);
     private readonly IFilesystemMutationCoordinator _mutationCoordinator =
         mutationCoordinator ?? throw new ArgumentNullException(nameof(mutationCoordinator));
     private readonly IAudiobookOperationCoordinator _audiobookOperationCoordinator =
         audiobookOperationCoordinator ?? throw new ArgumentNullException(nameof(audiobookOperationCoordinator));
+    private readonly IServiceScopeFactory _manifestScopeFactory =
+        manifestScopeFactory ?? throw new ArgumentNullException(nameof(manifestScopeFactory));
     private bool _rootIdentitiesReconciled;
     public async Task<RootFolderPathChangeResult> StartAsync(
         int rootFolderId,
@@ -42,6 +45,10 @@ public sealed partial class RootFolderRelocationService(
         RootFolderPathChangeCommand command,
         CancellationToken cancellationToken)
     {
+        await using var manifestScope = _manifestScopeFactory.CreateAsyncScope();
+        var moveSourceManifestService = manifestScope.ServiceProvider
+            .GetRequiredService<IMoveSourceManifestService>();
+
         ArgumentNullException.ThrowIfNull(command);
         if (string.IsNullOrWhiteSpace(command.DesiredName))
         {
