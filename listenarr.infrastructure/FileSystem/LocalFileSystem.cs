@@ -18,7 +18,16 @@ public sealed class LocalFileSystem : IFileSystem
     {
         try
         {
-            return File.GetAttributes(path).HasFlag(FileAttributes.ReparsePoint);
+            var attributes = File.GetAttributes(path);
+            if (attributes.HasFlag(FileAttributes.ReparsePoint))
+            {
+                return true;
+            }
+
+            FileSystemInfo entry = attributes.HasFlag(FileAttributes.Directory)
+                ? new DirectoryInfo(path)
+                : new FileInfo(path);
+            return entry.LinkTarget != null;
         }
         catch (FileNotFoundException)
         {
