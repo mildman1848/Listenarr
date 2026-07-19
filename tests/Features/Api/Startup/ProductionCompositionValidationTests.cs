@@ -33,9 +33,55 @@ public sealed class ProductionCompositionValidationTests
                 builder.Configuration,
                 builder.Environment);
 
-            Assert.Contains(builder.Services, descriptor =>
-                descriptor.ServiceType == typeof(IHostedService)
-                && descriptor.ImplementationType == typeof(MoveBackgroundService));
+            Type[] affectedSingletonServiceTypes =
+            [
+                typeof(TimeProvider),
+                typeof(IFilesystemMutationCoordinator),
+                typeof(IAudiobookOperationCoordinator),
+                typeof(IAudiobookUpdatePublisher),
+                typeof(IRootFolderRelocationService),
+                typeof(IMoveCleanupBoundaryResolver),
+                typeof(ILibraryDirectoryOwnershipStore),
+                typeof(IMoveQueueService),
+                typeof(IMoveQueuePersistence),
+                typeof(IMoveExecutionStore),
+                typeof(IMoveScanHandoffStore),
+                typeof(IFileSystemSemanticsResolver),
+                typeof(IFileSystem),
+                typeof(IStartupConfigService),
+                typeof(IFfmpegService),
+                typeof(IScanQueueService),
+                typeof(IUnmatchedScanQueueService),
+                typeof(MoveScanHandoffRecoveryService),
+                typeof(ScanJobProcessor),
+                typeof(IScanJobProcessor),
+                typeof(AudiobookContentMoveService),
+                typeof(MoveJobProcessor),
+                typeof(IMoveJobProcessor),
+                typeof(UnmatchedScanProcessor),
+                typeof(IUnmatchedScanProcessor),
+                typeof(MetadataRescanService),
+                typeof(UnmatchedScanBackgroundService)
+            ];
+            foreach (var serviceType in affectedSingletonServiceTypes)
+            {
+                var descriptor = Assert.Single(
+                    builder.Services,
+                    candidate => candidate.ServiceType == serviceType);
+                Assert.Equal(ServiceLifetime.Singleton, descriptor.Lifetime);
+            }
+
+            Type[] affectedHostedServiceTypes =
+            [
+                typeof(ScanBackgroundService),
+                typeof(MoveBackgroundService),
+                typeof(MetadataRescanService),
+                typeof(UnmatchedScanBackgroundService)
+            ];
+            Assert.All(
+                builder.Services.Where(descriptor =>
+                    descriptor.ServiceType == typeof(IHostedService)),
+                descriptor => Assert.Equal(ServiceLifetime.Singleton, descriptor.Lifetime));
 
             using var provider = builder.Services.BuildServiceProvider(
                 new ServiceProviderOptions
@@ -44,8 +90,33 @@ public sealed class ProductionCompositionValidationTests
                     ValidateOnBuild = true
                 });
 
-            Assert.NotNull(provider.GetRequiredService<IRootFolderRelocationService>());
-            Assert.NotNull(provider.GetRequiredService<IMoveQueueService>());
+            foreach (var serviceType in affectedSingletonServiceTypes)
+            {
+                Assert.NotNull(provider.GetRequiredService(serviceType));
+            }
+
+            var hostedServices = provider.GetServices<IHostedService>().ToList();
+            foreach (var implementationType in affectedHostedServiceTypes)
+            {
+                Assert.Single(hostedServices, service =>
+                    service.GetType() == implementationType);
+            }
+
+            Assert.Same(
+                provider.GetRequiredService<ScanJobProcessor>(),
+                provider.GetRequiredService<IScanJobProcessor>());
+            Assert.Same(
+                provider.GetRequiredService<MoveJobProcessor>(),
+                provider.GetRequiredService<IMoveJobProcessor>());
+            Assert.Same(
+                provider.GetRequiredService<UnmatchedScanProcessor>(),
+                provider.GetRequiredService<IUnmatchedScanProcessor>());
+            Assert.Same(
+                provider.GetRequiredService<MetadataRescanService>(),
+                Assert.Single(hostedServices.OfType<MetadataRescanService>()));
+            Assert.Same(
+                provider.GetRequiredService<UnmatchedScanBackgroundService>(),
+                Assert.Single(hostedServices.OfType<UnmatchedScanBackgroundService>()));
         }
         finally
         {
