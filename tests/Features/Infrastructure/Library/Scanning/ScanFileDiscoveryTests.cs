@@ -209,7 +209,8 @@ public sealed class ScanFileDiscoveryTests : IDisposable
         var discovery = DiscoverResult(audiobook);
 
         Assert.Equal(identifierDirectory, discovery.SelectedStableIdentifierBoundary);
-        Assert.DoesNotContain(foreign, discovery.Candidates);
+        Assert.Contains(foreign, discovery.Candidates);
+        Assert.DoesNotContain(Path.Join(link, "foreign.m4b"), discovery.Candidates);
         Assert.Contains(discovery.Issues, issue =>
             issue.Kind == ScanDiscoveryIssueKind.LinkSkipped
             && issue.Path == link);
