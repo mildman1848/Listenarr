@@ -2,11 +2,13 @@ using System.Threading.Channels;
 using Listenarr.Tests.Builders;
 using Microsoft.Extensions.Logging.Abstractions;
 
+using Listenarr.Tests.Common;
+
 namespace Listenarr.Tests.Features.Infrastructure.Library.Scanning;
 
 [Trait("Name", "ScanBackgroundServiceTests")]
 [Trait("Category", "BackgroundWorkers")]
-public sealed class ScanBackgroundServiceTests
+public sealed class ScanBackgroundServiceTests : BaseTests
 {
     [Fact]
     public async Task ExecuteAsync_ProcessorFailure_ContinuesWithLaterJobs()

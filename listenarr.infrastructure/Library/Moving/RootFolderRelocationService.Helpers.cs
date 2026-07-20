@@ -50,48 +50,6 @@ public sealed partial class RootFolderRelocationService
         string RequestedPath,
         PathIdentitySnapshot TargetIdentity);
 
-    private sealed record StoredSourcePathSemantics(
-        FileSystemPathSemantics Semantics,
-        bool DetectAmbiguousCaseMatches);
-
-    private static StoredSourcePathSemantics? ResolveStoredSourcePathSemantics(RootFolder root)
-    {
-        FileSystemPathSyntax syntax;
-        if (root.Path.StartsWith("/", StringComparison.Ordinal))
-        {
-            syntax = FileSystemPathSyntax.Unix;
-        }
-        else if (
-            (root.Path.Length >= 3
-                && char.IsAsciiLetter(root.Path[0])
-                && root.Path[1] == ':'
-                && root.Path[2] is '\\' or '/')
-            || root.Path.StartsWith(@"\\", StringComparison.Ordinal))
-        {
-            syntax = FileSystemPathSyntax.Windows;
-        }
-        else
-        {
-            return null;
-        }
-
-        var sensitivity = root.ResolvedCaseSensitivity;
-        if (sensitivity == FileSystemCaseSensitivity.Unknown)
-        {
-            sensitivity = root.CaseSensitivityMode switch
-            {
-                FileSystemCaseSensitivityMode.Sensitive => FileSystemCaseSensitivity.Sensitive,
-                FileSystemCaseSensitivityMode.Insensitive => FileSystemCaseSensitivity.Insensitive,
-                _ => FileSystemCaseSensitivity.Sensitive
-            };
-        }
-
-        return new StoredSourcePathSemantics(
-            new FileSystemPathSemantics(syntax, sensitivity),
-            root.ResolvedCaseSensitivity == FileSystemCaseSensitivity.Unknown
-                && root.CaseSensitivityMode == FileSystemCaseSensitivityMode.Auto);
-    }
-
     private static bool IsStoredWindowsAbsolutePath(string path) =>
         (path.Length >= 3
             && char.IsAsciiLetter(path[0])
@@ -317,16 +275,15 @@ public sealed partial class RootFolderRelocationService
         root.UpdatedAt = DateTime.UtcNow;
     }
 
-    private static async Task ClearOtherDefaultsAsync(
+    private static Task ClearOtherDefaultsAsync(
         ListenArrDbContext db,
         int rootFolderId,
-        CancellationToken cancellationToken)
-    {
-        var defaults = await db.RootFolders
+        CancellationToken cancellationToken) =>
+        db.RootFolders
             .Where(root => root.Id != rootFolderId && root.IsDefault)
-            .ToListAsync(cancellationToken);
-        foreach (var root in defaults) root.IsDefault = false;
-    }
+            .ExecuteUpdateAsync(
+                setters => setters.SetProperty(root => root.IsDefault, false),
+                cancellationToken);
 
     private async Task RetrySkippedMetadataReferencesAsync(
         ListenArrDbContext db,

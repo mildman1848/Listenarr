@@ -2,9 +2,13 @@ using Listenarr.Infrastructure.Persistence.Repositories;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Diagnostics;
 
+using Listenarr.Tests.Common;
+
 namespace Listenarr.Tests.Features.Infrastructure.Persistence;
 
-public sealed class AudiobookRepositoryPathReferenceTests
+[Trait("Name", "AudiobookRepositoryPathReferenceTests")]
+[Trait("Category", "Infrastructure")]
+public sealed class AudiobookRepositoryPathReferenceTests : BaseTests
 {
     [Fact]
     public async Task RewritePathReferencesAsync_SaveFailure_ThrowsPersistenceException()

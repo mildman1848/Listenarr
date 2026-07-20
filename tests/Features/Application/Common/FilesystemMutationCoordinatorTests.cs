@@ -1,6 +1,10 @@
+using Listenarr.Tests.Common;
+
 namespace Listenarr.Tests.Features.Application.Common;
 
-public sealed class FilesystemMutationCoordinatorTests
+[Trait("Name", "FilesystemMutationCoordinatorTests")]
+[Trait("Category", "Application")]
+public sealed class FilesystemMutationCoordinatorTests : BaseTests
 {
     [Fact]
     public async Task ExecuteExclusiveAsync_AllowsOnlyOneOperationAtATime()

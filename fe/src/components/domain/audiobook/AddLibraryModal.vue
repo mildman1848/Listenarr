@@ -400,12 +400,24 @@
                     />
                   </div>
                   <small class="form-help" v-if="selectedRootId === 0">
-                    Enter an absolute path where files will be stored
+                    Enter an absolute destination within a configured root folder or output path.
                   </small>
                   <small class="form-help" v-else>
                     Select a named root (or custom path) and edit the path relative to it on the
                     right.
                   </small>
+                  <div
+                    v-if="estimatedFullPath"
+                    class="destination-preview"
+                    data-testid="effective-destination"
+                  >
+                    <span>Effective destination:</span>
+                    <code>{{ estimatedFullPath }}</code>
+                  </div>
+                  <div v-if="destinationPathValidationError" class="path-validation-error">
+                    <PhWarning :size="16" />
+                    <span>{{ destinationPathValidationError }}</span>
+                  </div>
                   <!-- Path length warning -->
                   <div v-if="destinationPathWarning" class="path-length-warning">
                     <PhWarning :size="16" />
@@ -438,7 +450,11 @@
         <PhX />
         Cancel
       </button>
-      <button class="btn btn-primary" @click="addToLibrary" :disabled="isAdding || metadataLoading">
+      <button
+        class="btn btn-primary"
+        @click="addToLibrary"
+        :disabled="isAdding || metadataLoading || Boolean(destinationPathValidationError)"
+      >
         <PhSpinner v-if="isAdding" class="ph-spin" />
         <PhPlus v-else />
         {{ isAdding ? 'Adding...' : 'Add to Library' }}
@@ -456,6 +472,7 @@ import type {
   AudiobookSeriesMembership,
 } from '@/types'
 import { apiService } from '@/services/api'
+import { getApiValidationError } from '@/services/apiErrors'
 import { useConfigurationStore } from '@/stores/configuration'
 import { useToast } from '@/services/toastService'
 import { logger } from '@/utils/logger'
@@ -474,7 +491,12 @@ import {
   PhPencilSimple,
   PhEye,
 } from '@phosphor-icons/vue'
-import { toForward, normalizeForCompare } from '@/utils/path'
+import {
+  toForward,
+  normalizeForCompare,
+  detectPathKind,
+  validateLibraryDestinationPath,
+} from '@/utils/path'
 import { formatDate } from '@/utils/searchResultFormatting'
 import { stripHtmlAndNormalize } from '@/utils/textUtils'
 import { usePathLengthCheck } from '@/composables/usePathLengthCheck'
@@ -797,9 +819,21 @@ const estimatedFullPath = computed(() => {
   if (!root) return rel
   if (!rel) return root
   const sep = root.includes('\\') ? '\\' : '/'
-  return root.endsWith(sep) ? root + rel : root + sep + rel
+  const normalizedRelativePath = rel.replace(/\\|\//g, sep)
+  return root.endsWith(sep) ? root + normalizedRelativePath : root + sep + normalizedRelativePath
 })
+const serverDestinationValidationError = ref<string | null>(null)
 const { pathLengthWarning: destinationPathWarning } = usePathLengthCheck(estimatedFullPath)
+const destinationPathValidationError = computed(() => {
+  if (serverDestinationValidationError.value) return serverDestinationValidationError.value
+  return validateLibraryDestinationPath(estimatedFullPath.value, {
+    pathKind: detectPathKind(estimatedFullPath.value),
+  })
+})
+
+watch(estimatedFullPath, () => {
+  serverDestinationValidationError.value = null
+})
 
 // Hold an enriched metadata object (populate if metadata sources available)
 const enriched = ref<AudibleBookMetadata | null>(null)
@@ -1216,34 +1250,8 @@ const addToLibrary = async () => {
   if (!props.book) return
 
   isAdding.value = true
-  // Combine rootPath + relativePath into full destination path
-  let destination: string | undefined = undefined
   try {
-    const rel = (options.value.relativePath || '').trim()
-    // Resolve selected root (custom, named, or default)
-    let root = null
-    if (selectedRootId.value === 0) root = customRootPath.value || ''
-    else if (selectedRootId.value && selectedRootId.value > 0) {
-      const found = rootStore.folders.find((f) => f.id === selectedRootId.value)
-      root = found?.path || ''
-    } else {
-      // Use default root folder, fallback to legacy outputPath for compatibility
-      const defaultRoot = rootStore.folders.find((f) => f.isDefault)
-      root = defaultRoot?.path || configStore.applicationSettings?.outputPath || ''
-    }
-
-    if (selectedRootId.value === 0) {
-      // Custom path: use exactly what the user entered (no pattern/relative path)
-      const cleaned = (root || '').trim()
-      destination = cleaned.length ? cleaned : undefined
-    } else if (root && rel) {
-      const sep = root.includes('\\') ? '\\' : '/'
-      const cleanedRel = rel.replace(/\\|\//g, sep)
-      destination = root.endsWith(sep) ? root + cleanedRel : root + sep + cleanedRel
-    } else if (root && !rel) {
-      destination = root
-    }
-
+    const destination = estimatedFullPath.value.trim() || undefined
     const metadataToSend = buildMetadataPayload()
     const result = await apiService.addToLibrary(metadataToSend, {
       monitored: options.value.monitored,
@@ -1256,6 +1264,13 @@ const addToLibrary = async () => {
     closeModal()
   } catch (err: unknown) {
     console.error('Failed to add audiobook:', err)
+    const validationError = getApiValidationError(err, 'destinationPath')
+    if (validationError) {
+      serverDestinationValidationError.value = validationError.message
+      toast.error('Invalid destination', validationError.message)
+      return
+    }
+
     const errorMessage =
       err instanceof Error ? err.message : 'Failed to add audiobook. Please try again.'
     toast.error('Add failed', errorMessage)

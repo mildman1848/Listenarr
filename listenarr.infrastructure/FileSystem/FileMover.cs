@@ -58,6 +58,17 @@ namespace Listenarr.Infrastructure.FileSystem
         private readonly FileMoverOptions _options;
         private readonly IFileSystemSemanticsResolver? _semanticsResolver;
 
+        internal Func<Task>? AfterSourceStateCreatedForTestAsync { get; init; }
+        internal Func<string, string, Task>? AfterSourceQuarantinedForTestAsync { get; init; }
+        internal Func<Task>? AfterDestinationStateCreatedForTestAsync { get; init; }
+        internal Func<string, string, Task>? AfterDestinationQuarantinedForTestAsync { get; init; }
+        internal Func<Task>? AfterSourceRetirementCommittedForTestAsync { get; init; }
+        internal Func<string, Task>? AfterDestinationPublishedForTestAsync { get; init; }
+        internal Func<Task>? AfterSourceClaimDeletedForTestAsync { get; init; }
+        internal Func<Task>? AfterFileMoveStateCleanedForTestAsync { get; init; }
+        internal Func<Task>? AfterDirectoryCopyPreflightForTestAsync { get; init; }
+        internal Action? BeforeDirectoryTreePreflightForTest { get; init; }
+
         public FileMover(
             ILogger<FileMover> logger,
             IProcessRunner? processRunner = null,
@@ -72,16 +83,6 @@ namespace Listenarr.Infrastructure.FileSystem
 
         public async Task<bool> MoveDirectoryAsync(string sourceDir, string destDir)
         {
-            if (!TryRecoverInterruptedCopiedSourceCleanup(
-                    sourceDir,
-                    out var recoveryReason))
-            {
-                _logger.LogWarning(
-                    "Blocked directory move because interrupted source cleanup could not be recovered: {Reason}",
-                    recoveryReason);
-                return false;
-            }
-
             var pathEquivalence = await TryDetermineFilesystemPathEquivalenceAsync(
                 sourceDir,
                 destDir);
@@ -105,6 +106,16 @@ namespace Listenarr.Infrastructure.FileSystem
                     sourceDir,
                     destDir,
                     "Source and destination directories overlap");
+                return false;
+            }
+
+            if (!TryRecoverInterruptedCopiedSourceCleanup(
+                    sourceDir,
+                    out var recoveryReason))
+            {
+                _logger.LogWarning(
+                    "Blocked directory move because interrupted source cleanup could not be recovered: {Reason}",
+                    recoveryReason);
                 return false;
             }
 
@@ -164,11 +175,11 @@ namespace Listenarr.Infrastructure.FileSystem
                 return false;
             }
 
-            if (!FileSystemSafety.TryEnumerateTreeWithoutLinks(
+            if (!TryCaptureDirectoryCopySnapshot(
                     sourceDir,
-                    out _,
-                    out _,
+                    out var copySnapshot,
                     out var sourceTraversalReason)
+                || copySnapshot == null
                 || (Directory.Exists(destDir)
                     && !FileSystemSafety.TryEnumerateTreeWithoutLinks(
                         destDir,
@@ -186,7 +197,7 @@ namespace Listenarr.Infrastructure.FileSystem
             // changed source content is preserved instead of being recursively deleted.
             try
             {
-                await CopyDirRecursiveAsync(sourceDir, destDir);
+                await CopyDirectorySnapshotAsync(copySnapshot, destDir);
                 var cleanup = await CleanupCopiedSourceTreeAsync(sourceDir, destDir);
                 if (!cleanup.DestinationVerified)
                 {
@@ -276,6 +287,50 @@ namespace Listenarr.Infrastructure.FileSystem
 
         public async Task<bool> MoveFileAsync(string sourceFile, string destFile)
         {
+            if (string.Equals(
+                    Path.GetFullPath(sourceFile),
+                    Path.GetFullPath(destFile),
+                    StringComparison.Ordinal))
+            {
+                return true;
+            }
+
+            using var pathLock = await TryAcquireFileMoveGateAsync(
+                sourceFile,
+                destFile);
+            if (pathLock == null)
+            {
+                return false;
+            }
+
+            var recoveryOutcome = await TryRecoverInterruptedFileMoveClaimsAsync(
+                sourceFile,
+                destFile,
+                pathLock.SourceIdentity,
+                pathLock.DestinationIdentity);
+            if (recoveryOutcome == FileMoveClaimRecoveryOutcome.Completed)
+            {
+                return true;
+            }
+
+            if (recoveryOutcome == FileMoveClaimRecoveryOutcome.Blocked)
+            {
+                return false;
+            }
+
+            return await MoveFileWithLocksAsync(
+                sourceFile,
+                destFile,
+                pathLock.SourceIdentity,
+                pathLock.DestinationIdentity);
+        }
+
+        private async Task<bool> MoveFileWithLocksAsync(
+            string sourceFile,
+            string destFile,
+            string sourceIdentity,
+            string destinationIdentity)
+        {
             var pathEquivalence = await TryDetermineFilesystemPathEquivalenceAsync(
                 sourceFile,
                 destFile);
@@ -293,9 +348,25 @@ namespace Listenarr.Infrastructure.FileSystem
             var attempt = 0;
             var delay = 1000;
 
-            if (await TryCompleteIdempotentFileMoveAsync(sourceFile, destFile))
+            var idempotentOutcome = await TryCompleteIdempotentFileMoveAsync(
+                sourceFile,
+                destFile,
+                sourceIdentity,
+                destinationIdentity);
+            if (idempotentOutcome == IdempotentFileMoveOutcome.Completed)
             {
                 return true;
+            }
+
+            if (idempotentOutcome == IdempotentFileMoveOutcome.SourcePathRecreated)
+            {
+                LogMutation(
+                    FileMutationOutcome.Blocked,
+                    FileAction.Move,
+                    sourceFile,
+                    destFile,
+                    "Source path was recreated while completing an idempotent move");
+                return false;
             }
 
             for (; attempt < _options.MaxRetries; attempt++)
@@ -354,7 +425,9 @@ namespace Listenarr.Infrastructure.FileSystem
 
             var managedFallback = await TryManagedFileMoveFallbackAsync(
                 sourceFile,
-                destFile);
+                destFile,
+                sourceIdentity,
+                destinationIdentity);
             if (managedFallback == FileMoveFallbackOutcome.Success)
             {
                 LogMutation(
@@ -379,7 +452,9 @@ namespace Listenarr.Infrastructure.FileSystem
 
             var robocopyFallback = await TryRobocopyFileMoveFallbackAsync(
                 sourceFile,
-                destFile);
+                destFile,
+                sourceIdentity,
+                destinationIdentity);
             if (robocopyFallback == FileMoveFallbackOutcome.Success)
             {
                 LogMutation(

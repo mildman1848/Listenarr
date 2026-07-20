@@ -10,11 +10,13 @@
 using Listenarr.Tests.Builders;
 using Microsoft.Extensions.Logging.Abstractions;
 
+using Listenarr.Tests.Common;
+
 namespace Listenarr.Tests.Features.Infrastructure.Library.Scanning;
 
 [Trait("Name", "ScanFileDiscoveryTests")]
 [Trait("Category", "Infrastructure")]
-public sealed class ScanFileDiscoveryTests : IDisposable
+public sealed class ScanFileDiscoveryTests : BaseTests, IDisposable
 {
     private readonly string _root = Path.Join(
         Path.GetTempPath(),

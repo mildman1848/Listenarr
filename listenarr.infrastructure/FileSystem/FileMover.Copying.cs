@@ -6,16 +6,52 @@ using System.Runtime.InteropServices;
 using System.Diagnostics;
 using Listenarr.Domain.Audiobooks.Enumerations;
 using Microsoft.Extensions.Logging;
-using Listenarr.Domain.Common;
 
 namespace Listenarr.Infrastructure.FileSystem
 {
+    internal enum IdempotentFileMoveOutcome
+    {
+        NotApplicable,
+        Completed,
+        SourcePathRecreated
+    }
+
     public partial class FileMover : IFileMover
     {
         public async Task<bool> CopyDirectoryAsync(string sourceDir, string destDir)
         {
             try
             {
+                var pathEquivalence = await TryDetermineFilesystemPathEquivalenceAsync(
+                    sourceDir,
+                    destDir);
+                if (pathEquivalence != false)
+                {
+                    LogMutation(
+                        FileMutationOutcome.Blocked,
+                        FileAction.Copy,
+                        sourceDir,
+                        destDir,
+                        pathEquivalence == true
+                            ? "Source and destination identify the same directory"
+                            : "Filesystem identity could not prove distinct directories");
+                    return false;
+                }
+
+                var pathsOverlap = await TryDetermineDirectoryOverlapAsync(sourceDir, destDir);
+                if (pathsOverlap != false)
+                {
+                    LogMutation(
+                        FileMutationOutcome.Blocked,
+                        FileAction.Copy,
+                        sourceDir,
+                        destDir,
+                        pathsOverlap == true
+                            ? "Source and destination directories overlap"
+                            : "Filesystem identity could not prove non-overlapping directories");
+                    return false;
+                }
+
                 if (!TryRecoverInterruptedCopiedSourceCleanup(
                         sourceDir,
                         out var recoveryReason))
@@ -26,18 +62,45 @@ namespace Listenarr.Infrastructure.FileSystem
                     return false;
                 }
 
-                if (await IsSameFilesystemPathAsync(sourceDir, destDir))
+                if (IsLinkedOrUnverifiableEntry(sourceDir)
+                    || (Directory.Exists(destDir) && IsLinkedOrUnverifiableEntry(destDir)))
                 {
                     LogMutation(
-                        FileMutationOutcome.Skipped,
+                        FileMutationOutcome.Blocked,
                         FileAction.Copy,
                         sourceDir,
                         destDir,
-                        "Source and destination identify the same directory");
-                    return true;
+                        "A directory endpoint could not be verified without links");
+                    return false;
                 }
 
-                await CopyDirRecursiveAsync(sourceDir, destDir);
+                if (!TryCaptureDirectoryCopySnapshot(
+                        sourceDir,
+                        out var snapshot,
+                        out var traversalReason)
+                    || snapshot == null
+                    || (Directory.Exists(destDir)
+                        && !FileSystemSafety.TryEnumerateTreeWithoutLinks(
+                            destDir,
+                            out _,
+                            out _,
+                            out traversalReason)))
+                {
+                    LogMutation(
+                        FileMutationOutcome.Blocked,
+                        FileAction.Copy,
+                        sourceDir,
+                        destDir,
+                        traversalReason);
+                    return false;
+                }
+
+                if (AfterDirectoryCopyPreflightForTestAsync != null)
+                {
+                    await AfterDirectoryCopyPreflightForTestAsync();
+                }
+
+                await CopyDirectorySnapshotAsync(snapshot, destDir);
                 LogMutation(FileMutationOutcome.Success, FileAction.Copy, sourceDir, destDir);
                 return true;
             }
@@ -193,40 +256,6 @@ namespace Listenarr.Infrastructure.FileSystem
             }
         }
 
-        private async Task CopyDirRecursiveAsync(string src, string dst)
-        {
-            Directory.CreateDirectory(dst);
-            foreach (var dir in Directory.GetDirectories(src, "*", SearchOption.TopDirectoryOnly))
-            {
-                var relative = Path.GetRelativePath(src, dir);
-                if (!FileUtils.TryResolveRelativePathWithinBase(dst, relative, out var sub))
-                {
-                    throw new IOException($"Directory copy destination escaped root: {relative}");
-                }
-
-                await CopyDirRecursiveAsync(dir, sub);
-            }
-
-            foreach (var file in Directory.GetFiles(src, "*.*", SearchOption.TopDirectoryOnly))
-            {
-                var relative = Path.GetRelativePath(src, file);
-                if (!FileUtils.TryResolveRelativePathWithinBase(dst, relative, out var destFile))
-                {
-                    throw new IOException($"File copy destination escaped root: {relative}");
-                }
-
-                if (File.Exists(destFile)
-                    && await FileSystemSafety.FilesHaveSameContentAsync(file, destFile))
-                {
-                    LogMutation(FileMutationOutcome.Skipped, FileAction.Copy, file, destFile, "Destination already has identical content");
-                    continue;
-                }
-
-                File.Copy(file, destFile, true);
-                LogMutation(FileMutationOutcome.Success, FileAction.Copy, file, destFile);
-            }
-        }
-
         private static string Truncate(string? s, int max)
         {
             if (string.IsNullOrEmpty(s)) return string.Empty;
@@ -305,14 +334,18 @@ namespace Listenarr.Infrastructure.FileSystem
             }
         }
 
-        private async Task<bool> TryCompleteIdempotentFileMoveAsync(string sourceFile, string destFile)
+        private async Task<IdempotentFileMoveOutcome> TryCompleteIdempotentFileMoveAsync(
+            string sourceFile,
+            string destFile,
+            string sourceIdentity,
+            string destinationIdentity)
         {
             var equivalence = await TryDetermineFilesystemPathEquivalenceAsync(
                 sourceFile,
                 destFile);
             if (equivalence == true)
             {
-                return true;
+                return IdempotentFileMoveOutcome.Completed;
             }
 
             // Removing the source is safe only when filesystem identity resolution
@@ -324,130 +357,31 @@ namespace Listenarr.Infrastructure.FileSystem
                 || !File.Exists(sourceFile)
                 || !File.Exists(destFile))
             {
-                return false;
+                return IdempotentFileMoveOutcome.NotApplicable;
             }
 
-            if (!await FileSystemSafety.FilesHaveSameContentAsync(sourceFile, destFile))
+            var removalOutcome = await TryRemoveVerifiedFileMoveSourceWithClaimsAsync(
+                sourceFile,
+                destFile,
+                sourceIdentity,
+                destinationIdentity);
+            if (removalOutcome == VerifiedFileMoveRemovalOutcome.NotRemoved)
             {
-                return false;
+                return IdempotentFileMoveOutcome.NotApplicable;
             }
 
-            try
+            if (removalOutcome == VerifiedFileMoveRemovalOutcome.PathRecreated)
             {
-                File.Delete(sourceFile);
-                LogMutation(FileMutationOutcome.Skipped, FileAction.Move, sourceFile, destFile, "Destination already has identical content; source removed");
-                return true;
-            }
-            catch (Exception ex) when (ex is not OperationCanceledException && ex is not OutOfMemoryException && ex is not StackOverflowException)
-            {
-                _logger.LogWarning(ex, "Failed to remove idempotent move source {Source}", LogRedaction.SanitizeFilePath(sourceFile));
-                return false;
-            }
-        }
-
-        private async Task<bool> IsSameFilesystemPathAsync(string source, string destination) =>
-            await TryDetermineFilesystemPathEquivalenceAsync(source, destination) == true;
-
-        private async Task<bool?> TryDetermineDirectoryOverlapAsync(
-            string source,
-            string destination)
-        {
-            var sourcePath = Path.GetFullPath(
-                FileSystemPathIdentity.ResolveNativeAbsolutePath(source));
-            var destinationPath = Path.GetFullPath(
-                FileSystemPathIdentity.ResolveNativeAbsolutePath(destination));
-            if (_semanticsResolver == null)
-            {
-                return null;
+                return IdempotentFileMoveOutcome.SourcePathRecreated;
             }
 
-            try
-            {
-                var resolution = await _semanticsResolver.ResolveAsync(sourcePath);
-                if (resolution.State != PathIdentityState.Valid)
-                {
-                    return null;
-                }
-
-                return FileSystemPathIdentity.IsSameOrInside(
-                        destinationPath,
-                        sourcePath,
-                        resolution.Semantics)
-                    || FileSystemPathIdentity.IsSameOrInside(
-                        sourcePath,
-                        destinationPath,
-                        resolution.Semantics);
-            }
-            catch (Exception exception) when (exception is
-                IOException or UnauthorizedAccessException or ArgumentException or
-                InvalidOperationException or NotSupportedException or PathTooLongException)
-            {
-                _logger.LogDebug(
-                    exception,
-                    "Filesystem identity resolution failed while checking directory overlap for {Source} and {Destination}",
-                    LogRedaction.SanitizeFilePath(sourcePath),
-                    LogRedaction.SanitizeFilePath(destinationPath));
-                return null;
-            }
-        }
-
-        private async Task<bool?> TryDetermineFilesystemPathEquivalenceAsync(
-            string source,
-            string destination)
-        {
-            var sourcePath = Path.GetFullPath(
-                FileSystemPathIdentity.ResolveNativeAbsolutePath(source));
-            var destinationPath = Path.GetFullPath(
-                FileSystemPathIdentity.ResolveNativeAbsolutePath(destination));
-            if (string.Equals(sourcePath, destinationPath, StringComparison.Ordinal))
-            {
-                return true;
-            }
-
-            if (_semanticsResolver == null)
-            {
-                return null;
-            }
-
-            try
-            {
-                var resolution = await _semanticsResolver.ResolveAsync(sourcePath);
-                return resolution.State == PathIdentityState.Valid
-                    ? FileSystemPathIdentity.AreEquivalent(
-                        sourcePath,
-                        destinationPath,
-                        resolution.Semantics)
-                    : null;
-            }
-            catch (Exception exception) when (exception is
-                IOException or UnauthorizedAccessException or ArgumentException or
-                InvalidOperationException or NotSupportedException or PathTooLongException)
-            {
-                _logger.LogDebug(
-                    exception,
-                    "Filesystem identity resolution failed while comparing {Source} and {Destination}; destructive idempotent cleanup will be disabled",
-                    LogRedaction.SanitizeFilePath(sourcePath),
-                    LogRedaction.SanitizeFilePath(destinationPath));
-                return null;
-            }
-        }
-
-        private static bool IsLinkedOrUnverifiableEntry(string path)
-        {
-            try
-            {
-                return (File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0;
-            }
-            catch (Exception exception) when (exception is FileNotFoundException or DirectoryNotFoundException)
-            {
-                return false;
-            }
-            catch (Exception exception) when (exception is
-                IOException or UnauthorizedAccessException or ArgumentException or
-                NotSupportedException or PathTooLongException)
-            {
-                return true;
-            }
+            LogMutation(
+                FileMutationOutcome.Skipped,
+                FileAction.Move,
+                sourceFile,
+                destFile,
+                "Destination already has identical content; source removed");
+            return IdempotentFileMoveOutcome.Completed;
         }
 
         private async Task<bool> TrySkipSameContentAsync(FileAction action, string sourceFile, string destFile)

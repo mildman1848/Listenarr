@@ -8,11 +8,13 @@
  * (at your option) any later version.
  */
 
+using Listenarr.Tests.Common;
+
 namespace Listenarr.Tests.Features.Domain.Audiobooks.Rules
 {
     [Trait("Name", "MultiFileImportPlannerTests")]
     [Trait("Category", "Domain")]
-    public class MultiFileImportPlannerTests
+    public class MultiFileImportPlannerTests : BaseTests
     {
         [Fact]
         public void BuildPlans_DedupesCaseOnlyPathsUsingProvidedFilesystemRules()

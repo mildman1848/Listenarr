@@ -1,6 +1,10 @@
+using Listenarr.Tests.Common;
+
 namespace Listenarr.Tests.Features.Domain.Audiobooks;
 
-public sealed class MoveJobStateTests
+[Trait("Name", "MoveJobStateTests")]
+[Trait("Category", "Domain")]
+public sealed class MoveJobStateTests : BaseTests
 {
     [Fact]
     public void NewJob_HasDurableQueuedState()

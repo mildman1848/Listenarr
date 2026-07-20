@@ -115,13 +115,8 @@ import { PhFolder } from '@phosphor-icons/vue'
 import { useRootFoldersStore } from '@/stores/rootFolders'
 import { useToast } from '@/services/toastService'
 import type { RootFolder } from '@/types'
-import {
-  detectPathKind,
-  pathsEqual,
-  validateLibraryDestinationPath,
-  type PathCaseSensitivity,
-  type PathKind,
-} from '@/utils/path'
+import { detectPathKind, validateLibraryDestinationPath, type PathKind } from '@/utils/path'
+import { persistedRootPathKind, rootFolderPathChanged } from '@/utils/rootFolderPath'
 
 const { root } = defineProps<{ root?: RootFolder }>()
 const emit = defineEmits<{
@@ -156,37 +151,14 @@ function close() {
   emit('close')
 }
 
-function persistedRootPathKind(): PathKind {
-  if (root?.pathSyntax === 'Windows') return 'windows'
-  if (root?.pathSyntax === 'Unix') return 'unix'
-  return detectPathKind(root?.path)
-}
-
 function rootPathKind(): PathKind {
-  const sourceKind = persistedRootPathKind()
+  const sourceKind = root ? persistedRootPathKind(root) : 'unknown'
   const detected = detectPathKind(form.value.path, sourceKind)
   return detected === 'unknown' ? sourceKind : detected
 }
 
-function persistedRootCaseSensitivity(): PathCaseSensitivity {
-  if (root?.resolvedCaseSensitivity && root.resolvedCaseSensitivity !== 'Unknown') {
-    return root.resolvedCaseSensitivity
-  }
-  if (root?.caseSensitivityMode === 'Sensitive') return 'Sensitive'
-  if (root?.caseSensitivityMode === 'Insensitive') return 'Insensitive'
-  return 'Unknown'
-}
-
 function rootPathChanged(): boolean {
-  if (!root) return false
-
-  const sourceKind = persistedRootPathKind()
-  const candidateKind = detectPathKind(form.value.path, sourceKind)
-  if (sourceKind !== 'unknown' && candidateKind !== 'unknown' && sourceKind !== candidateKind) {
-    return true
-  }
-
-  return !pathsEqual(form.value.path, root.path, sourceKind, persistedRootCaseSensitivity())
+  return root ? rootFolderPathChanged(root, form.value.path) : false
 }
 
 async function save() {
@@ -212,13 +184,17 @@ async function save() {
         showConfirm.value = true
         return
       }
-      newRoot = await store.update(root.id, {
-        id: root.id,
-        name: form.value.name,
-        path: form.value.path,
-        isDefault: form.value.isDefault,
-        caseSensitivityMode: form.value.caseSensitivityMode,
-      })
+      newRoot = await store.update(
+        root.id,
+        {
+          id: root.id,
+          name: form.value.name,
+          path: form.value.path,
+          isDefault: form.value.isDefault,
+          caseSensitivityMode: form.value.caseSensitivityMode,
+        },
+        { expectedCurrentPath: root.path },
+      )
       toast.success('Success', 'Root folder updated')
     } else {
       newRoot = await store.create({
@@ -248,7 +224,12 @@ async function confirmChange(moveFiles: boolean) {
         isDefault: form.value.isDefault,
         caseSensitivityMode: form.value.caseSensitivityMode,
       },
-      { moveFiles: moveFiles, deleteEmptySource: modalDeleteEmpty.value },
+      {
+        expectedCurrentPath: root!.path,
+        pathChangeConfirmed: true,
+        moveFiles,
+        deleteEmptySource: modalDeleteEmpty.value,
+      },
     )
     toast.success('Success', moveFiles ? 'Root relocation started' : 'Root path metadata updated')
     emit('saved', updated)

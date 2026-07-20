@@ -1,8 +1,12 @@
 using Microsoft.EntityFrameworkCore;
 
+using Listenarr.Tests.Common;
+
 namespace Listenarr.Tests.Features.Infrastructure.Library.Moving;
 
-public sealed class EfLibraryDirectoryOwnershipStoreTests : IAsyncLifetime
+[Trait("Name", "EfLibraryDirectoryOwnershipStoreTests")]
+[Trait("Category", "Infrastructure")]
+public sealed class EfLibraryDirectoryOwnershipStoreTests : BaseTests
 {
     private readonly string _databasePath = Path.Join(
         Path.GetTempPath(),
@@ -15,8 +19,9 @@ public sealed class EfLibraryDirectoryOwnershipStoreTests : IAsyncLifetime
     private IDbContextFactory<ListenArrDbContext> _factory = null!;
     private EfLibraryDirectoryOwnershipStore _store = null!;
 
-    public async Task InitializeAsync()
+    public override async Task InitializeAsync()
     {
+        await base.InitializeAsync();
         Directory.CreateDirectory(Path.GetDirectoryName(_databasePath)!);
         Directory.CreateDirectory(_root);
         var options = new DbContextOptionsBuilder<ListenArrDbContext>()
@@ -28,7 +33,7 @@ public sealed class EfLibraryDirectoryOwnershipStoreTests : IAsyncLifetime
         _store = new EfLibraryDirectoryOwnershipStore(_factory, TimeProvider.System);
     }
 
-    public Task DisposeAsync()
+    public override async Task DisposeAsync()
     {
         if (Directory.Exists(_root))
         {
@@ -38,7 +43,7 @@ public sealed class EfLibraryDirectoryOwnershipStoreTests : IAsyncLifetime
         {
             File.Delete(_databasePath);
         }
-        return Task.CompletedTask;
+        await base.DisposeAsync();
     }
 
     [Fact]

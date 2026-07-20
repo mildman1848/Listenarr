@@ -1,6 +1,10 @@
+using Listenarr.Tests.Common;
+
 namespace Listenarr.Tests.Features.Infrastructure.Library.Moving;
 
-public sealed class MovedAudiobookPathRewriterTests
+[Trait("Name", "MovedAudiobookPathRewriterTests")]
+[Trait("Category", "Infrastructure")]
+public sealed class MovedAudiobookPathRewriterTests : BaseTests
 {
     [Fact]
     public async Task RewriteAsync_UnmappableStoredPath_RequiresOperatorAttention()

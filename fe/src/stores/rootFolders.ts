@@ -20,6 +20,7 @@ import { ref, computed } from 'vue'
 import { apiService } from '@/services/api'
 import { logger } from '@/utils/logger'
 import type { RootFolder } from '@/types'
+import { rootFolderPathChanged } from '@/utils/rootFolderPath'
 
 export const useRootFoldersStore = defineStore('rootFolders', () => {
   const folders = ref<RootFolder[]>([])
@@ -64,21 +65,46 @@ export const useRootFoldersStore = defineStore('rootFolders', () => {
       isDefault?: boolean
       caseSensitivityMode?: 'Auto' | 'Sensitive' | 'Insensitive'
     },
-    opts?: { moveFiles?: boolean; deleteEmptySource?: boolean },
+    opts?: {
+      expectedCurrentPath?: string
+      pathChangeConfirmed?: boolean
+      moveFiles?: boolean
+      deleteEmptySource?: boolean
+    },
   ) {
-    const current = folders.value.find((folder) => folder.id === id)
-    if (current && current.path !== payload.path) {
+    let current = folders.value.find((folder) => folder.id === id)
+    if (!current) {
+      await load()
+      current = folders.value.find((folder) => folder.id === id)
+    }
+    if (!current) {
+      throw new Error('Root folder changed or was removed; reload and try again')
+    }
+    if (opts?.expectedCurrentPath != null && current.path !== opts.expectedCurrentPath) {
+      throw new Error(
+        'Root folder path changed while editing; review the current path and try again',
+      )
+    }
+
+    const requestedMode = payload.caseSensitivityMode ?? current.caseSensitivityMode ?? 'Auto'
+    const hasPathChange = rootFolderPathChanged(current, payload.path)
+    if (hasPathChange) {
+      if (opts?.pathChangeConfirmed !== true) {
+        throw new Error('Root folder path change requires confirmation')
+      }
+
       await apiService.changeRootFolderPath(id, {
         targetPath: payload.path,
         mode: opts?.moveFiles === false ? 'metadataOnly' : 'relocate',
         deleteEmptySource: opts?.deleteEmptySource !== false,
         desiredName: payload.name,
         desiredIsDefault: payload.isDefault === true,
-        targetCaseSensitivityMode:
-          payload.caseSensitivityMode ?? current.caseSensitivityMode ?? 'Auto',
+        targetCaseSensitivityMode: requestedMode,
       })
     } else {
-      await apiService.updateRootFolder(id, payload)
+      // PATCH intentionally preserves the canonical stored path. Equivalent
+      // separator/case spelling is not a relocation or a path representation update.
+      await apiService.updateRootFolder(id, { ...payload, path: current.path })
     }
     await load()
     return folders.value.find((folder) => folder.id === id) ?? current!

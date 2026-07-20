@@ -1,0 +1,42 @@
+/*
+ * Listenarr - Audiobook Management System
+ * Copyright (C) 2024-2026 Listenarr Contributors
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Affero General Public License as published
+ * by the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ */
+
+namespace Listenarr.Domain.Common;
+
+public static partial class FileUtils
+{
+    public static IReadOnlyList<string> GetValidMutationRootsForCurrentOs(
+        IEnumerable<string?> paths)
+    {
+        ArgumentNullException.ThrowIfNull(paths);
+
+        var comparer = OperatingSystem.IsWindows()
+            ? StringComparer.OrdinalIgnoreCase
+            : StringComparer.Ordinal;
+        var normalizedRoots = new HashSet<string>(comparer);
+        foreach (var path in paths)
+        {
+            if (string.IsNullOrWhiteSpace(path)
+                || !TryNormalizeUserProvidedDirectoryPathForCurrentOs(
+                    path,
+                    out var normalizedPath,
+                    out _,
+                    allowFileSystemRoot: true,
+                    rejectParentTraversal: true))
+            {
+                continue;
+            }
+
+            normalizedRoots.Add(normalizedPath);
+        }
+
+        return normalizedRoots.ToArray();
+    }
+}

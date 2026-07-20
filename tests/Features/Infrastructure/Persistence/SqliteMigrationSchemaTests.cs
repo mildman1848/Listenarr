@@ -20,6 +20,8 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Migrations;
 
+using Listenarr.Tests.Common;
+
 namespace Listenarr.Tests.Features.Infrastructure.Persistence
 {
     /// <summary>
@@ -34,7 +36,8 @@ namespace Listenarr.Tests.Features.Infrastructure.Persistence
     /// </summary>
     [Trait("Area", "Persistence")]
     [Trait("Name", "SqliteMigrationSchemaTests")]
-    public class SqliteMigrationSchemaTests
+    [Trait("Category", "Infrastructure")]
+    public class SqliteMigrationSchemaTests : BaseTests
     {
         public static TheoryData<string> ChangedMigrationIds => new()
         {
@@ -51,7 +54,8 @@ namespace Listenarr.Tests.Features.Infrastructure.Persistence
             "20260710172532_AddMoveJobSourceCleanupBoundary",
             "20260713181804_HardenMoveExecutionAndScanHandoffs",
             "20260715115000_AddAudiobookFileOwnershipIdentity",
-            "20260717143713_AddLibraryDirectoryOwnership"
+            "20260717143713_AddLibraryDirectoryOwnership",
+            "20260720122500_EnforceSingleDefaultRootFolder"
         };
 
         private static (SqliteConnection Connection, ListenArrDbContext Context) CreateMigratedSqliteContext()
@@ -271,6 +275,98 @@ namespace Listenarr.Tests.Features.Infrastructure.Persistence
                     "lookup:three",
                     null,
                     "11111111111111111111111111111111"));
+        }
+
+        [Fact]
+        [Trait("Scenario", "SingleDefaultRootFolderInvariant")]
+        public async Task SingleDefaultRootFolderMigration_ReconcilesDuplicatesAndEnforcesUniqueness()
+        {
+            await using var connection = new SqliteConnection("DataSource=:memory:");
+            await connection.OpenAsync();
+
+            var options = new DbContextOptionsBuilder<ListenArrDbContext>()
+                .UseSqlite(connection, sqlite =>
+                    sqlite.MigrationsAssembly(typeof(ListenArrDbContext).Assembly.GetName().Name))
+                .Options;
+
+            await using var context = new ListenArrDbContext(options);
+            var migrator = context.GetService<IMigrator>();
+            await migrator.MigrateAsync("20260717143713_AddLibraryDirectoryOwnership");
+            await context.Database.ExecuteSqlRawAsync(
+                """
+                INSERT INTO "RootFolders" ("Id", "Name", "Path", "IsDefault")
+                VALUES (10, 'First', '/library/first', 1),
+                       (20, 'Second', '/library/second', 1),
+                       (30, 'Third', '/library/third', 0)
+                """);
+
+            await migrator.MigrateAsync();
+
+            var defaults = await context.RootFolders
+                .AsNoTracking()
+                .Where(root => root.IsDefault)
+                .Select(root => root.Id)
+                .ToListAsync();
+            Assert.Equal([10], defaults);
+            await Assert.ThrowsAsync<SqliteException>(() =>
+                context.Database.ExecuteSqlRawAsync(
+                    "UPDATE \"RootFolders\" SET \"IsDefault\" = 1 WHERE \"Id\" = 20"));
+        }
+
+        [Fact]
+        [Trait("Scenario", "ConcurrentDefaultRootPromotions")]
+        public async Task ConcurrentDefaultRootPromotions_CannotCommitTwoDefaults()
+        {
+            var databasePath = Path.Join(
+                FileService.GetTempPath(),
+                $"single-default-{Guid.NewGuid():N}.db");
+            var options = new DbContextOptionsBuilder<ListenArrDbContext>()
+                .UseSqlite(
+                    $"Data Source={databasePath};Default Timeout=5",
+                    sqlite => sqlite.MigrationsAssembly(
+                        typeof(ListenArrDbContext).Assembly.GetName().Name))
+                .Options;
+
+            await using (var setup = new ListenArrDbContext(options))
+            {
+                await setup.Database.MigrateAsync();
+                setup.RootFolders.AddRange(
+                    new RootFolder { Id = 101, Name = "First", Path = "/library/first" },
+                    new RootFolder { Id = 202, Name = "Second", Path = "/library/second" });
+                await setup.SaveChangesAsync();
+            }
+
+            var start = new TaskCompletionSource(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+            async Task<bool> PromoteAsync(int rootId)
+            {
+                await using var context = new ListenArrDbContext(options);
+                var root = await context.RootFolders.SingleAsync(candidate => candidate.Id == rootId);
+                root.IsDefault = true;
+                await start.Task;
+                try
+                {
+                    await context.SaveChangesAsync();
+                    return true;
+                }
+                catch (Exception exception) when (exception is
+                    PersistenceException or DbUpdateException or SqliteException)
+                {
+                    return false;
+                }
+            }
+
+            var firstPromotion = PromoteAsync(101);
+            var secondPromotion = PromoteAsync(202);
+            start.SetResult();
+            var outcomes = await Task.WhenAll(firstPromotion, secondPromotion);
+
+            Assert.Single(outcomes, committed => committed);
+            await using var verification = new ListenArrDbContext(options);
+            Assert.Single(await verification.RootFolders
+                .AsNoTracking()
+                .Where(root => root.IsDefault)
+                .ToListAsync());
         }
 
         [Theory]

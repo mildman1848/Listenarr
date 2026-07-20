@@ -8,11 +8,13 @@
  * (at your option) any later version.
  */
 
+using Listenarr.Tests.Common;
+
 namespace Listenarr.Tests.Features.Infrastructure.Library.Scanning
 {
     [Trait("Name", "ScanPathPlannerTests")]
     [Trait("Category", "Infrastructure")]
-    public class ScanPathPlannerTests
+    public class ScanPathPlannerTests : BaseTests
     {
         [Fact]
         public void CalculateBasePath_DoesNotClimbAboveNestedBookBoundary()

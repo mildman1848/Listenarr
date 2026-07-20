@@ -13,9 +13,230 @@ using Listenarr.Tests.Common;
 
 namespace Listenarr.Tests.Features.Architecture;
 
-public sealed class BackendArchitectureTests
+[Trait("Name", "BackendArchitectureTests")]
+[Trait("Category", "Architecture")]
+public sealed class BackendArchitectureTests : BaseTests
 {
     private static readonly string RepositoryRoot = FindRepositoryRoot();
+
+    // Pre-existing convention debt is grandfathered by full type identity.
+    // No test type added by this branch may appear in this set.
+    private static readonly IReadOnlySet<string> LegacyTestConventionExemptions =
+        new HashSet<string>(StringComparer.Ordinal)
+        {
+            "Listenarr.Tests.Features.Api.Common.ListenarrExceptionHandlerTests",
+            "Listenarr.Tests.Features.Api.Common.ServerErrorProblemDetailsFilterTests",
+            "Listenarr.Tests.Features.Api.Extensions.SwaggerSecurityRequirementDocumentFilterTests",
+            "Listenarr.Tests.Features.Api.Features.Configuration.ConfigurationControllerDownloadClientTests",
+            "Listenarr.Tests.Features.Api.Features.Configuration.ConfigurationControllerSettingsTests",
+            "Listenarr.Tests.Features.Api.Features.Downloads.ManualImport_MultiFileCollisionTests",
+            "Listenarr.Tests.Features.Api.Features.Images.ImagesController_AlternateAsinCachedImageAliasTests",
+            "Listenarr.Tests.Features.Api.Features.Images.ImagesController_AudnexusAuthorByAsinTests",
+            "Listenarr.Tests.Features.Api.Features.Images.ImagesController_AuthorFallbackTests",
+            "Listenarr.Tests.Features.Api.Features.Images.ImagesController_AuthorStoredAsinTests",
+            "Listenarr.Tests.Features.Api.Features.Images.ImagesController_ContentRootResolutionTests",
+            "Listenarr.Tests.Features.Api.Features.Images.ImagesController_LocalIsbnOpenLibraryFallbackTests",
+            "Listenarr.Tests.Features.Api.Features.Images.ImagesController_LocalTitleAuthorOpenLibraryFallbackTests",
+            "Listenarr.Tests.Features.Api.Features.Images.ImagesController_MetadataDescriptionDoesNotBlockFallbackTests",
+            "Listenarr.Tests.Features.Api.Features.Images.ImagesController_MetadataDownloadFallbackTests",
+            "Listenarr.Tests.Features.Api.Features.Images.ImagesController_MetadataDownloadTests",
+            "Listenarr.Tests.Features.Api.Features.Images.ImagesController_PlaceholderFallbackTests",
+            "Listenarr.Tests.Features.Api.Features.Images.ImagesController_TempToLibraryForAudiobookTests",
+            "Listenarr.Tests.Features.Api.Features.Metadata.MetadataController_AuthorCatalogTests",
+            "Listenarr.Tests.Features.Api.Features.Metadata.MetadataController_AuthorLookupTests",
+            "Listenarr.Tests.Features.Api.Features.Metadata.MetadataController_SeriesTests",
+            "Listenarr.Tests.Features.Api.Features.Prowlarr.ProwlarrCompatControllerTests",
+            "Listenarr.Tests.Features.Api.Features.Search.IntelligentSearchIntegrationTests",
+            "Listenarr.Tests.Features.Api.Features.Search.SearchControllerAdvancedNormalizationTests",
+            "Listenarr.Tests.Features.Api.Features.Search.SearchControllerTests",
+            "Listenarr.Tests.Features.Api.Features.SystemDiagnostics.ReadinessEndpointTests",
+            "Listenarr.Tests.Features.Api.ForwardedHeadersTrustModelTests",
+            "Listenarr.Tests.Features.Api.LibraryController_GetAllResilienceTests",
+            "Listenarr.Tests.Features.Api.LibraryController_IdentifierDeduplicationTests",
+            "Listenarr.Tests.Features.Api.LibraryController_MetadataRescanTests",
+            "Listenarr.Tests.Features.Api.Middleware.AuthenticationMiddlewareTests",
+            "Listenarr.Tests.Features.Api.Models.AudiobookDtoFactoryTests",
+            "Listenarr.Tests.Features.Api.ProwlarrEndpointsTests",
+            "Listenarr.Tests.Features.Api.SecurityPipelineEndToEndTests",
+            "Listenarr.Tests.Features.Api.Services.DownloadNaming_AudiobookMetadataTests",
+            "Listenarr.Tests.Features.Api.Services.DownloadNaming_PatternCollapseTests",
+            "Listenarr.Tests.Features.Api.Services.FileMoverHardlinkTests",
+            "Listenarr.Tests.Features.Api.Services.FileNamingService_PathLengthTests",
+            "Listenarr.Tests.Features.Api.Services.FileNamingService_PatternSelectionTests",
+            "Listenarr.Tests.Features.Api.Services.Import_PatternIntegrationTests",
+            "Listenarr.Tests.Features.Api.Services.LegacyOutputPathMigratorTests",
+            "Listenarr.Tests.Features.Api.Services.MyAnonamouseTorrentAnnounceExtractionTests",
+            "Listenarr.Tests.Features.Api.Services.Search.Providers.IndexersAuthTests",
+            "Listenarr.Tests.Features.Api.Services.Search.Providers.IndexersControllerProwlarrImportTests",
+            "Listenarr.Tests.Features.Api.Services.Search.Providers.IndexersControllerTests",
+            "Listenarr.Tests.Features.Api.Services.Search.Providers.IndexersNewznabAuthTests",
+            "Listenarr.Tests.Features.Api.Services.Search.Providers.IndexersNewznabParsingTests",
+            "Listenarr.Tests.Features.Api.Services.Search.Providers.IndexersPersistedAuthTests",
+            "Listenarr.Tests.Features.Api.Services.Search.Providers.MyAnonamouseRedirectSecurityIntegrationTests",
+            "Listenarr.Tests.Features.Api.Services.Search.Providers.MyAnonamouseTorrentAnnounceRewriteTests",
+            "Listenarr.Tests.Features.Api.Services.Search.Providers.MyAnonamouseTorrentRewriteTests",
+            "Listenarr.Tests.Features.Api.Services.UnmatchedScanBackgroundServiceTests",
+            "Listenarr.Tests.Features.Api.Services.WorkerCycleRunnerTests",
+            "Listenarr.Tests.Features.Api.Services.downloadImportServiceHardlinkTests",
+            "Listenarr.Tests.Features.Api.Services.downloadImportServiceTests",
+            "Listenarr.Tests.Features.Api.SessionCookieAuthTests",
+            "Listenarr.Tests.Features.Api.Startup.ListenarrBuilderFactoryTests",
+            "Listenarr.Tests.Features.Api.Utils.FinalizePathHelperTests",
+            "Listenarr.Tests.Features.Application.Audiobooks.Catalog.AuthorCatalogServiceTests",
+            "Listenarr.Tests.Features.Application.Audiobooks.Catalog.SeriesCatalogServiceTests",
+            "Listenarr.Tests.Features.Application.Audiobooks.Files.AudioFileServiceTests",
+            "Listenarr.Tests.Features.Application.Audiobooks.Files.AudioFileService_UpdateAudiobookFieldsTests",
+            "Listenarr.Tests.Features.Application.Audiobooks.Identifiers.AudiobookIdentifierMapperTests",
+            "Listenarr.Tests.Features.Application.Audiobooks.Jobs.MoveQueueServiceTests",
+            "Listenarr.Tests.Features.Application.Audiobooks.Matching.AudiobookStatusEvaluatorTests",
+            "Listenarr.Tests.Features.Application.Audiobooks.Monitoring.AuthorMonitoringServiceTests",
+            "Listenarr.Tests.Features.Application.Audiobooks.Quality.QualityProfileScoringTests",
+            "Listenarr.Tests.Features.Application.Audiobooks.Quality.QualityScoringTests",
+            "Listenarr.Tests.Features.Application.Audiobooks.Renaming.RenameServiceTests",
+            "Listenarr.Tests.Features.Application.Audiobooks.RootFolders.RootFolderServiceTests",
+            "Listenarr.Tests.Features.Application.Configuration.Core.StartupConfigServiceTests",
+            "Listenarr.Tests.Features.Application.Downloads.Common.DownloadClientUriBuilderTests",
+            "Listenarr.Tests.Features.Application.Downloads.Import.DownloadImportServiceTests",
+            "Listenarr.Tests.Features.Application.Downloads.Import.DownloadValidationPipelineTests",
+            "Listenarr.Tests.Features.Application.Downloads.Processing.DownloadHashRetrievalServiceTests",
+            "Listenarr.Tests.Features.Application.Downloads.Processing.DownloadStateMachineTests",
+            "Listenarr.Tests.Features.Application.Downloads.Queue.DownloadClientCategoryFilterTests",
+            "Listenarr.Tests.Features.Application.Downloads.Queue.DownloadQueueServiceReconciliationTests",
+            "Listenarr.Tests.Features.Application.Downloads.Submission.DirectDownloadWorkflowTests",
+            "Listenarr.Tests.Features.Application.Downloads.Submission.DownloadIntegrationTests",
+            "Listenarr.Tests.Features.Application.Downloads.Submission.DownloadServiceTests",
+            "Listenarr.Tests.Features.Application.Downloads.Submission.TrustedDownloadCandidateFactoryTests",
+            "Listenarr.Tests.Features.Application.Metadata.Audible.AudibleServiceTests",
+            "Listenarr.Tests.Features.Application.Metadata.Core.AudiobookMetadataServiceTests",
+            "Listenarr.Tests.Features.Application.Notifications.NotificationsTests",
+            "Listenarr.Tests.Features.Application.Notifications.Payloads.NotificationPayloadBuilderAdapterTests",
+            "Listenarr.Tests.Features.Application.Search.Core.SearchServiceFixesTests",
+            "Listenarr.Tests.Features.Application.Search.Core.SearchWorkflowHelperTests",
+            "Listenarr.Tests.Features.Application.Search.Parsing.ParseLanguageTests",
+            "Listenarr.Tests.Features.Application.Search.ProwlarrIndexerPayloadParserTests",
+            "Listenarr.Tests.Features.Application.Search.Scoring.SearchServiceScoringTests",
+            "Listenarr.Tests.Features.Application.Search.Scoring.SearchServiceSortingTests",
+            "Listenarr.Tests.Features.Application.Security.Redaction.LogRedactionTests",
+            "Listenarr.Tests.Features.Application.Security.Redaction.SecurityRedactionTests",
+            "Listenarr.Tests.Features.Domain.Audiobooks.Rules.AudiobookSeriesMembershipHelperTests",
+            "Listenarr.Tests.Features.Domain.Downloads.DownloadClientItemTests",
+            "Listenarr.Tests.Features.Domain.Downloads.DownloadProcessingJob",
+            "Listenarr.Tests.Features.Domain.Utils.FileUtilsTests",
+            "Listenarr.Tests.Features.Domain.Utils.QualityMatcherTests",
+            "Listenarr.Tests.Features.Domain.Utils.TitleMatchingServiceTests",
+            "Listenarr.Tests.Features.Infrastructure.ActivityHistory.Migrations.UnifiedActionHistoryMigrationTests",
+            "Listenarr.Tests.Features.Infrastructure.ActivityHistory.Persistence.DownloadHistoryRepositoryTests",
+            "Listenarr.Tests.Features.Infrastructure.ActivityHistory.Persistence.HistoryQueryRepositoryTests",
+            "Listenarr.Tests.Features.Infrastructure.ActivityHistory.Services.DownloadHistoryServiceTests",
+            "Listenarr.Tests.Features.Infrastructure.Configuration.OperationalOptionsValidatorTests",
+            "Listenarr.Tests.Features.Infrastructure.Configuration.Paths.ApplicationPathServiceTests",
+            "Listenarr.Tests.Features.Infrastructure.Converters.JsonValueConvertersTests",
+            "Listenarr.Tests.Features.Infrastructure.DependencyInjection.DependencyInjectionTests",
+            "Listenarr.Tests.Features.Infrastructure.DependencyInjection.HostedServicesRegistrationTests",
+            "Listenarr.Tests.Features.Infrastructure.DependencyInjection.InfrastructureServiceRegistrationExtensionsTests",
+            "Listenarr.Tests.Features.Infrastructure.DownloadClients.Common.UsenetAdapterFilteringTests",
+            "Listenarr.Tests.Features.Infrastructure.DownloadClients.Nzbget.NzbgetAdapterTests",
+            "Listenarr.Tests.Features.Infrastructure.DownloadClients.Nzbget.NzbgetRemovalWorkflowTests",
+            "Listenarr.Tests.Features.Infrastructure.DownloadClients.Qbittorrent.QbittorrentAdapterTests",
+            "Listenarr.Tests.Features.Infrastructure.DownloadClients.Qbittorrent.QbittorrentCategoryFilteringTests",
+            "Listenarr.Tests.Features.Infrastructure.DownloadClients.Sabnzbd.SabnzbdAdapterTests",
+            "Listenarr.Tests.Features.Infrastructure.Downloads.Cleanup.MovedDownloadCleanupProcessorTests",
+            "Listenarr.Tests.Features.Infrastructure.Downloads.Import.ImportFinalizationServiceTests",
+            "Listenarr.Tests.Features.Infrastructure.Downloads.Monitoring.DownloadMonitorPersistenceTests",
+            "Listenarr.Tests.Features.Infrastructure.Downloads.Processing.DownloadProcessingJobCleanupProcessorTests",
+            "Listenarr.Tests.Features.Infrastructure.FileSystem.ArchiveExtractorSafetyTests",
+            "Listenarr.Tests.Features.Infrastructure.FileSystem.FileStorageSafetyTests",
+            "Listenarr.Tests.Features.Infrastructure.Library.Moving.MoveBackgroundServiceTests",
+            "Listenarr.Tests.Features.Infrastructure.Library.Moving.MoveBackgroundService_BroadcastTests",
+            "Listenarr.Tests.Features.Infrastructure.Library.Moving.MoveBackgroundService_FailureTests",
+            "Listenarr.Tests.Features.Infrastructure.Library.Moving.MoveBackgroundService_FilePathPreservationTests",
+            "Listenarr.Tests.Features.Infrastructure.Metadata.Parsing.PathMetadataParserTests",
+            "Listenarr.Tests.Features.Infrastructure.Migrations.MigrationMetadataTests",
+            "Listenarr.Tests.Features.Infrastructure.Migrations.ReleasedSchemaUpgradeTests",
+            "Listenarr.Tests.Features.Infrastructure.Notifications.Delivery.NotificationServiceTests",
+            "Listenarr.Tests.Features.Infrastructure.Notifications.Discord.DiscordBotServiceTests",
+            "Listenarr.Tests.Features.Infrastructure.Persistence.ApplicationSettingsConcurrencyTests",
+            "Listenarr.Tests.Features.Infrastructure.Persistence.EfDownloadDeduplicationTests",
+            "Listenarr.Tests.Features.Infrastructure.Persistence.EfDownloadProcessingJobDeduplicationTests",
+            "Listenarr.Tests.Features.Infrastructure.Persistence.EfMoveQueuePersistenceTests",
+            "Listenarr.Tests.Features.Infrastructure.Persistence.EfUnitOfWorkTests",
+            "Listenarr.Tests.Features.Infrastructure.Persistence.TestDatabaseIsolationTests",
+            "Listenarr.Tests.Features.Infrastructure.Repositories.AudiobookRepositoryTests",
+            "Listenarr.Tests.Features.Infrastructure.Repositories.AudiobookRepository_CatalogCacheReadTests",
+            "Listenarr.Tests.Features.Infrastructure.Repositories.DownloadProcessingJobRepositoryTests",
+            "Listenarr.Tests.Features.Infrastructure.Security.Identity.LoginRateLimiterTests",
+            "Listenarr.Tests.Features.Infrastructure.SystemDiagnostics.Diagnostics.MeterAppMetricsServiceTests",
+            "Listenarr.Tests.Features.Infrastructure.SystemDiagnostics.Diagnostics.SystemReadinessServiceTests",
+            "Listenarr.Tests.Features.Infrastructure.SystemDiagnostics.Diagnostics.SystemServiceVersionTests",
+            "Listenarr.Tests.Features.Infrastructure.SystemDiagnostics.Processes.SystemProcessRunnerTests",
+            "Listenarr.Tests.Features.Infrastructure.SystemDiagnostics.Version.ApplicationVersionServiceTests",
+            "Listenarr.Tests.Features.Infrastructure.Torrents.TorrentFileDownloaderTests",
+        };
+
+    [Fact]
+    public void TestClasses_FollowRepositoryConventions()
+    {
+        var violations = typeof(BackendArchitectureTests).Assembly
+            .GetTypes()
+            .Where(type => type is { IsAbstract: false, IsClass: true })
+            .Where(type => type.GetMethods().Any(method =>
+                method.CustomAttributes.Any(attribute =>
+                    typeof(FactAttribute).IsAssignableFrom(attribute.AttributeType))))
+            .Select(type => new
+            {
+                TypeName = type.FullName ?? type.Name,
+                Problem = DescribeTestConventionViolation(type)
+            })
+            .Where(violation => violation.Problem != null)
+            .OrderBy(violation => violation.TypeName, StringComparer.Ordinal)
+            .ToArray();
+        var unexpected = violations
+            .Where(violation => !LegacyTestConventionExemptions.Contains(violation.TypeName))
+            .Select(violation => $"{violation.TypeName}: {violation.Problem}")
+            .ToArray();
+        var currentViolationNames = violations
+            .Select(violation => violation.TypeName)
+            .ToHashSet(StringComparer.Ordinal);
+        var staleExemptions = LegacyTestConventionExemptions
+            .Where(exemption => !currentViolationNames.Contains(exemption))
+            .Order(StringComparer.Ordinal)
+            .ToArray();
+
+        Assert.True(
+            unexpected.Length == 0,
+            $"New test convention violations:{Environment.NewLine}{string.Join(Environment.NewLine, unexpected)}");
+        Assert.True(
+            staleExemptions.Length == 0,
+            $"Remove repaired legacy exemptions:{Environment.NewLine}{string.Join(Environment.NewLine, staleExemptions)}");
+    }
+
+    private static string? DescribeTestConventionViolation(Type testType)
+    {
+        var problems = new List<string>();
+        if (!typeof(BaseTests).IsAssignableFrom(testType))
+        {
+            problems.Add($"does not inherit {nameof(BaseTests)}");
+        }
+
+        var traits = testType.CustomAttributes
+            .Where(attribute => attribute.AttributeType == typeof(TraitAttribute))
+            .Select(attribute => (
+                Name: attribute.ConstructorArguments[0].Value as string,
+                Value: attribute.ConstructorArguments[1].Value as string))
+            .ToArray();
+        if (!traits.Any(trait => trait.Name == "Name" && trait.Value == testType.Name))
+        {
+            problems.Add("is missing its exact Name trait");
+        }
+        if (!traits.Any(trait => trait.Name == "Category" && !string.IsNullOrWhiteSpace(trait.Value)))
+        {
+            problems.Add("is missing a non-empty Category trait");
+        }
+
+        return problems.Count == 0
+            ? null
+            : $"{testType.FullName}: {string.Join(", ", problems)}";
+    }
 
     [Fact]
     public void DomainAndApplication_DoNotReferenceImplementationProjects()

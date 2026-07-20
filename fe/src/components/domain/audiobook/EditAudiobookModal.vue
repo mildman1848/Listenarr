@@ -521,10 +521,19 @@
                   >
                   <span v-else>
                     <strong>Choose a root folder</strong> from the dropdown, or select
-                    <em>"Custom path"</em> to specify any location. The right field is for
-                    organizing within the selected root.
+                    <em>"Custom path"</em> to enter an absolute destination within a configured root
+                    folder or output path. The right field is for organizing within the selected
+                    root.
                   </span>
                 </p>
+                <div
+                  v-if="editingDestination && editDestinationPath"
+                  class="destination-preview"
+                  data-testid="effective-destination"
+                >
+                  <span>Effective destination:</span>
+                  <code>{{ editDestinationPath }}</code>
+                </div>
                 <div v-if="destinationPathValidationError" class="path-validation-error">
                   <PhWarning :size="16" />
                   <span>{{ destinationPathValidationError }}</span>
@@ -764,6 +773,7 @@
 import { ref, computed, watch, onMounted, nextTick } from 'vue'
 import { useToast } from '@/services/toastService'
 import { apiService } from '@/services/api'
+import { getApiValidationError } from '@/services/apiErrors'
 import { logger } from '@/utils/logger'
 import type {
   Audiobook,
@@ -1582,8 +1592,11 @@ function combinedBasePath(): string | null {
 
 // Path-length warning and validation for the destination path
 const editDestinationPath = computed(() => combinedBasePath() || '')
+const serverDestinationValidationError = ref<string | null>(null)
 const { pathLengthWarning: destinationPathWarning } = usePathLengthCheck(editDestinationPath)
 const destinationPathValidationError = computed(() => {
+  if (serverDestinationValidationError.value) return serverDestinationValidationError.value
+
   const destination = editDestinationPath.value
   const source = baselineAudiobook.value?.basePath || ''
   const pathKind = selectedDestinationPathKind()
@@ -1594,6 +1607,10 @@ const destinationPathValidationError = computed(() => {
     caseSensitivity: selectedDestinationCaseSensitivity(),
     sourcePath: basePathChanged ? source : null,
   })
+})
+
+watch(editDestinationPath, () => {
+  serverDestinationValidationError.value = null
 })
 
 // Helper: derive relative path from full base and configured root (moved to module scope so it can be reused)
@@ -1915,6 +1932,14 @@ async function handleSave() {
         }
       } catch (moveErr) {
         console.error('Failed to update destination:', moveErr)
+        const validationError = getApiValidationError(moveErr, 'destinationPath')
+        if (validationError) {
+          serverDestinationValidationError.value = validationError.message
+          editingDestination.value = true
+          toast.error('Invalid destination', validationError.message)
+          return
+        }
+
         const relatedChangesSaved = hasNonIdentifierChanges || identifiersChanged
         toast.error(
           'Move failed',

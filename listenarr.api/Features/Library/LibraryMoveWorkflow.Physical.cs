@@ -60,10 +60,9 @@ public sealed partial class LibraryMoveWorkflow
 
             if (allowedMoveRoots.Count == 0)
             {
-                return new BadRequestObjectResult(new
-                {
-                    message = "DestinationPath must be inside a configured root folder or output path"
-                });
+                return DestinationValidationResult(
+                    "destination_path_outside_roots",
+                    "DestinationPath must be inside a configured root folder or output path");
             }
 
             var destinationIsRooted = Path.IsPathRooted(request.DestinationPath!);
@@ -72,10 +71,9 @@ public sealed partial class LibraryMoveWorkflow
                 ?? allowedMoveRoots.FirstOrDefault()?.Path;
             if (!destinationIsRooted && string.IsNullOrEmpty(relativeMoveBase))
             {
-                return new BadRequestObjectResult(new
-                {
-                    message = "DestinationPath requires a configured root folder or output path"
-                });
+                return DestinationValidationResult(
+                    "destination_path_requires_root",
+                    "DestinationPath requires a configured root folder or output path");
             }
 
             var destinationCandidate = destinationIsRooted
@@ -87,72 +85,46 @@ public sealed partial class LibraryMoveWorkflow
                     out var validationReason,
                     rejectParentTraversal: true))
             {
-                return new BadRequestObjectResult(new
-                {
-                    message = $"DestinationPath is invalid: {validationReason}"
-                });
+                return DestinationValidationResult(
+                    "destination_path_invalid",
+                    $"DestinationPath is invalid: {validationReason}",
+                    destinationCandidate);
             }
 
-            var destinationInsideConfiguredBoundary = _fileSystem.TryValidateMutationTarget(
-                final,
-                allowedMoveRoots.Select(root => root.Path),
-                out final,
-                out var finalReason);
-            var customPhysicalDestination = false;
-            if (!destinationInsideConfiguredBoundary)
+            if (!_fileSystem.TryValidateMutationTarget(
+                    final,
+                    allowedMoveRoots.Select(root => root.Path),
+                    out final,
+                    out var finalReason))
             {
-                var customMutationRoot = TryFindNearestExistingDirectory(final);
-                customPhysicalDestination = !string.IsNullOrEmpty(customMutationRoot)
-                    && _fileSystem.TryValidateMutationTarget(
-                        final,
-                        [customMutationRoot],
-                        out final,
-                        out finalReason);
-                if (!customPhysicalDestination)
-                {
-                    _logger.LogWarning(
-                        "Blocked move destination for audiobook {AudiobookId}: {Destination}. Reason: {Reason}",
-                        id,
-                        final,
-                        finalReason);
-                    return new BadRequestObjectResult(new
-                    {
-                        message = "DestinationPath must be inside a configured root folder or output path"
-                    });
-                }
+                _logger.LogWarning(
+                    "Blocked move destination for audiobook {AudiobookId}: {Destination}. Reason: {Reason}",
+                    id,
+                    final,
+                    finalReason);
+                return DestinationValidationResult(
+                    "destination_path_outside_roots",
+                    "DestinationPath must be inside a configured root folder or output path",
+                    final);
             }
 
             var targetBoundary = FindAllowedMoveRoot(final, allowedMoveRoots);
-            if (targetBoundary == null && customPhysicalDestination)
-            {
-                var customTargetResolution = await _semanticsResolver.ResolveAsync(
-                    final,
-                    cancellationToken: cancellationToken);
-                if (customTargetResolution.State != PathIdentityState.Valid)
-                {
-                    return new BadRequestObjectResult(new
-                    {
-                        message = customTargetResolution.Reason
-                            ?? "Destination filesystem identity is unavailable."
-                    });
-                }
-
-                targetBoundary = new MoveRootBoundary(
-                    customTargetResolution.BoundaryPath,
-                    customTargetResolution.Semantics,
-                    FileSystemCaseSensitivityMode.Auto);
-            }
 
             if (targetBoundary == null)
             {
-                throw new InvalidOperationException(
-                    "Destination filesystem identity is unavailable.");
+                return DestinationValidationResult(
+                    "destination_filesystem_identity_unavailable",
+                    "Destination filesystem identity is unavailable.",
+                    final);
             }
 
             var targetParent = Path.GetDirectoryName(final);
             if (string.IsNullOrEmpty(targetParent))
             {
-                return new BadRequestObjectResult(new { message = "Invalid target path" });
+                return DestinationValidationResult(
+                    "destination_path_invalid",
+                    "DestinationPath must identify a directory below a filesystem root.",
+                    final);
             }
 
             var nearestTargetAncestor = TryFindNearestExistingDirectory(targetParent);
@@ -169,10 +141,10 @@ public sealed partial class LibraryMoveWorkflow
                     id,
                     final,
                     ancestorReason);
-                return new BadRequestObjectResult(new
-                {
-                    message = "Target parent path is unavailable"
-                });
+                return DestinationValidationResult(
+                    "destination_parent_unavailable",
+                    "Target parent path is unavailable",
+                    final);
             }
 
             var targetIdentity = PathIdentitySnapshot.FromResolution(

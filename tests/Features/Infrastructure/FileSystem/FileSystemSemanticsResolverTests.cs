@@ -1,6 +1,10 @@
+using Listenarr.Tests.Common;
+
 namespace Listenarr.Tests.Features.Infrastructure.FileSystem;
 
-public sealed class FileSystemSemanticsResolverTests
+[Trait("Name", "FileSystemSemanticsResolverTests")]
+[Trait("Category", "Infrastructure")]
+public sealed class FileSystemSemanticsResolverTests : BaseTests
 {
     [Theory]
     [InlineData("")]

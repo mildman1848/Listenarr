@@ -2,9 +2,13 @@ using Listenarr.Tests.Mocks;
 using Listenarr.Infrastructure.Persistence.Repositories;
 using Microsoft.EntityFrameworkCore;
 
+using Listenarr.Tests.Common;
+
 namespace Listenarr.Tests.Features.Infrastructure.Library.Moving;
 
-public sealed class RootFolderRelocationServiceTests : IAsyncLifetime
+[Trait("Name", "RootFolderRelocationServiceTests")]
+[Trait("Category", "Infrastructure")]
+public sealed class RootFolderRelocationServiceTests : BaseTests
 {
     private readonly string _databasePath = Path.Join(
         Path.GetTempPath(),
@@ -14,8 +18,9 @@ public sealed class RootFolderRelocationServiceTests : IAsyncLifetime
     private TestDbContextFactory _factory = null!;
     private readonly AudiobookOperationCoordinator _operationCoordinator = new();
 
-    public async Task InitializeAsync()
+    public override async Task InitializeAsync()
     {
+        await base.InitializeAsync();
         Directory.CreateDirectory(Path.GetDirectoryName(_databasePath)!);
         var options = new DbContextOptionsBuilder<ListenArrDbContext>()
             .UseSqlite($"Data Source={_databasePath};Pooling=False")
@@ -25,11 +30,11 @@ public sealed class RootFolderRelocationServiceTests : IAsyncLifetime
         await db.Database.EnsureCreatedAsync();
     }
 
-    public Task DisposeAsync()
+    public override async Task DisposeAsync()
     {
         _operationCoordinator.Dispose();
         if (File.Exists(_databasePath)) File.Delete(_databasePath);
-        return Task.CompletedTask;
+        await base.DisposeAsync();
     }
 
     [Fact]
@@ -413,6 +418,51 @@ public sealed class RootFolderRelocationServiceTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task EmptyRelocation_SetDefault_ClearsPreviousDefault()
+    {
+        var source = Path.Join(Path.GetTempPath(), $"empty-default-source-{Guid.NewGuid():N}");
+        var target = Path.Join(Path.GetTempPath(), $"empty-default-target-{Guid.NewGuid():N}");
+        var otherPath = Path.Join(Path.GetTempPath(), $"empty-default-other-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(source);
+        Directory.CreateDirectory(otherPath);
+        int rootId;
+        await using (var db = await _factory.CreateDbContextAsync())
+        {
+            var root = new RootFolder { Name = "Empty", Path = source };
+            db.RootFolders.Add(root);
+            db.RootFolders.Add(new RootFolder
+            {
+                Name = "Previous Default",
+                Path = otherPath,
+                IsDefault = true
+            });
+            await db.SaveChangesAsync();
+            rootId = root.Id;
+        }
+
+        var result = await CreateService().StartAsync(
+            rootId,
+            new RootFolderPathChangeCommand(
+                target,
+                RootFolderRelocationMode.Relocate,
+                false,
+                "Empty Default",
+                true,
+                FileSystemCaseSensitivityMode.Auto));
+
+        Assert.Equal(RootFolderRelocationStatus.Completed, result.Status);
+        Assert.Equal(0, result.TotalJobs);
+        await using var verification = await _factory.CreateDbContextAsync();
+        var roots = await verification.RootFolders.OrderBy(root => root.Id).ToListAsync();
+        Assert.True(roots.Single(root => root.Id == rootId).IsDefault);
+        Assert.False(roots.Single(root => root.Id != rootId).IsDefault);
+        Assert.Single(roots, root => root.IsDefault);
+        var relocation = await verification.RootFolderRelocations.SingleAsync();
+        Assert.Equal(RootFolderRelocationStatus.Completed, relocation.Status);
+        Assert.Null(relocation.ActiveRootFolderId);
+    }
+
+    [Fact]
     public async Task MetadataOnlyPathChange_ForeignSyntaxRoot_RewritesRawStoredAudiobookPaths()
     {
         var target = Path.Join(Path.GetTempPath(), $"repair-foreign-root-{Guid.NewGuid():N}");
@@ -478,6 +528,45 @@ public sealed class RootFolderRelocationServiceTests : IAsyncLifetime
             unrelatedBasePath,
             (await verification.Audiobooks.SingleAsync(audiobook => audiobook.Title == "Unrelated")).BasePath);
         Assert.Empty(await verification.RootFolderRelocations.ToListAsync());
+    }
+
+    [Fact]
+    public async Task MetadataOnlyPathChange_SourceResolutionThrowsIoException_RepairsRoot()
+    {
+        var source = Path.Join(Path.GetTempPath(), $"unavailable-source-{Guid.NewGuid():N}");
+        var target = Path.Join(Path.GetTempPath(), $"unavailable-target-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(source);
+        Directory.CreateDirectory(target);
+        int rootId;
+        await using (var db = await _factory.CreateDbContextAsync())
+        {
+            var root = new RootFolder
+            {
+                Name = "Unavailable",
+                Path = source,
+                PathIdentityState = PathIdentityState.Unavailable
+            };
+            db.RootFolders.Add(root);
+            await db.SaveChangesAsync();
+            rootId = root.Id;
+        }
+
+        var result = await CreateService(
+            semanticsResolver: new SourceThrowingSemanticsResolver(source)).StartAsync(
+                rootId,
+                new RootFolderPathChangeCommand(
+                    target,
+                    RootFolderRelocationMode.MetadataOnly,
+                    false,
+                    "Repaired",
+                    false,
+                    FileSystemCaseSensitivityMode.Auto));
+
+        Assert.Equal(RootFolderRelocationStatus.Completed, result.Status);
+        await using var verification = await _factory.CreateDbContextAsync();
+        var repairedRoot = await verification.RootFolders.SingleAsync();
+        Assert.Equal(target, repairedRoot.Path);
+        Assert.Equal("Repaired", repairedRoot.Name);
     }
 
     [Fact]
@@ -744,6 +833,116 @@ public sealed class RootFolderRelocationServiceTests : IAsyncLifetime
         Assert.Equal(RootFolderRelocationStatus.Completed, result.Status);
     }
 
+    [Fact]
+    public async Task RelocateClassification_UsesPersistedSourceSemanticsForCaseOnlyPathChange()
+    {
+        var parent = Path.Join(Path.GetTempPath(), $"persisted-semantics-{Guid.NewGuid():N}");
+        var source = Path.Join(parent, "Library");
+        var target = Path.Join(parent, "library");
+        Directory.CreateDirectory(source);
+        int rootId;
+        await using (var db = await _factory.CreateDbContextAsync())
+        {
+            var root = new RootFolder
+            {
+                Name = "Library",
+                Path = source,
+                CaseSensitivityMode = FileSystemCaseSensitivityMode.Sensitive
+            };
+            db.RootFolders.Add(root);
+            await db.SaveChangesAsync();
+            rootId = root.Id;
+        }
+
+        var result = await CreateService().StartAsync(
+            rootId,
+            new RootFolderPathChangeCommand(
+                target,
+                RootFolderRelocationMode.Relocate,
+                false,
+                "Library",
+                false,
+                FileSystemCaseSensitivityMode.Insensitive));
+
+        await using var verification = await _factory.CreateDbContextAsync();
+        Assert.Equal(target, (await verification.RootFolders.SingleAsync()).Path);
+        Assert.Equal(RootFolderRelocationStatus.Completed, result.Status);
+        var relocation = await verification.RootFolderRelocations.SingleAsync();
+        Assert.Equal(RootFolderRelocationMode.Relocate, relocation.Mode);
+        Assert.Equal(RootFolderRelocationStatus.Completed, relocation.Status);
+        Assert.Equal(source, relocation.SourcePath);
+        Assert.Equal(target, relocation.TargetPath);
+    }
+
+    [Fact]
+    public async Task MetadataOnlyAffectedDiscovery_UsesPersistedSensitiveSemanticsWhenProbeIsInsensitive()
+    {
+        var parent = Path.Join(Path.GetTempPath(), $"persisted-discovery-{Guid.NewGuid():N}");
+        var source = Path.Join(parent, "Library");
+        var target = Path.Join(parent, "Moved");
+        var affectedBasePath = Path.Join(source, "Book");
+        var caseVariantBasePath = Path.Join(parent, "library", "Unrelated");
+        Directory.CreateDirectory(source);
+        int rootId;
+        await using (var db = await _factory.CreateDbContextAsync())
+        {
+            var root = new RootFolder
+            {
+                Name = "Library",
+                Path = source,
+                CaseSensitivityMode = FileSystemCaseSensitivityMode.Auto,
+                ResolvedCaseSensitivity = FileSystemCaseSensitivity.Sensitive,
+                PathIdentityState = PathIdentityState.Valid
+            };
+            db.RootFolders.Add(root);
+            db.Audiobooks.AddRange(
+                new Audiobook
+                {
+                    Title = "Affected",
+                    BasePath = affectedBasePath
+                },
+                new Audiobook
+                {
+                    Title = "Case Variant",
+                    BasePath = caseVariantBasePath
+                });
+            await db.SaveChangesAsync();
+            rootId = root.Id;
+        }
+
+        var semanticsResolver = new Mock<IFileSystemSemanticsResolver>();
+        semanticsResolver.Setup(resolver => resolver.ResolveAsync(
+                It.IsAny<string>(),
+                It.IsAny<FileSystemCaseSensitivityMode>(),
+                It.IsAny<CancellationToken>()))
+            .Returns<string, FileSystemCaseSensitivityMode, CancellationToken>((path, _, _) =>
+                ValueTask.FromResult(new FileSystemSemanticsResolution(
+                    new FileSystemPathSemantics(
+                        FileSystemPathSemantics.CurrentHostDefault.Syntax,
+                        FileSystemCaseSensitivity.Insensitive),
+                    PathIdentityState.Valid,
+                    Path.GetPathRoot(path) ?? path)));
+
+        var result = await CreateService(semanticsResolver: semanticsResolver.Object).StartAsync(
+            rootId,
+            new RootFolderPathChangeCommand(
+                target,
+                RootFolderRelocationMode.MetadataOnly,
+                false,
+                "Moved Library",
+                false,
+                FileSystemCaseSensitivityMode.Auto));
+
+        Assert.Equal(RootFolderRelocationStatus.Completed, result.Status);
+        await using var verification = await _factory.CreateDbContextAsync();
+        Assert.Equal(
+            Path.Join(target, "Book"),
+            (await verification.Audiobooks.SingleAsync(audiobook => audiobook.Title == "Affected")).BasePath);
+        Assert.Equal(
+            caseVariantBasePath,
+            (await verification.Audiobooks.SingleAsync(audiobook => audiobook.Title == "Case Variant")).BasePath);
+    }
+
     [Theory]
     [InlineData(RootFolderRelocationMode.MetadataOnly)]
     [InlineData(RootFolderRelocationMode.Relocate)]
@@ -877,6 +1076,7 @@ public sealed class RootFolderRelocationServiceTests : IAsyncLifetime
             .Include(candidate => candidate.SkippedItems)
             .SingleAsync();
         var skipped = Assert.Single(relocation.SkippedItems);
+        Assert.Equal(FileSystemCaseSensitivityMode.Sensitive, relocation.SourceCaseSensitivityMode);
         Assert.Equal(invalidAudiobookId, skipped.AudiobookId);
         Assert.Contains("invalid", skipped.Reason, StringComparison.OrdinalIgnoreCase);
         Assert.Empty(await verification.MoveJobs.ToListAsync());
@@ -2139,6 +2339,74 @@ public sealed class RootFolderRelocationServiceTests : IAsyncLifetime
         Assert.Single(await verification.MoveJobs.ToListAsync());
     }
 
+    [Fact]
+    public async Task StartRelocation_ActiveMoveBoundaryUsesPersistedInsensitiveSemanticsWhenProbeIsSensitive()
+    {
+        var parent = Path.Join(Path.GetTempPath(), $"persisted-active-boundary-{Guid.NewGuid():N}");
+        var source = Path.Join(parent, "Library");
+        var target = Path.Join(parent, "Moved");
+        Directory.CreateDirectory(source);
+        int rootId;
+        await using (var db = await _factory.CreateDbContextAsync())
+        {
+            var root = new RootFolder
+            {
+                Name = "Library",
+                Path = source,
+                CaseSensitivityMode = FileSystemCaseSensitivityMode.Auto,
+                ResolvedCaseSensitivity = FileSystemCaseSensitivity.Insensitive,
+                PathIdentityState = PathIdentityState.Valid
+            };
+            var unrelatedAudiobook = new Audiobook
+            {
+                Title = "Unrelated",
+                BasePath = Path.Join(Path.GetTempPath(), $"unrelated-{Guid.NewGuid():N}")
+            };
+            db.RootFolders.Add(root);
+            db.Audiobooks.Add(unrelatedAudiobook);
+            await db.SaveChangesAsync();
+            rootId = root.Id;
+            db.MoveJobs.Add(new MoveJob
+            {
+                AudiobookId = unrelatedAudiobook.Id,
+                SourcePath = Path.Join(source.ToLowerInvariant(), "Other"),
+                RequestedPath = Path.Join(Path.GetTempPath(), $"unrelated-target-{Guid.NewGuid():N}"),
+                Status = MoveJobStatus.Queued,
+                EnqueuedAt = DateTime.UtcNow
+            });
+            await db.SaveChangesAsync();
+        }
+
+        var semanticsResolver = new Mock<IFileSystemSemanticsResolver>();
+        semanticsResolver.Setup(resolver => resolver.ResolveAsync(
+                It.IsAny<string>(),
+                It.IsAny<FileSystemCaseSensitivityMode>(),
+                It.IsAny<CancellationToken>()))
+            .Returns<string, FileSystemCaseSensitivityMode, CancellationToken>((path, _, _) =>
+                ValueTask.FromResult(new FileSystemSemanticsResolution(
+                    new FileSystemPathSemantics(
+                        FileSystemPathSemantics.CurrentHostDefault.Syntax,
+                        FileSystemCaseSensitivity.Sensitive),
+                    PathIdentityState.Valid,
+                    Path.GetPathRoot(path) ?? path)));
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            CreateService(semanticsResolver: semanticsResolver.Object).StartAsync(
+                rootId,
+                new RootFolderPathChangeCommand(
+                    target,
+                    RootFolderRelocationMode.Relocate,
+                    true,
+                    "Moved Library",
+                    false,
+                    FileSystemCaseSensitivityMode.Auto)));
+
+        Assert.Contains("active move job", exception.Message, StringComparison.OrdinalIgnoreCase);
+        await using var verification = await _factory.CreateDbContextAsync();
+        Assert.Empty(await verification.RootFolderRelocations.ToListAsync());
+        Assert.Single(await verification.MoveJobs.ToListAsync());
+    }
+
     [Theory]
     [InlineData("audiobook")]
     [InlineData("source")]
@@ -2550,9 +2818,10 @@ public sealed class RootFolderRelocationServiceTests : IAsyncLifetime
     }
 
     private RootFolderRelocationService CreateService(
-        IServiceScopeFactory? manifestScopeFactory = null) => new(
+        IServiceScopeFactory? manifestScopeFactory = null,
+        IFileSystemSemanticsResolver? semanticsResolver = null) => new(
         _factory,
-        new FileSystemSemanticsResolver(),
+        semanticsResolver ?? new FileSystemSemanticsResolver(),
         new NoopHubBroadcaster(),
         TimeProvider.System,
         new FilesystemMutationCoordinator(),
@@ -2654,6 +2923,31 @@ public sealed class RootFolderRelocationServiceTests : IAsyncLifetime
         public ListenArrDbContext CreateDbContext() => new(options);
         public Task<ListenArrDbContext> CreateDbContextAsync(CancellationToken cancellationToken = default) =>
             Task.FromResult(CreateDbContext());
+    }
+
+    private sealed class SourceThrowingSemanticsResolver(string sourcePath) : IFileSystemSemanticsResolver
+    {
+        private readonly string _sourcePath = Path.GetFullPath(sourcePath);
+        private readonly FileSystemSemanticsResolver _inner = new();
+
+        public ValueTask<FileSystemSemanticsResolution> ResolveAsync(
+            string path,
+            FileSystemCaseSensitivityMode mode = FileSystemCaseSensitivityMode.Auto,
+            CancellationToken cancellationToken = default)
+        {
+            var fullPath = Path.GetFullPath(path);
+            if (string.Equals(
+                fullPath,
+                _sourcePath,
+                FileSystemPathSemantics.CurrentHostDefault.CaseSensitivity == FileSystemCaseSensitivity.Insensitive
+                    ? StringComparison.OrdinalIgnoreCase
+                    : StringComparison.Ordinal))
+            {
+                throw new IOException("simulated source resolution failure");
+            }
+
+            return _inner.ResolveAsync(path, mode, cancellationToken);
+        }
     }
 
     private sealed class TargetUnavailableSemanticsResolver(string unavailablePath) : IFileSystemSemanticsResolver

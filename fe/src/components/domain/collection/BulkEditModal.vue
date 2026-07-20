@@ -95,8 +95,12 @@
               />
 
               <p class="help-text">
-                Select a named root or provide a custom path. If you choose "Use default" and no
-                named default exists, the application default output path will be used.
+                Select a named root or provide an absolute custom root within a configured root
+                folder or output path. If you choose "Use default" and no named default exists, the
+                application default output path will be used.
+              </p>
+              <p v-if="resolvedRootPath" class="help-text" data-testid="effective-destination-root">
+                Destination root: <code>{{ resolvedRootPath }}</code>
               </p>
             </div>
           </div>
@@ -216,6 +220,15 @@ const formData = ref<FormData>({
   rootChangeEnabled: false,
   rootId: null,
   rootCustomPath: null,
+})
+
+const resolvedRootPath = computed(() => {
+  if (!formData.value.rootChangeEnabled) return null
+  if (formData.value.rootId === 0) return formData.value.rootCustomPath?.trim() || null
+  if (formData.value.rootId && formData.value.rootId > 0) {
+    return rootStore.folders.find((folder) => folder.id === formData.value.rootId)?.path ?? null
+  }
+  return defaultOutputPath.value
 })
 
 const hasChanges = computed(() => {

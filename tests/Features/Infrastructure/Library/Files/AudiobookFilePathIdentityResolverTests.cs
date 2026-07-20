@@ -1,8 +1,12 @@
 using Listenarr.Infrastructure.Library.Files;
 
+using Listenarr.Tests.Common;
+
 namespace Listenarr.Tests.Features.Infrastructure.Library.Files;
 
-public sealed class AudiobookFilePathIdentityResolverTests
+[Trait("Name", "AudiobookFilePathIdentityResolverTests")]
+[Trait("Category", "Infrastructure")]
+public sealed class AudiobookFilePathIdentityResolverTests : BaseTests
 {
     [Fact]
     public async Task ResolveAsync_WindowsInsensitiveVariants_CreateSameOwnershipIdentity()

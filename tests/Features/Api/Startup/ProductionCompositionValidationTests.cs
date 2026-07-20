@@ -3,11 +3,13 @@ using Listenarr.Infrastructure.DependencyInjection;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.Extensions.Hosting;
 
+using Listenarr.Tests.Common;
+
 namespace Listenarr.Tests.Features.Api.Startup;
 
 [Trait("Name", "ProductionCompositionValidationTests")]
 [Trait("Category", "Api")]
-public sealed class ProductionCompositionValidationTests
+public sealed class ProductionCompositionValidationTests : BaseTests
 {
     [Fact]
     public void DevelopmentComposition_ValidatesCompleteProductionServiceGraph()

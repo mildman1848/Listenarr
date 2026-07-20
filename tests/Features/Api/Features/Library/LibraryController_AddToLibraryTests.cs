@@ -21,7 +21,9 @@ using Listenarr.Tests.Builders;
 
 namespace Listenarr.Tests.Features.Api.Features.Library
 {
-    public class LibraryController_AddToLibraryTests : BaseTests
+    [Trait("Name", "LibraryController_AddToLibraryTests")]
+    [Trait("Category", "LibraryController")]
+    public sealed class LibraryController_AddToLibraryTests : BaseTests
     {
         private readonly Mock<IImageCacheService> imageCacheServiceMock = new Mock<IImageCacheService>();
         private readonly Mock<ILibraryDestinationMutationGuard> destinationGuardMock = new();
@@ -355,6 +357,102 @@ namespace Listenarr.Tests.Features.Api.Features.Library
         }
 
         [Fact]
+        public async Task AddToLibrary_InvalidLegacyRootDoesNotBlockValidConfiguredDestination()
+        {
+            var invalidLegacyRoot = "invalid\0legacy-root";
+            await _rootFolderRepository.AddAsync(new RootFolder
+            {
+                Name = "Invalid legacy root",
+                Path = invalidLegacyRoot
+            });
+            var destination = Path.Join(tempRoot, "Valid Author", "Valid Title");
+
+            var result = await _provider.GetRequiredService<LibraryController>().AddToLibrary(
+                new LibraryController.AddToLibraryRequest
+                {
+                    Metadata = new AudibleBookMetadata
+                    {
+                        Title = "Valid Destination With Legacy Root",
+                        Author = "Valid Author"
+                    },
+                    Monitored = true,
+                    DestinationPath = destination
+                });
+
+            Assert.IsType<OkObjectResult>(result);
+            var audiobook = Assert.Single(await _audiobookRepository.GetAllAsync());
+            Assert.Equal(FileUtils.NormalizeStoredPath(destination), audiobook.BasePath);
+        }
+
+        [Fact]
+        public async Task AddWorkflowFallback_InvalidLegacyRootDoesNotBlockValidConfiguredDestination()
+        {
+            var invalidLegacyRoot = "invalid\0fallback-root";
+            await _rootFolderRepository.AddAsync(new RootFolder
+            {
+                Name = "Invalid fallback root",
+                Path = invalidLegacyRoot
+            });
+            var destination = Path.Join(tempRoot, "Fallback Author", "Fallback Title");
+            var workflow = new LibraryAddWorkflow(
+                _provider.GetRequiredService<IAudiobookRepository>(),
+                _provider.GetRequiredService<IImageCacheService>(),
+                _provider.GetRequiredService<IServiceScopeFactory>(),
+                _provider.GetRequiredService<IHistoryRepository>(),
+                _provider.GetRequiredService<ILibraryDestinationMutationGuard>(),
+                _provider.GetRequiredService<IFilesystemMutationCoordinator>(),
+                _provider.GetRequiredService<ILogger<LibraryAddWorkflow>>());
+
+            var result = await workflow.AddAsync(new LibraryController.AddToLibraryRequest
+            {
+                Metadata = new AudibleBookMetadata
+                {
+                    Title = "Fallback Valid Destination",
+                    Author = "Fallback Author"
+                },
+                Monitored = true,
+                DestinationPath = destination
+            });
+
+            Assert.IsType<OkObjectResult>(result);
+            var audiobook = Assert.Single(await _audiobookRepository.GetAllAsync());
+            Assert.Equal(FileUtils.NormalizeStoredPath(destination), audiobook.BasePath);
+        }
+
+        [Fact]
+        public async Task AddToLibrary_RejectsCustomPathOutsideConfiguredBoundariesWithStructuredError()
+        {
+            var controller = _provider.GetRequiredService<LibraryController>();
+            var outsideRoot = FileService.GetTempDirectory("listenarr-outside-add-root");
+            var customPath = Path.Join(outsideRoot, "Author", "Title");
+            var request = new LibraryController.AddToLibraryRequest
+            {
+                Metadata = new AudibleBookMetadata
+                {
+                    Title = "Outside Custom Path Test",
+                    Author = "Custom Author"
+                },
+                Monitored = true,
+                DestinationPath = customPath
+            };
+
+            var actionResult = await controller.AddToLibrary(request);
+
+            var badRequest = Assert.IsType<BadRequestObjectResult>(actionResult);
+            var payload = System.Text.Json.JsonSerializer.Serialize(badRequest.Value);
+            using var payloadDocument = System.Text.Json.JsonDocument.Parse(payload);
+            var payloadRoot = payloadDocument.RootElement;
+            Assert.Equal(
+                "destination_path_outside_roots",
+                payloadRoot.GetProperty("code").GetString());
+            Assert.Equal("destinationPath", payloadRoot.GetProperty("field").GetString());
+            Assert.Equal(
+                FileUtils.NormalizeStoredPath(customPath),
+                payloadRoot.GetProperty("resolvedDestination").GetString());
+            Assert.Empty(await _audiobookRepository.GetAllAsync());
+        }
+
+        [Fact]
         public async Task AddToLibrary_RejectsCustomPathWithLeadingWhitespaceBeforeAbsolutePath()
         {
             var controller = _provider.GetRequiredService<LibraryController>();
@@ -375,6 +473,39 @@ namespace Listenarr.Tests.Features.Api.Features.Library
             var badRequest = Assert.IsType<BadRequestObjectResult>(actionResult);
             Assert.Contains("leading whitespace", badRequest.Value.ToString(), StringComparison.OrdinalIgnoreCase);
             Assert.Empty(await _audiobookRepository.GetAllAsync());
+        }
+
+        [Fact]
+        public async Task AddWorkflowFallback_ReturnsStructuredDestinationValidationError()
+        {
+            var workflow = new LibraryAddWorkflow(
+                _provider.GetRequiredService<IAudiobookRepository>(),
+                _provider.GetRequiredService<IImageCacheService>(),
+                _provider.GetRequiredService<IServiceScopeFactory>(),
+                _provider.GetRequiredService<IHistoryRepository>(),
+                _provider.GetRequiredService<ILibraryDestinationMutationGuard>(),
+                _provider.GetRequiredService<IFilesystemMutationCoordinator>(),
+                _provider.GetRequiredService<ILogger<LibraryAddWorkflow>>());
+            var customPath = " " + Path.Join(tempRoot, "custom", "audiobooks", "Author", "Title");
+
+            var actionResult = await workflow.AddAsync(new LibraryController.AddToLibraryRequest
+            {
+                Metadata = new AudibleBookMetadata
+                {
+                    Title = "Fallback Leading Space Test",
+                    Author = "Custom Author"
+                },
+                Monitored = true,
+                DestinationPath = customPath
+            });
+
+            var badRequest = Assert.IsType<BadRequestObjectResult>(actionResult);
+            var payload = System.Text.Json.JsonSerializer.Serialize(badRequest.Value);
+            using var document = System.Text.Json.JsonDocument.Parse(payload);
+            var root = document.RootElement;
+            Assert.Equal("destination_path_invalid", root.GetProperty("code").GetString());
+            Assert.Equal("destinationPath", root.GetProperty("field").GetString());
+            Assert.Equal(customPath, root.GetProperty("resolvedDestination").GetString());
         }
 
         [Fact]

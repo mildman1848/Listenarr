@@ -4,6 +4,8 @@ using Microsoft.Extensions.Logging.Abstractions;
 
 namespace Listenarr.Tests.Features.Infrastructure.Library.Scanning;
 
+[Trait("Name", "MoveScanHandoffRecoveryServiceTests")]
+[Trait("Category", "Infrastructure")]
 public sealed class MoveScanHandoffRecoveryServiceTests : BaseTests
 {
     [Fact]

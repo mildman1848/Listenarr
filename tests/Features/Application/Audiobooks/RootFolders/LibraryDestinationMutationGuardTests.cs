@@ -1,6 +1,10 @@
+using Listenarr.Tests.Common;
+
 namespace Listenarr.Tests.Features.Application.Audiobooks.RootFolders;
 
-public sealed class LibraryDestinationMutationGuardTests
+[Trait("Name", "LibraryDestinationMutationGuardTests")]
+[Trait("Category", "Application")]
+public sealed class LibraryDestinationMutationGuardTests : BaseTests
 {
     [Fact]
     public async Task GetBlockingReasonAsync_UsesConfiguredRootSemanticsAndBlocksActiveRelocation()

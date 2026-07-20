@@ -253,6 +253,45 @@ namespace Listenarr.Tests.Features.Api.Features.Library
         }
 
         [Fact]
+        public async Task MoveAudiobook_InvalidSourcePath_IsBoundToSourceField()
+        {
+            var moveQueue = new Mock<IMoveQueueService>(MockBehavior.Strict);
+            Init(services => services.WithSingleton(moveQueue.Object));
+            var outputPath = FileService.GetTempDirectory("listenarr-move-output");
+            await _applicationSettingsRepository.SaveAsync(new ApplicationSettingsBuilder()
+                .WithOutputPath(outputPath)
+                .Build());
+            var currentSource = FileService.GetTempDirectory("listenarr-current-source");
+            var audiobook = await _audiobookRepository.AddAsync(new AudiobookBuilder()
+                .WithTitle("Invalid Source Path")
+                .WithBasePath(currentSource)
+                .Build());
+            await AddTrackedFileAsync(audiobook, currentSource);
+
+            var result = await _provider.GetRequiredService<LibraryController>().EnqueueMove(
+                audiobook.Id,
+                new LibraryController.MoveRequest
+                {
+                    DestinationPath = Path.Join(outputPath, "target"),
+                    SourcePath = "relative/source",
+                    MoveFiles = true
+                });
+
+            var badRequest = Assert.IsType<BadRequestObjectResult>(result);
+            var payload = System.Text.Json.JsonSerializer.Serialize(badRequest.Value);
+            using var document = System.Text.Json.JsonDocument.Parse(payload);
+            var root = document.RootElement;
+            Assert.Equal("source_path_invalid", root.GetProperty("code").GetString());
+            Assert.Equal("sourcePath", root.GetProperty("field").GetString());
+            Assert.Equal(
+                System.Text.Json.JsonValueKind.Null,
+                root.GetProperty("resolvedDestination").ValueKind);
+            moveQueue.Verify(service => service.EnqueueMoveAsync(
+                It.IsAny<MoveEnqueueCommand>(),
+                It.IsAny<CancellationToken>()), Times.Never);
+        }
+
+        [Fact]
         [Trait("Method", "EnqueueMove")]
         [Trait("Scenario", "RejectsStalePhysicalSourcePath")]
         public async Task MoveAudiobook_PhysicalMoveRejectsStaleExistingSourcePath()
@@ -340,17 +379,69 @@ namespace Listenarr.Tests.Features.Api.Features.Library
         }
 
         [Fact]
+        public async Task MoveAudiobook_UnavailableTargetAncestor_ReturnsStructuredDestinationError()
+        {
+            var moveQueue = new Mock<IMoveQueueService>(MockBehavior.Strict);
+            var fileSystem = new Mock<IFileSystem>(MockBehavior.Strict);
+            var validationCalls = 0;
+            fileSystem.Setup(system => system.TryValidateMutationTarget(
+                    It.IsAny<string>(),
+                    It.IsAny<IEnumerable<string?>>(),
+                    out It.Ref<string>.IsAny,
+                    out It.Ref<string>.IsAny))
+                .Returns((
+                    string targetPath,
+                    IEnumerable<string?> _,
+                    out string normalizedPath,
+                    out string reason) =>
+                {
+                    normalizedPath = targetPath;
+                    var accepted = Interlocked.Increment(ref validationCalls) == 1;
+                    reason = accepted ? string.Empty : "simulated unavailable target ancestor";
+                    return accepted;
+                });
+            fileSystem.Setup(system => system.DirectoryExists(It.IsAny<string>())).Returns(true);
+            Init(services => services
+                .WithSingleton(moveQueue.Object)
+                .WithSingleton<IFileSystem>(fileSystem.Object));
+            var outputPath = FileService.GetTempDirectory("listenarr-move-output");
+            await _applicationSettingsRepository.SaveAsync(new ApplicationSettingsBuilder()
+                .WithOutputPath(outputPath)
+                .Build());
+            var sourcePath = FileService.GetTempDirectory("listenarr-ancestor-target-source");
+            var targetPath = Path.Join(outputPath, "Author", "Title");
+            var audiobook = await _audiobookRepository.AddAsync(new AudiobookBuilder()
+                .WithTitle("Ancestor Target")
+                .WithBasePath(sourcePath)
+                .Build());
+            await AddTrackedFileAsync(audiobook, sourcePath);
+
+            var result = await _provider.GetRequiredService<LibraryController>().EnqueueMove(
+                audiobook.Id,
+                new LibraryController.MoveRequest
+                {
+                    DestinationPath = targetPath,
+                    MoveFiles = true
+                });
+
+            var badRequest = Assert.IsType<BadRequestObjectResult>(result);
+            var payload = System.Text.Json.JsonSerializer.Serialize(badRequest.Value);
+            using var document = System.Text.Json.JsonDocument.Parse(payload);
+            var root = document.RootElement;
+            Assert.Equal("destination_parent_unavailable", root.GetProperty("code").GetString());
+            Assert.Equal("destinationPath", root.GetProperty("field").GetString());
+            Assert.Equal(targetPath, root.GetProperty("resolvedDestination").GetString());
+            moveQueue.Verify(service => service.EnqueueMoveAsync(
+                It.IsAny<MoveEnqueueCommand>(),
+                It.IsAny<CancellationToken>()), Times.Never);
+        }
+
+        [Fact]
         [Trait("Method", "EnqueueMove")]
-        [Trait("Scenario", "CreatesCustomPhysicalDestinationOutsideConfiguredRoots")]
-        public async Task MoveAudiobook_MoveFilesTrue_AllowsCustomDestinationOutsideConfiguredRootsWithoutCreatingParent()
+        [Trait("Scenario", "RejectsCustomPhysicalDestinationOutsideConfiguredRoots")]
+        public async Task MoveAudiobook_MoveFilesTrue_RejectsCustomDestinationOutsideConfiguredRoots()
         {
             var mockMoveQueue = new Mock<IMoveQueueService>();
-            var expectedId = Guid.NewGuid();
-            mockMoveQueue.Setup(m => m.EnqueueMoveAsync(
-                    It.IsAny<MoveEnqueueCommand>(),
-                    It.IsAny<CancellationToken>()))
-                .ReturnsAsync(expectedId);
-
             Init(services => services.WithSingleton(mockMoveQueue.Object));
             var configuredOutputPath = FileService.GetTempDirectory("listenarr-move-output");
             await _applicationSettingsRepository.SaveAsync(new ApplicationSettingsBuilder()
@@ -359,13 +450,12 @@ namespace Listenarr.Tests.Features.Api.Features.Library
 
             var sourcePath = FileService.GetTempDirectory("listenarr-move-src");
             var audiobook = await _audiobookRepository.AddAsync(new AudiobookBuilder()
-                .WithTitle("Custom Physical Move")
+                .WithTitle("Blocked Custom Physical Move")
                 .WithBasePath(sourcePath)
                 .Build());
             await AddTrackedFileAsync(audiobook, sourcePath);
             var customRoot = FileService.GetTempDirectory("listenarr-custom-destination");
             var target = Path.Join(customRoot, "Author", "Title", "test");
-            var targetParent = Path.GetDirectoryName(target)!;
 
             var result = await _provider.GetRequiredService<LibraryController>().EnqueueMove(
                 audiobook.Id,
@@ -377,17 +467,20 @@ namespace Listenarr.Tests.Features.Api.Features.Library
                     DeleteEmptySource = true
                 });
 
-            var accepted = Assert.IsType<AcceptedResult>(result);
-            Assert.Equal(202, accepted.StatusCode);
-            Assert.False(Directory.Exists(targetParent));
+            var badRequest = Assert.IsType<BadRequestObjectResult>(result);
+            var payload = System.Text.Json.JsonSerializer.Serialize(badRequest.Value);
+            using var payloadDocument = System.Text.Json.JsonDocument.Parse(payload);
+            var payloadRoot = payloadDocument.RootElement;
+            Assert.Equal(
+                "destination_path_outside_roots",
+                payloadRoot.GetProperty("code").GetString());
+            Assert.Equal("destinationPath", payloadRoot.GetProperty("field").GetString());
+            Assert.Equal(
+                FileUtils.NormalizeStoredPath(target),
+                payloadRoot.GetProperty("resolvedDestination").GetString());
             mockMoveQueue.Verify(m => m.EnqueueMoveAsync(
-                It.Is<MoveEnqueueCommand>(command =>
-                    command.AudiobookId == audiobook.Id
-                    && command.TargetPath == FileUtils.NormalizeStoredPath(target)
-                    && command.SourcePath == sourcePath
-                    && command.DeleteEmptySource
-                    && command.SourceCleanupBoundary == Path.GetDirectoryName(sourcePath)),
-                It.IsAny<CancellationToken>()), Times.Once);
+                It.IsAny<MoveEnqueueCommand>(),
+                It.IsAny<CancellationToken>()), Times.Never);
         }
 
         [Fact]
@@ -404,8 +497,10 @@ namespace Listenarr.Tests.Features.Api.Features.Library
                 .WithOutputPath(configuredOutputPath)
                 .Build());
 
-            var customRoot = FileService.GetTempDirectory("listenarr-custom-sibling-root");
-            var series = Path.Join(customRoot, "Matt Dinniman", "Dungeon Crawler Carl");
+            var series = Path.Join(
+                configuredOutputPath,
+                "Matt Dinniman",
+                "Dungeon Crawler Carl");
             var source = Path.Join(series, "A Parade of Horribles (20262)", "test");
             Directory.CreateDirectory(source);
             var target = Path.Join(series, "A Parade of Horribles (2026)", "test");

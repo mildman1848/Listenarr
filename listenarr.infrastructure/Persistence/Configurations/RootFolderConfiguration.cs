@@ -28,6 +28,10 @@ namespace Listenarr.Infrastructure.Persistence.Configurations
 
             builder.HasIndex(r => r.Path).IsUnique();
             builder.HasIndex(r => r.Name);
+            builder.HasIndex(r => r.IsDefault)
+                .IsUnique()
+                .HasDatabaseName("IX_RootFolders_SingleDefault")
+                .HasFilter("\"IsDefault\" = 1");
 
             builder.Property(r => r.Name).HasMaxLength(200).IsRequired();
             builder.Property(r => r.Path).HasMaxLength(1000).IsRequired();

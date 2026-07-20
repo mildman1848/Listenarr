@@ -1,6 +1,10 @@
+using Listenarr.Tests.Common;
+
 namespace Listenarr.Tests.Features.Domain.Audiobooks;
 
-public sealed class RootFolderRelocationStateTests
+[Trait("Name", "RootFolderRelocationStateTests")]
+[Trait("Category", "Domain")]
+public sealed class RootFolderRelocationStateTests : BaseTests
 {
     [Fact]
     public void NewRoot_RequiresResolvedIdentityBeforeDestructiveWork()
@@ -11,6 +15,42 @@ public sealed class RootFolderRelocationStateTests
         Assert.Equal(FileSystemCaseSensitivity.Unknown, root.ResolvedCaseSensitivity);
         Assert.Equal(PathIdentityState.Unavailable, root.PathIdentityState);
         Assert.Null(root.PathIdentityKey);
+    }
+
+    [Fact]
+    public void PersistedSemantics_ExplicitModeOverridesStaleResolvedSensitivity()
+    {
+        var root = new RootFolder
+        {
+            Path = "C:\\Library",
+            CaseSensitivityMode = FileSystemCaseSensitivityMode.Sensitive,
+            ResolvedCaseSensitivity = FileSystemCaseSensitivity.Insensitive,
+            PathIdentityState = PathIdentityState.Valid
+        };
+
+        var persisted = RootFolderPathSemantics.ResolvePersisted(root);
+
+        Assert.NotNull(persisted);
+        Assert.Equal(FileSystemCaseSensitivity.Sensitive, persisted.Value.Semantics.CaseSensitivity);
+        Assert.False(persisted.Value.DetectAmbiguousCaseMatches);
+    }
+
+    [Fact]
+    public void PersistedSemantics_AutoUnavailableIdentityFailsClosedDespiteStaleResolvedSensitivity()
+    {
+        var root = new RootFolder
+        {
+            Path = "C:\\Library",
+            CaseSensitivityMode = FileSystemCaseSensitivityMode.Auto,
+            ResolvedCaseSensitivity = FileSystemCaseSensitivity.Insensitive,
+            PathIdentityState = PathIdentityState.Unavailable
+        };
+
+        var persisted = RootFolderPathSemantics.ResolvePersisted(root);
+
+        Assert.NotNull(persisted);
+        Assert.Equal(FileSystemCaseSensitivity.Sensitive, persisted.Value.Semantics.CaseSensitivity);
+        Assert.True(persisted.Value.DetectAmbiguousCaseMatches);
     }
 
     [Fact]

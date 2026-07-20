@@ -28,6 +28,7 @@ vi.mock('@/services/api', () => ({
     getApplicationSettings: vi.fn().mockResolvedValue({ outputPath: 'C:\\root' }),
     getQualityProfiles: vi.fn().mockResolvedValue([]),
     getRootFolders: vi.fn().mockResolvedValue([]),
+    addToLibrary: vi.fn().mockResolvedValue({ audiobook: { id: 1 } }),
   },
 }))
 
@@ -41,6 +42,36 @@ const fakeBook = {
 }
 
 describe('AddLibraryModal relative path derivation', () => {
+  it('shows and submits the same normalized effective destination', async () => {
+    const { apiService } = await import('@/services/api')
+    const wrapper = mount(AddLibraryModal, {
+      props: {
+        visible: false,
+        book: fakeBook,
+      },
+      attachTo: document.body,
+      global: {
+        plugins: [(await import('pinia')).createPinia()],
+      },
+    })
+
+    await wrapper.setProps({ visible: true })
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    const input = wrapper.get('input.relative-input')
+    await input.setValue('Author/Title')
+    await wrapper.vm.$nextTick()
+
+    const preview = wrapper.get('[data-testid="effective-destination"]').text()
+    expect(preview).toContain('C:\\root\\Author\\Title')
+
+    await (wrapper.vm as unknown as { addToLibrary: () => Promise<void> }).addToLibrary()
+
+    expect(apiService.addToLibrary).toHaveBeenCalledWith(
+      expect.any(Object),
+      expect.objectContaining({ destinationPath: 'C:\\root\\Author\\Title' }),
+    )
+  })
+
   it('shows relative path (full minus root) when preview returns fullPath and root configured', async () => {
     const wrapper = mount(AddLibraryModal, {
       props: {

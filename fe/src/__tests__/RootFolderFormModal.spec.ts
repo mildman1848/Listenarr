@@ -3,6 +3,7 @@ import { mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import RootFolderFormModal from '@/components/settings/RootFolderFormModal.vue'
 import { useRootFoldersStore } from '@/stores/rootFolders'
+import { apiService } from '@/services/api'
 
 const success = vi.fn()
 const error = vi.fn()
@@ -13,6 +14,7 @@ vi.mock('@/services/toastService', () => ({
 
 describe('RootFolderFormModal', () => {
   beforeEach(() => {
+    vi.restoreAllMocks()
     vi.clearAllMocks()
   })
 
@@ -97,25 +99,24 @@ describe('RootFolderFormModal', () => {
     const pinia = createPinia()
     setActivePinia(pinia)
     const store = useRootFoldersStore()
-    const update = vi.spyOn(store, 'update').mockResolvedValue({
+    const root = {
       id: 12,
       name: 'Library',
       path: 'C:\\Library',
-      pathSyntax: 'Windows',
+      pathSyntax: 'Windows' as const,
       isDefault: false,
-      resolvedCaseSensitivity: 'Insensitive',
-    })
+      caseSensitivityMode: 'Auto' as const,
+      resolvedCaseSensitivity: 'Insensitive' as const,
+      pathIdentityState: 'Valid' as const,
+    }
+    store.folders = [root]
+    const update = vi.spyOn(store, 'update')
+    const updateMetadata = vi.spyOn(apiService, 'updateRootFolder').mockResolvedValue(root)
+    const relocate = vi.spyOn(apiService, 'changeRootFolderPath')
+    vi.spyOn(apiService, 'getRootFolders').mockResolvedValue([root])
     const wrapper = mount(RootFolderFormModal, {
       props: {
-        root: {
-          id: 12,
-          name: 'Library',
-          path: 'C:\\Library',
-          pathSyntax: 'Windows',
-          isDefault: false,
-          caseSensitivityMode: 'Auto',
-          resolvedCaseSensitivity: 'Insensitive',
-        },
+        root,
       },
       global: {
         plugins: [pinia],
@@ -129,8 +130,269 @@ describe('RootFolderFormModal', () => {
     await (wrapper.vm as unknown as { save: () => Promise<void> }).save()
 
     await vi.waitFor(() => expect(update).toHaveBeenCalledTimes(1))
-    expect(update).toHaveBeenCalledWith(12, expect.objectContaining({ path: 'c:/library/' }))
+    expect(update).toHaveBeenCalledWith(12, expect.objectContaining({ path: 'c:/library/' }), {
+      expectedCurrentPath: 'C:\\Library',
+    })
+    expect(updateMetadata).toHaveBeenCalledWith(
+      12,
+      expect.objectContaining({ path: 'C:\\Library' }),
+    )
+    expect(relocate).not.toHaveBeenCalled()
     expect(success).toHaveBeenCalledWith('Success', 'Root folder updated')
+  })
+
+  it('ignores stale resolved sensitivity when explicit persisted mode is sensitive', async () => {
+    const pinia = createPinia()
+    setActivePinia(pinia)
+    const store = useRootFoldersStore()
+    const root = {
+      id: 20,
+      name: 'Library',
+      path: 'C:\\Library',
+      pathSyntax: 'Windows' as const,
+      isDefault: false,
+      caseSensitivityMode: 'Sensitive' as const,
+      resolvedCaseSensitivity: 'Insensitive' as const,
+      pathIdentityState: 'Valid' as const,
+    }
+    store.folders = [root]
+    const update = vi.spyOn(store, 'update')
+    const wrapper = mount(RootFolderFormModal, {
+      props: { root },
+      global: {
+        plugins: [pinia],
+        stubs: { FolderBrowserModal: true },
+      },
+    })
+    await wrapper.get('#root-path').setValue('C:\\library')
+
+    await (wrapper.vm as unknown as { save: () => Promise<void> }).save()
+
+    expect(update).not.toHaveBeenCalled()
+    expect((wrapper.vm as unknown as { showConfirm: boolean }).showConfirm).toBe(true)
+  })
+
+  it('fails closed when auto identity is unavailable despite stale insensitive resolution', async () => {
+    const pinia = createPinia()
+    setActivePinia(pinia)
+    const store = useRootFoldersStore()
+    const root = {
+      id: 21,
+      name: 'Library',
+      path: 'C:\\Library',
+      pathSyntax: 'Windows' as const,
+      isDefault: false,
+      caseSensitivityMode: 'Auto' as const,
+      resolvedCaseSensitivity: 'Insensitive' as const,
+      pathIdentityState: 'Unavailable' as const,
+    }
+    store.folders = [root]
+    const update = vi.spyOn(store, 'update')
+    const wrapper = mount(RootFolderFormModal, {
+      props: { root },
+      global: {
+        plugins: [pinia],
+        stubs: { FolderBrowserModal: true },
+      },
+    })
+    await wrapper.get('#root-path').setValue('C:\\library')
+
+    await (wrapper.vm as unknown as { save: () => Promise<void> }).save()
+
+    expect(update).not.toHaveBeenCalled()
+    expect((wrapper.vm as unknown as { showConfirm: boolean }).showConfirm).toBe(true)
+  })
+
+  it('requires relocation confirmation when a sensitive persisted root changes only by case', async () => {
+    const pinia = createPinia()
+    setActivePinia(pinia)
+    const store = useRootFoldersStore()
+    const root = {
+      id: 14,
+      name: 'Library',
+      path: 'C:\\Library',
+      pathSyntax: 'Windows' as const,
+      isDefault: false,
+      caseSensitivityMode: 'Sensitive' as const,
+      resolvedCaseSensitivity: 'Sensitive' as const,
+    }
+    store.folders = [root]
+    const update = vi.spyOn(store, 'update')
+    const updateMetadata = vi.spyOn(apiService, 'updateRootFolder')
+    const relocate = vi.spyOn(apiService, 'changeRootFolderPath')
+    const wrapper = mount(RootFolderFormModal, {
+      props: { root },
+      global: {
+        plugins: [pinia],
+        stubs: { FolderBrowserModal: true },
+      },
+    })
+    await wrapper.get('#root-path').setValue('C:\\library')
+    await wrapper.get('#root-case-sensitivity').setValue('Insensitive')
+
+    await (wrapper.vm as unknown as { save: () => Promise<void> }).save()
+
+    expect((wrapper.vm as unknown as { showConfirm: boolean }).showConfirm).toBe(true)
+    expect(update).not.toHaveBeenCalled()
+    expect(updateMetadata).not.toHaveBeenCalled()
+    expect(relocate).not.toHaveBeenCalled()
+  })
+
+  it('uses metadata update when an insensitive persisted root changes only by case', async () => {
+    const pinia = createPinia()
+    setActivePinia(pinia)
+    const store = useRootFoldersStore()
+    const root = {
+      id: 18,
+      name: 'Library',
+      path: 'C:\\Library',
+      pathSyntax: 'Windows' as const,
+      isDefault: false,
+      caseSensitivityMode: 'Insensitive' as const,
+      resolvedCaseSensitivity: 'Insensitive' as const,
+    }
+    store.folders = [root]
+    const updateMetadata = vi.spyOn(apiService, 'updateRootFolder').mockResolvedValue(root)
+    const relocate = vi.spyOn(apiService, 'changeRootFolderPath')
+    vi.spyOn(apiService, 'getRootFolders').mockResolvedValue([root])
+    const wrapper = mount(RootFolderFormModal, {
+      props: { root },
+      global: {
+        plugins: [pinia],
+        stubs: { FolderBrowserModal: true },
+      },
+    })
+    await wrapper.get('#root-path').setValue('C:\\library')
+    await wrapper.get('#root-case-sensitivity').setValue('Sensitive')
+
+    await (wrapper.vm as unknown as { save: () => Promise<void> }).save()
+
+    expect((wrapper.vm as unknown as { showConfirm: boolean }).showConfirm).toBe(false)
+    expect(updateMetadata).toHaveBeenCalledWith(
+      18,
+      expect.objectContaining({
+        path: 'C:\\Library',
+        caseSensitivityMode: 'Sensitive',
+      }),
+    )
+    expect(relocate).not.toHaveBeenCalled()
+  })
+
+  it('fails closed when the current root is missing after reload', async () => {
+    const pinia = createPinia()
+    setActivePinia(pinia)
+    const root = {
+      id: 16,
+      name: 'Removed Library',
+      path: '/removed-library',
+      pathSyntax: 'Unix' as const,
+      isDefault: false,
+    }
+    vi.spyOn(apiService, 'getRootFolders').mockResolvedValue([])
+    const updateMetadata = vi.spyOn(apiService, 'updateRootFolder')
+    const relocate = vi.spyOn(apiService, 'changeRootFolderPath')
+    const wrapper = mount(RootFolderFormModal, {
+      props: { root },
+      global: {
+        plugins: [pinia],
+        stubs: { FolderBrowserModal: true },
+      },
+    })
+
+    await (wrapper.vm as unknown as { save: () => Promise<void> }).save()
+
+    expect(updateMetadata).not.toHaveBeenCalled()
+    expect(relocate).not.toHaveBeenCalled()
+    expect(error).toHaveBeenCalledWith('Error', expect.stringContaining('removed'))
+  })
+
+  it('requires confirmation for a store-computed path change', async () => {
+    const pinia = createPinia()
+    setActivePinia(pinia)
+    const store = useRootFoldersStore()
+    store.folders = [
+      {
+        id: 17,
+        name: 'Library',
+        path: '/old-library',
+        pathSyntax: 'Unix',
+        isDefault: false,
+        resolvedCaseSensitivity: 'Sensitive',
+      },
+    ]
+
+    await expect(
+      store.update(
+        17,
+        {
+          id: 17,
+          name: 'Library',
+          path: '/new-library',
+          isDefault: false,
+          caseSensitivityMode: 'Auto',
+        },
+        { expectedCurrentPath: '/old-library' },
+      ),
+    ).rejects.toThrow('requires confirmation')
+  })
+
+  it('fails closed when the stored root changed while the modal was open', async () => {
+    const pinia = createPinia()
+    setActivePinia(pinia)
+    const store = useRootFoldersStore()
+    const root = {
+      id: 15,
+      name: 'Library',
+      path: '/old-library',
+      pathSyntax: 'Unix' as const,
+      isDefault: false,
+    }
+    store.folders = [{ ...root, path: '/newer-library' }]
+    const updateMetadata = vi.spyOn(apiService, 'updateRootFolder')
+    const relocate = vi.spyOn(apiService, 'changeRootFolderPath')
+    const wrapper = mount(RootFolderFormModal, {
+      props: { root },
+      global: {
+        plugins: [pinia],
+        stubs: { FolderBrowserModal: true },
+      },
+    })
+
+    await (wrapper.vm as unknown as { save: () => Promise<void> }).save()
+
+    expect(updateMetadata).not.toHaveBeenCalled()
+    expect(relocate).not.toHaveBeenCalled()
+    expect(error).toHaveBeenCalledWith('Error', expect.stringContaining('changed while editing'))
+  })
+
+  it('fails closed for a case-only edit when persisted auto semantics are unknown', async () => {
+    const pinia = createPinia()
+    setActivePinia(pinia)
+    const store = useRootFoldersStore()
+    const update = vi.spyOn(store, 'update')
+    const wrapper = mount(RootFolderFormModal, {
+      props: {
+        root: {
+          id: 19,
+          name: 'Library',
+          path: 'C:\\Library',
+          pathSyntax: 'Windows',
+          isDefault: false,
+          caseSensitivityMode: 'Auto',
+          resolvedCaseSensitivity: 'Unknown',
+        },
+      },
+      global: {
+        plugins: [pinia],
+        stubs: { FolderBrowserModal: true },
+      },
+    })
+    await wrapper.get('#root-path').setValue('C:\\library')
+
+    await (wrapper.vm as unknown as { save: () => Promise<void> }).save()
+
+    expect(update).not.toHaveBeenCalled()
+    expect((wrapper.vm as unknown as { showConfirm: boolean }).showConfirm).toBe(true)
   })
 
   it.each(['Sensitive', 'Unknown'] as const)(
@@ -202,5 +464,14 @@ describe('RootFolderFormModal', () => {
       wrapper.vm as unknown as { confirmChange: (moveFiles: boolean) => Promise<void> }
     ).confirmChange(moveFiles)
     await vi.waitFor(() => expect(success).toHaveBeenCalledWith('Success', message))
+    expect(store.update).toHaveBeenCalledWith(
+      7,
+      expect.objectContaining({ path: '/new-library' }),
+      expect.objectContaining({
+        expectedCurrentPath: '/old-library',
+        pathChangeConfirmed: true,
+        moveFiles,
+      }),
+    )
   })
 })

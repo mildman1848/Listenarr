@@ -149,12 +149,49 @@ public sealed partial class LibraryMoveWorkflow
         FileSystemPathSemantics Semantics,
         FileSystemCaseSensitivityMode CaseSensitivityMode);
 
+    private static BadRequestObjectResult ValidationResult(
+        string code,
+        string message,
+        string? field = null,
+        string? resolvedDestination = null) =>
+        new(new
+        {
+            code,
+            field,
+            message,
+            resolvedDestination
+        });
+
+    private static BadRequestObjectResult DestinationValidationResult(
+        string code,
+        string message,
+        string? resolvedDestination = null) =>
+        ValidationResult(
+            code,
+            message,
+            "destinationPath",
+            resolvedDestination);
+
     private static IActionResult ToApplicationExceptionResult(ListenarrApplicationException exception) =>
         exception switch
         {
             ApplicationNotFoundException => new NotFoundObjectResult(new { message = exception.SafeDetail, code = exception.Code }),
             ApplicationConflictException => new ConflictObjectResult(new { message = exception.SafeDetail, code = exception.Code }),
-            ApplicationValidationException => new BadRequestObjectResult(new { message = exception.SafeDetail, code = exception.Code }),
+            ApplicationValidationException when exception.Code.StartsWith(
+                "source_",
+                StringComparison.Ordinal) => ValidationResult(
+                    exception.Code,
+                    exception.SafeDetail,
+                    "sourcePath"),
+            ApplicationValidationException when exception.Code.StartsWith(
+                "destination_",
+                StringComparison.Ordinal) || exception.Code == "identical_move_endpoint" =>
+                DestinationValidationResult(
+                    exception.Code,
+                    exception.SafeDetail),
+            ApplicationValidationException => ValidationResult(
+                exception.Code,
+                exception.SafeDetail),
             _ => new ObjectResult(new { message = exception.SafeDetail, code = exception.Code })
             {
                 StatusCode = StatusCodes.Status500InternalServerError

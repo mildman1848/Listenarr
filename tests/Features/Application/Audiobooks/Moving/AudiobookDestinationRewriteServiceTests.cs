@@ -1,6 +1,10 @@
+using Listenarr.Tests.Common;
+
 namespace Listenarr.Tests.Features.Application.Audiobooks.Moving;
 
-public sealed class AudiobookDestinationRewriteServiceTests
+[Trait("Name", "AudiobookDestinationRewriteServiceTests")]
+[Trait("Category", "Application")]
+public sealed class AudiobookDestinationRewriteServiceTests : BaseTests
 {
     [Fact]
     public async Task RewriteDestinationAsync_RepairsLegacyInvalidBasePathWhenExpectedSourceMatchesExactly()

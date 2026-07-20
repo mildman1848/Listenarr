@@ -1,9 +1,13 @@
 using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Logging.Abstractions;
 
+using Listenarr.Tests.Common;
+
 namespace Listenarr.Tests.Features.Application.Audiobooks.Files;
 
-public sealed class AudiobookFileServiceCoordinationTests
+[Trait("Name", "AudiobookFileServiceCoordinationTests")]
+[Trait("Category", "Application")]
+public sealed class AudiobookFileServiceCoordinationTests : BaseTests
 {
     [Fact]
     public async Task ClaimAudiobookFileAsync_AcquiresGlobalBoundaryBeforeAudiobookLock()

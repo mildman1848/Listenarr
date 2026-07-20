@@ -16,7 +16,9 @@ public partial class FileMover
 
     private async Task<FileMoveFallbackOutcome> TryManagedFileMoveFallbackAsync(
         string sourceFile,
-        string destinationFile)
+        string destinationFile,
+        string sourceIdentity,
+        string destinationIdentity)
     {
         var destinationDirectory = Path.GetDirectoryName(destinationFile);
         if (string.IsNullOrWhiteSpace(destinationDirectory)
@@ -48,7 +50,9 @@ public partial class FileMover
             destinationPublished = true;
             return await TryRemoveVerifiedFileMoveSourceAsync(
                 sourceFile,
-                destinationFile);
+                destinationFile,
+                sourceIdentity,
+                destinationIdentity);
         }
         catch (Exception exception) when (exception is not (
             OperationCanceledException or OutOfMemoryException or StackOverflowException))
@@ -73,7 +77,9 @@ public partial class FileMover
 
     private async Task<FileMoveFallbackOutcome> TryRobocopyFileMoveFallbackAsync(
         string sourceFile,
-        string destinationFile)
+        string destinationFile,
+        string sourceIdentity,
+        string destinationIdentity)
     {
         if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
             || !_options.EnableRobocopy
@@ -165,7 +171,9 @@ public partial class FileMover
             destinationPublished = true;
             return await TryRemoveVerifiedFileMoveSourceAsync(
                 sourceFile,
-                destinationFile);
+                destinationFile,
+                sourceIdentity,
+                destinationIdentity);
         }
         catch (Exception exception) when (exception is not (
             OperationCanceledException or OutOfMemoryException or StackOverflowException))
@@ -276,36 +284,18 @@ public partial class FileMover
 
     private async Task<FileMoveFallbackOutcome> TryRemoveVerifiedFileMoveSourceAsync(
         string sourceFile,
-        string destinationFile)
+        string destinationFile,
+        string sourceIdentity,
+        string destinationIdentity)
     {
-        if (!File.Exists(sourceFile)
-            || !File.Exists(destinationFile)
-            || IsLinkedOrUnverifiableEntry(sourceFile)
-            || IsLinkedOrUnverifiableEntry(destinationFile)
-            || !await FileSystemSafety.FilesHaveSameContentAsync(
-                sourceFile,
-                destinationFile))
-        {
-            return FileMoveFallbackOutcome.SourceRetained;
-        }
-
-        try
-        {
-            File.Delete(sourceFile);
-        }
-        catch (Exception exception) when (exception is not (
-            OperationCanceledException or OutOfMemoryException or StackOverflowException))
-        {
-            _logger.LogWarning(
-                exception,
-                "Verified file move published the destination but retained source {Source}",
-                LogRedaction.SanitizeFilePath(sourceFile));
-            return FileMoveFallbackOutcome.SourceRetained;
-        }
-
-        return File.Exists(sourceFile)
-            ? FileMoveFallbackOutcome.SourceRetained
-            : FileMoveFallbackOutcome.Success;
+        var removalOutcome = await TryRemoveVerifiedFileMoveSourceWithClaimsAsync(
+            sourceFile,
+            destinationFile,
+            sourceIdentity,
+            destinationIdentity);
+        return removalOutcome == VerifiedFileMoveRemovalOutcome.Removed
+            ? FileMoveFallbackOutcome.Success
+            : FileMoveFallbackOutcome.SourceRetained;
     }
 
     private void TryDeleteFileMoveStagingPath(string stagingPath)

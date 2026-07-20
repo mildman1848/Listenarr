@@ -34,6 +34,7 @@ namespace Listenarr.Application.Audiobooks.Catalog
         private readonly IFileNamingService _fileNamingService;
         private readonly IRootFolderService _rootFolderService;
         private readonly ILibraryDestinationMutationGuard _destinationMutationGuard;
+        private readonly IFileSystem _fileSystem;
         private readonly IFilesystemMutationCoordinator _mutationCoordinator;
         private readonly INotificationService? _notificationService;
 
@@ -48,6 +49,7 @@ namespace Listenarr.Application.Audiobooks.Catalog
             IFileNamingService fileNamingService,
             IRootFolderService rootFolderService,
             ILibraryDestinationMutationGuard destinationMutationGuard,
+            IFileSystem fileSystem,
             IFilesystemMutationCoordinator mutationCoordinator,
             INotificationService? notificationService = null)
         {
@@ -62,6 +64,7 @@ namespace Listenarr.Application.Audiobooks.Catalog
             _rootFolderService = rootFolderService;
             _destinationMutationGuard = destinationMutationGuard
                 ?? throw new ArgumentNullException(nameof(destinationMutationGuard));
+            _fileSystem = fileSystem ?? throw new ArgumentNullException(nameof(fileSystem));
             _mutationCoordinator = mutationCoordinator ?? throw new ArgumentNullException(nameof(mutationCoordinator));
             _notificationService = notificationService;
         }
@@ -161,6 +164,12 @@ namespace Listenarr.Application.Audiobooks.Catalog
 
             var settings = await _configurationService.GetApplicationSettingsAsync();
 
+            var configuredRootFolders = await _rootFolderService.GetAllAsync();
+            var allowedDestinationRoots = FileUtils.GetValidMutationRootsForCurrentOs(
+                configuredRootFolders
+                    .Select(root => root.Path)
+                    .Append(settings.OutputPath));
+
             var requestedBaseDirectory = request.DestinationPath;
             if (!string.IsNullOrWhiteSpace(requestedBaseDirectory))
             {
@@ -168,7 +177,10 @@ namespace Listenarr.Application.Audiobooks.Catalog
                 // absolute after trimming accidental leading whitespace.
                 if (FileUtils.HasLeadingWhitespaceBeforeRootedPath(requestedBaseDirectory))
                 {
-                    return ValidationFailure("DestinationPath is invalid: leading whitespace before an absolute path is not allowed.");
+                    return ValidationFailure(
+                        "destination_path_invalid",
+                        "DestinationPath is invalid: leading whitespace before an absolute path is not allowed.",
+                        requestedBaseDirectory);
                 }
 
                 if (!FileUtils.TryNormalizeUserProvidedDirectoryPathForCurrentOs(
@@ -177,7 +189,23 @@ namespace Listenarr.Application.Audiobooks.Catalog
                     out var validationReason,
                     rejectParentTraversal: true))
                 {
-                    return ValidationFailure($"DestinationPath is invalid: {validationReason}");
+                    return ValidationFailure(
+                        "destination_path_invalid",
+                        $"DestinationPath is invalid: {validationReason}",
+                        requestedBaseDirectory);
+                }
+
+                if (allowedDestinationRoots.Count == 0
+                    || !_fileSystem.TryValidateMutationTarget(
+                        normalizedRequestedBaseDirectory,
+                        allowedDestinationRoots,
+                        out normalizedRequestedBaseDirectory,
+                        out _))
+                {
+                    return ValidationFailure(
+                        "destination_path_outside_roots",
+                        "DestinationPath must be inside a configured root folder or output path",
+                        normalizedRequestedBaseDirectory);
                 }
 
                 audiobook.BasePath = normalizedRequestedBaseDirectory;
@@ -196,7 +224,23 @@ namespace Listenarr.Application.Audiobooks.Catalog
                     out var validationReason,
                     rejectParentTraversal: true))
                 {
-                    return ValidationFailure($"Generated library destination is invalid: {validationReason}");
+                    return ValidationFailure(
+                        "destination_path_invalid",
+                        $"Generated library destination is invalid: {validationReason}",
+                        generatedBasePath);
+                }
+
+                if (allowedDestinationRoots.Count == 0
+                    || !_fileSystem.TryValidateMutationTarget(
+                        normalizedGeneratedBasePath,
+                        allowedDestinationRoots,
+                        out normalizedGeneratedBasePath,
+                        out _))
+                {
+                    return ValidationFailure(
+                        "destination_path_outside_roots",
+                        "Generated library destination must be inside a configured root folder or output path",
+                        normalizedGeneratedBasePath);
                 }
 
                 audiobook.BasePath = normalizedGeneratedBasePath;
@@ -208,7 +252,10 @@ namespace Listenarr.Application.Audiobooks.Catalog
                 cancellationToken);
             if (destinationBlockingReason != null)
             {
-                return ValidationFailure(destinationBlockingReason);
+                return ValidationFailure(
+                    "destination_path_blocked",
+                    destinationBlockingReason,
+                    audiobook.BasePath);
             }
 
             audiobook.ImageUrl = await MoveImageToLibraryStorageAsync(
@@ -402,12 +449,18 @@ namespace Listenarr.Application.Audiobooks.Catalog
             await _historyRepository.AddAsync(historyEntry, cancellationToken);
         }
 
-        private static LibraryAddOperationResult ValidationFailure(string message) => new()
-        {
-            ValidationFailed = true,
-            Message = message,
-            ValidationMessage = message
-        };
+        private static LibraryAddOperationResult ValidationFailure(
+            string code,
+            string message,
+            string? resolvedDestination = null) => new()
+            {
+                ValidationFailed = true,
+                Message = message,
+                ValidationMessage = message,
+                ValidationCode = code,
+                ValidationField = "destinationPath",
+                ResolvedDestination = resolvedDestination
+            };
 
         private static string? ToStringOrFirst(object? value)
         {

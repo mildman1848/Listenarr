@@ -1,6 +1,10 @@
+using Listenarr.Tests.Common;
+
 namespace Listenarr.Tests.Features.Application.Audiobooks.Jobs;
 
-public sealed class AudiobookOperationCoordinatorTests
+[Trait("Name", "AudiobookOperationCoordinatorTests")]
+[Trait("Category", "Application")]
+public sealed class AudiobookOperationCoordinatorTests : BaseTests
 {
     [Fact]
     public async Task SameAudiobookOperations_AreSerialized()

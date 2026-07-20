@@ -92,7 +92,10 @@ public sealed partial class RootFolderRelocationService(
                 sourceResolution = resolvedSource;
             }
         }
-        catch (ArgumentException)
+        catch (Exception exception) when (exception is
+            IOException or UnauthorizedAccessException or ArgumentException or
+            InvalidOperationException or NotSupportedException or PathTooLongException or
+            System.Security.SecurityException)
         {
             sourceResolution = null;
         }
@@ -103,33 +106,31 @@ public sealed partial class RootFolderRelocationService(
                 "The current root folder path is invalid or unavailable; use metadata-only path change to repair it before relocating files.");
         }
 
-        if (sourceResolution != null && command.Mode != RootFolderRelocationMode.MetadataOnly)
+        var sourceOperationSemantics = RootFolderPathSemantics.ResolvePersisted(root)?.Semantics
+            ?? sourceResolution?.Semantics;
+        if (sourceOperationSemantics.HasValue
+            && command.Mode != RootFolderRelocationMode.MetadataOnly
+            && sourceOperationSemantics.Value.Syntax == targetResolution.Semantics.Syntax
+            && FileSystemPathIdentity.AreEquivalent(
+                root.Path,
+                targetPath,
+                sourceOperationSemantics.Value))
         {
-            var sourceRootIdentity = PathIdentitySnapshot.FromResolution(
-                sourceResolution.Semantics,
-                root.CaseSensitivityMode,
-                sourceResolution.BoundaryPath,
-                root.Path);
-            var targetRootIdentity = PathIdentitySnapshot.FromResolution(
-                targetResolution.Semantics,
-                command.TargetCaseSensitivityMode,
-                targetResolution.BoundaryPath,
-                targetPath);
-            if (FileSystemPathIdentity.AreEquivalentEndpoints(
-                    root.Path,
-                    sourceRootIdentity,
-                    targetPath,
-                    targetRootIdentity))
-            {
-                throw new ArgumentException(
-                    "Root folder relocation source and target paths must be distinct.",
-                    nameof(command));
-            }
+            throw new ArgumentException(
+                "Root folder relocation source and target paths must be distinct under the persisted root semantics.",
+                nameof(command));
         }
 
-        var storedSourcePathSemantics = sourceResolution == null
-            ? ResolveStoredSourcePathSemantics(root)
-            : new StoredSourcePathSemantics(sourceResolution.Semantics, false);
+        var storedSourcePathSemantics = RootFolderPathSemantics.ResolvePersisted(root)
+            ?? (sourceResolution == null
+                ? null
+                : new PersistedRootFolderPathSemantics(sourceResolution.Semantics, false));
+        var sourceCaseSensitivityMode = sourceOperationSemantics?.CaseSensitivity switch
+        {
+            FileSystemCaseSensitivity.Sensitive => FileSystemCaseSensitivityMode.Sensitive,
+            FileSystemCaseSensitivity.Insensitive => FileSystemCaseSensitivityMode.Insensitive,
+            _ => root.CaseSensitivityMode
+        };
 
         var targetIdentityKey = FileSystemPathIdentity.CreateKey(
             "root",
@@ -197,8 +198,8 @@ public sealed partial class RootFolderRelocationService(
             : DiscoverAffectedAudiobooks(
                 audiobooks,
                 root.Path,
-                storedSourcePathSemantics.Semantics,
-                storedSourcePathSemantics.DetectAmbiguousCaseMatches);
+                storedSourcePathSemantics.Value.Semantics,
+                storedSourcePathSemantics.Value.DetectAmbiguousCaseMatches);
 
         if (command.Mode != RootFolderRelocationMode.MetadataOnly && invalidStoredBasePaths.Count > 0)
         {
@@ -215,9 +216,9 @@ public sealed partial class RootFolderRelocationService(
             .ToListAsync(cancellationToken);
         var conflictingMoveJob = activeMoveJobs.FirstOrDefault(job =>
             affectedAudiobookIds.Contains(job.AudiobookId)
-            || (sourceResolution != null
-                && (PathTouchesBoundary(job.SourcePath, root.Path, sourceResolution.Semantics)
-                    || PathTouchesBoundary(job.RequestedPath, root.Path, sourceResolution.Semantics)))
+            || (sourceOperationSemantics.HasValue
+                && (PathTouchesBoundary(job.SourcePath, root.Path, sourceOperationSemantics.Value)
+                    || PathTouchesBoundary(job.RequestedPath, root.Path, sourceOperationSemantics.Value)))
             || PathTouchesBoundary(job.SourcePath, targetPath, targetResolution.Semantics)
             || PathTouchesBoundary(job.RequestedPath, targetPath, targetResolution.Semantics));
         if (conflictingMoveJob != null)
@@ -238,7 +239,7 @@ public sealed partial class RootFolderRelocationService(
                 if (!FileSystemPathIdentity.IsSameOrInside(
                         manifest.SourceRoot,
                         root.Path,
-                        sourceResolution.Semantics))
+                        sourceOperationSemantics!.Value))
                 {
                     throw new InvalidOperationException(
                         "A tracked audiobook move source escaped the relocating root folder.");
@@ -248,7 +249,7 @@ public sealed partial class RootFolderRelocationService(
                     root.Path,
                     targetPath,
                     manifest.SourceRoot,
-                    sourceResolution.Semantics,
+                    sourceOperationSemantics!.Value,
                     targetResolution.Semantics);
                 var targetIdentity = PathIdentitySnapshot.FromResolution(
                     targetResolution.Semantics,
@@ -281,7 +282,6 @@ public sealed partial class RootFolderRelocationService(
         if (command.Mode == RootFolderRelocationMode.MetadataOnly)
         {
             var sourcePath = root.Path;
-            var sourceCaseSensitivityMode = root.CaseSensitivityMode;
             var skipped = invalidStoredBasePaths
                 .Select(candidate => new RootFolderRelocationSkippedItem
                 {
@@ -385,7 +385,7 @@ public sealed partial class RootFolderRelocationService(
             RootFolderId = root.Id,
             ActiveRootFolderId = root.Id,
             SourcePath = root.Path,
-            SourceCaseSensitivityMode = root.CaseSensitivityMode,
+            SourceCaseSensitivityMode = sourceCaseSensitivityMode,
             TargetPath = targetPath,
             Mode = command.Mode,
             Status = RootFolderRelocationStatus.Pending,
@@ -443,6 +443,11 @@ public sealed partial class RootFolderRelocationService(
         if (affected.Count == 0)
         {
             ApplyRootMetadata(root, command, targetPath, targetResolution, targetIdentityKey);
+            if (command.DesiredIsDefault)
+            {
+                await ClearOtherDefaultsAsync(db, rootFolderId, cancellationToken);
+            }
+
             relocation.Status = RootFolderRelocationStatus.Completed;
             relocation.ActiveRootFolderId = null;
             relocation.CompletedAt = nowUtc;

@@ -16,6 +16,7 @@ namespace Listenarr.Tests.Features.Infrastructure.Metadata.Jobs
 {
     [Trait("Area", "Metadata")]
     [Trait("Name", "MetadataRescanProcessorTests")]
+    [Trait("Category", "Infrastructure")]
     public sealed class MetadataRescanProcessorTests : BaseTests
     {
         [Fact]

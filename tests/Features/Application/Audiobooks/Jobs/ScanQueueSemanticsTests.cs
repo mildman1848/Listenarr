@@ -5,11 +5,14 @@
 using Listenarr.Tests.Builders;
 using Microsoft.Extensions.Logging.Abstractions;
 
+using Listenarr.Tests.Common;
+
 namespace Listenarr.Tests.Features.Application.Audiobooks.Jobs
 {
     [Trait("Area", "Jobs")]
     [Trait("Name", "ScanQueueSemanticsTests")]
-    public sealed class ScanQueueSemanticsTests
+    [Trait("Category", "Application")]
+    public sealed class ScanQueueSemanticsTests : BaseTests
     {
         [Theory]
         [InlineData(FileSystemCaseSensitivity.Sensitive, false)]

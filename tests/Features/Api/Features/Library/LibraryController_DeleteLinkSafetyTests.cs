@@ -15,6 +15,7 @@ using Listenarr.Tests.Common;
 namespace Listenarr.Tests.Features.Api.Features.Library;
 
 [Trait("Area", "LibraryApi")]
+[Trait("Name", "LibraryController_DeleteLinkSafetyTests")]
 [Trait("Category", "LibraryController")]
 public class LibraryController_DeleteLinkSafetyTests : BaseTests
 {

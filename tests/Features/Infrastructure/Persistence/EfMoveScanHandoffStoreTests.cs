@@ -3,6 +3,8 @@ using Microsoft.EntityFrameworkCore;
 
 namespace Listenarr.Tests.Features.Infrastructure.Persistence;
 
+[Trait("Name", "EfMoveScanHandoffStoreTests")]
+[Trait("Category", "Infrastructure")]
 public sealed class EfMoveScanHandoffStoreTests : BaseTests
 {
     [Fact]

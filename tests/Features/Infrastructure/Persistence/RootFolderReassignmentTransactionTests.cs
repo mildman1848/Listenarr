@@ -12,10 +12,14 @@ using Listenarr.Infrastructure.Persistence.Repositories;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging.Abstractions;
 
+using Listenarr.Tests.Common;
+
 namespace Listenarr.Tests.Features.Infrastructure.Persistence;
 
 [Trait("Area", "Persistence")]
-public sealed class RootFolderReassignmentTransactionTests : IAsyncLifetime
+[Trait("Name", "RootFolderReassignmentTransactionTests")]
+[Trait("Category", "Infrastructure")]
+public sealed class RootFolderReassignmentTransactionTests : BaseTests
 {
     private readonly string _databasePath = Path.Join(
         Path.GetTempPath(),
@@ -24,8 +28,9 @@ public sealed class RootFolderReassignmentTransactionTests : IAsyncLifetime
     private IDbContextFactory<ListenArrDbContext> _factory = null!;
     private EfRootFolderRepository _repository = null!;
 
-    public async Task InitializeAsync()
+    public override async Task InitializeAsync()
     {
+        await base.InitializeAsync();
         Directory.CreateDirectory(Path.GetDirectoryName(_databasePath)!);
         var options = new DbContextOptionsBuilder<ListenArrDbContext>()
             .UseSqlite($"Data Source={_databasePath};Pooling=False;Foreign Keys=True")
@@ -38,14 +43,14 @@ public sealed class RootFolderReassignmentTransactionTests : IAsyncLifetime
         await db.Database.EnsureCreatedAsync();
     }
 
-    public Task DisposeAsync()
+    public override async Task DisposeAsync()
     {
         if (File.Exists(_databasePath))
         {
             File.Delete(_databasePath);
         }
 
-        return Task.CompletedTask;
+        await base.DisposeAsync();
     }
 
     [Fact]

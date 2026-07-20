@@ -1,6 +1,10 @@
+using Listenarr.Tests.Common;
+
 namespace Listenarr.Tests.Features.Infrastructure.FileSystem;
 
-public sealed class LocalFileSystemTests
+[Trait("Name", "LocalFileSystemTests")]
+[Trait("Category", "Infrastructure")]
+public sealed class LocalFileSystemTests : BaseTests
 {
     [Fact]
     public void IsReparsePoint_DetectsLinuxSymbolicLinksOnly()

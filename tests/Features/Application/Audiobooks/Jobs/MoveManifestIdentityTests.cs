@@ -1,8 +1,10 @@
+using Listenarr.Tests.Common;
+
 namespace Listenarr.Tests.Features.Application.Audiobooks.Jobs;
 
 [Trait("Name", "MoveManifestIdentityTests")]
 [Trait("Category", "Application")]
-public sealed class MoveManifestIdentityTests
+public sealed class MoveManifestIdentityTests : BaseTests
 {
     [Fact]
     public void Version_IsFive()

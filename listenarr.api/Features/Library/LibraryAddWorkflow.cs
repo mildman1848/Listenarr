@@ -80,7 +80,11 @@ namespace Listenarr.Api.Features.Library
 
                 if (result.ValidationFailed)
                 {
-                    return new BadRequestObjectResult(new { message = result.ValidationMessage ?? result.Message });
+                    return DestinationValidationResult(
+                        result.ValidationCode ?? "destination_path_invalid",
+                        result.ValidationMessage ?? result.Message,
+                        result.ResolvedDestination,
+                        result.ValidationField ?? "destinationPath");
                 }
 
                 if (result.AlreadyExists)
@@ -142,7 +146,10 @@ namespace Listenarr.Api.Features.Library
                 // absolute after trimming accidental leading whitespace.
                 if (FileUtils.HasLeadingWhitespaceBeforeRootedPath(request.DestinationPath))
                 {
-                    return new BadRequestObjectResult(new { message = "DestinationPath is invalid: leading whitespace before an absolute path is not allowed." });
+                    return DestinationValidationResult(
+                        "destination_path_invalid",
+                        "DestinationPath is invalid: leading whitespace before an absolute path is not allowed.",
+                        request.DestinationPath);
                 }
 
                 if (!FileUtils.TryNormalizeUserProvidedDirectoryPathForCurrentOs(
@@ -151,7 +158,35 @@ namespace Listenarr.Api.Features.Library
                     out var validationReason,
                     rejectParentTraversal: true))
                 {
-                    return new BadRequestObjectResult(new { message = $"DestinationPath is invalid: {validationReason}" });
+                    return DestinationValidationResult(
+                        "destination_path_invalid",
+                        $"DestinationPath is invalid: {validationReason}",
+                        request.DestinationPath);
+                }
+
+                using var destinationScope = _scopeFactory.CreateScope();
+                var configurationService = destinationScope.ServiceProvider
+                    .GetRequiredService<IConfigurationService>();
+                var rootFolderService = destinationScope.ServiceProvider
+                    .GetRequiredService<IRootFolderService>();
+                var fileSystem = destinationScope.ServiceProvider.GetRequiredService<IFileSystem>();
+                var settings = await configurationService.GetApplicationSettingsAsync();
+                var rootFolders = await rootFolderService.GetAllAsync();
+                var allowedDestinationRoots = FileUtils.GetValidMutationRootsForCurrentOs(
+                    rootFolders
+                        .Select(root => root.Path)
+                        .Append(settings.OutputPath));
+                if (allowedDestinationRoots.Count == 0
+                    || !fileSystem.TryValidateMutationTarget(
+                        normalizedDestinationPath,
+                        allowedDestinationRoots,
+                        out normalizedDestinationPath,
+                        out _))
+                {
+                    return DestinationValidationResult(
+                        "destination_path_outside_roots",
+                        "DestinationPath must be inside a configured root folder or output path",
+                        normalizedDestinationPath);
                 }
 
                 audiobook.BasePath = normalizedDestinationPath;
@@ -165,7 +200,10 @@ namespace Listenarr.Api.Features.Library
                     audiobook.BasePath);
                 if (destinationBlockingReason != null)
                 {
-                    return new BadRequestObjectResult(new { message = destinationBlockingReason });
+                    return DestinationValidationResult(
+                        "destination_path_blocked",
+                        destinationBlockingReason,
+                        audiobook.BasePath);
                 }
             }
 
@@ -188,6 +226,19 @@ namespace Listenarr.Api.Features.Library
 
             return new OkObjectResult(new { message = "Audiobook added to library successfully", audiobook });
         }
+
+        private static BadRequestObjectResult DestinationValidationResult(
+            string code,
+            string message,
+            string? resolvedDestination = null,
+            string field = "destinationPath") =>
+            new(new
+            {
+                code,
+                field,
+                message,
+                resolvedDestination
+            });
 
         private void TryExtractPublishYear(LibraryController.AddToLibraryRequest request)
         {

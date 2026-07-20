@@ -178,6 +178,49 @@ describe('EditAudiobookModal move options', () => {
     expect(wrapper.emitted('saved')).toBeUndefined()
   })
 
+  it('shows a structured destination rejection inline with the effective path', async () => {
+    const { apiService } = await import('@/services/api')
+    const rejectedPath = 'C:/outside/New Author/New Book'
+    vi.mocked(apiService.moveAudiobook).mockRejectedValueOnce(
+      Object.assign(new Error('API error'), {
+        status: 400,
+        body: JSON.stringify({
+          code: 'destination_path_outside_roots',
+          field: 'destinationPath',
+          message: 'DestinationPath must be inside a configured root folder or output path',
+          resolvedDestination: rejectedPath,
+        }),
+      }),
+    )
+    const wrapper = mount(EditAudiobookModal, {
+      props: { isOpen: true, audiobook },
+      attachTo: document.body,
+      global: { plugins: [(await import('pinia')).createPinia()] },
+    })
+
+    await new Promise((resolve) => setTimeout(resolve, 200))
+    ;(wrapper.vm as unknown).selectedRootId = 0
+    ;(wrapper.vm as unknown).customRootPath = 'C:\\outside\\New Author\\New Book'
+    await wrapper.vm.$nextTick()
+
+    const savePromise = (wrapper.vm as unknown).handleSave()
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    const resolver = (wrapper.vm as unknown).moveConfirmResolver
+    if (resolver) resolver({ proceed: true, moveFiles: true, deleteEmptySource: true })
+    await savePromise
+    await wrapper.vm.$nextTick()
+
+    expect(wrapper.get('[data-testid="effective-destination"]').text()).toContain(rejectedPath)
+    expect(wrapper.text()).toContain(
+      'DestinationPath must be inside a configured root folder or output path',
+    )
+    expect(toastMocks.error).toHaveBeenCalledWith(
+      'Invalid destination',
+      'DestinationPath must be inside a configured root folder or output path',
+    )
+    expect(wrapper.emitted('saved')).toBeUndefined()
+  })
+
   it('Destination-only change without moving should call move API and skip metadata update', async () => {
     const wrapper = mount(EditAudiobookModal, {
       props: { isOpen: true, audiobook },

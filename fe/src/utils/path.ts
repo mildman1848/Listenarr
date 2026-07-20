@@ -85,9 +85,13 @@ export function normalizeForCompare(
   const value = trimTrailingSlash(s || '')
   const kind = pathKind === 'unknown' ? detectPathKind(value) : pathKind
   const normalized = kind === 'windows' ? value.replace(/\\/g, '/') : value
+  const canonicalSyntax =
+    kind === 'windows'
+      ? normalized.replace(/^([a-z]):/i, (_, drive) => `${drive.toUpperCase()}:`)
+      : normalized
   const caseInsensitive =
     caseSensitivity === 'Insensitive' || (caseSensitivity === 'Unknown' && kind === 'windows')
-  return caseInsensitive ? normalized.toLowerCase() : normalized
+  return caseInsensitive ? canonicalSyntax.toLowerCase() : canonicalSyntax
 }
 
 export function pathsEqual(

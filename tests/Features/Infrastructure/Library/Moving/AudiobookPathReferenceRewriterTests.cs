@@ -2,9 +2,13 @@
  * Listenarr - Audiobook Management System
  * Copyright (C) 2024-2026 Listenarr Contributors
  */
+using Listenarr.Tests.Common;
+
 namespace Listenarr.Tests.Features.Infrastructure.Library.Moving;
 
-public sealed class AudiobookPathReferenceRewriterTests
+[Trait("Name", "AudiobookPathReferenceRewriterTests")]
+[Trait("Category", "Infrastructure")]
+public sealed class AudiobookPathReferenceRewriterTests : BaseTests
 {
     [Fact]
     public void Rewrite_UsesSourceAndTargetSyntaxWithoutHostPathConversion()

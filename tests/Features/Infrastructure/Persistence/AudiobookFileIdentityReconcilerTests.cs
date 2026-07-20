@@ -1,9 +1,13 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging.Abstractions;
 
+using Listenarr.Tests.Common;
+
 namespace Listenarr.Tests.Features.Infrastructure.Persistence;
 
-public sealed class AudiobookFileIdentityReconcilerTests
+[Trait("Name", "AudiobookFileIdentityReconcilerTests")]
+[Trait("Category", "Infrastructure")]
+public sealed class AudiobookFileIdentityReconcilerTests : BaseTests
 {
     [Fact]
     public async Task ReconcileAsync_DuplicatesUnavailableAndReplay_AreFailClosedAndIdempotent()

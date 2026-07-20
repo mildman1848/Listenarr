@@ -291,7 +291,7 @@ export interface RootFolder {
   pathSyntax?: 'Windows' | 'Unix' | null
   isDefault: boolean
   createdAt?: string
-  updatedAt?: string
+  updatedAt?: string | null
   caseSensitivityMode?: 'Auto' | 'Sensitive' | 'Insensitive'
   resolvedCaseSensitivity?: 'Unknown' | 'Sensitive' | 'Insensitive'
   pathIdentityState?: 'Valid' | 'Conflict' | 'Unavailable'

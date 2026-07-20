@@ -31,16 +31,12 @@ namespace Listenarr.Api.Features.Library
         string ResolvedCaseSensitivity,
         string PathIdentityState,
         string? PathIdentityKey,
+        DateTime CreatedAt,
+        DateTime? UpdatedAt,
         RootFolderPathChangeResult? ActiveRelocation);
 
     public sealed record RootFolderMetadataUpdateRequest(
         string Name,
-        bool IsDefault,
-        FileSystemCaseSensitivityMode CaseSensitivityMode);
-
-    public sealed record RootFolderCreateRequest(
-        string Name,
-        string Path,
         bool IsDefault,
         FileSystemCaseSensitivityMode CaseSensitivityMode);
 
@@ -117,7 +113,7 @@ namespace Listenarr.Api.Features.Library
         /// <param name="request">The root folder to create.</param>
         /// <returns>The newly created root folder.</returns>
         [HttpPost]
-        public async Task<IActionResult> Create([FromBody] RootFolderCreateRequest request)
+        public async Task<IActionResult> Create([FromBody] RootFolder request)
         {
             try
             {
@@ -147,18 +143,71 @@ namespace Listenarr.Api.Features.Library
         /// <param name="request">Updated root folder data.</param>
         /// <param name="moveFiles">When true, physically move existing audiobook files to the new path.</param>
         /// <param name="deleteEmptySource">When true, delete the old root directory if it is empty after moving files.</param>
-        [NonAction]
-        public async Task<IActionResult> Update(int id, [FromBody] RootFolder request, [FromQuery] bool moveFiles = false, [FromQuery] bool deleteEmptySource = true)
+        /// <param name="cancellationToken">Request cancellation token.</param>
+        [HttpPut("{id}")]
+        public async Task<IActionResult> Update(
+            int id,
+            [FromBody] RootFolder request,
+            [FromQuery] bool moveFiles = false,
+            [FromQuery] bool deleteEmptySource = true,
+            CancellationToken cancellationToken = default)
         {
             if (id != request.Id) return BadRequest(new { message = "Id mismatch" });
             try
             {
-                var updated = await _service.UpdateAsync(request, moveFiles, deleteEmptySource);
-                return Ok(updated);
+                var existing = await _service.GetByIdAsync(id);
+                if (existing == null)
+                {
+                    return NotFound(new { message = "Root folder not found" });
+                }
+
+                var persistedSourceSemantics =
+                    RootFolderPathSemantics.ResolvePersisted(existing)?.Semantics;
+                var normalizedRequestedPath = FileUtils.NormalizeRootFolderPathForStorage(request.Path);
+                var pathChanged = persistedSourceSemantics == null
+                    || !FileSystemPathIdentity.AreEquivalent(
+                        existing.Path,
+                        normalizedRequestedPath,
+                        persistedSourceSemantics.Value);
+                if (!pathChanged)
+                {
+                    request.Path = existing.Path;
+                    var updatedMetadata = await _service.UpdateAsync(request);
+                    return Ok(await MapAsync(updatedMetadata));
+                }
+
+                var relocation = await _relocationService.StartAsync(
+                    id,
+                    new RootFolderPathChangeCommand(
+                        normalizedRequestedPath,
+                        moveFiles
+                            ? RootFolderRelocationMode.Relocate
+                            : RootFolderRelocationMode.MetadataOnly,
+                        deleteEmptySource,
+                        request.Name,
+                        request.IsDefault,
+                        request.CaseSensitivityMode),
+                    cancellationToken);
+                if (relocation.Status is RootFolderRelocationStatus.Completed
+                    or RootFolderRelocationStatus.NeedsAttention)
+                {
+                    var updated = await _service.GetByIdAsync(id)
+                        ?? throw new KeyNotFoundException("Root folder not found");
+                    return Ok(await MapAsync(updated));
+                }
+
+                return AcceptedAtRoute(
+                    "GetRootFolderRelocation",
+                    new { id = relocation.RelocationId },
+                    relocation);
             }
             catch (KeyNotFoundException ex)
             {
                 return NotFound(new { message = ex.Message });
+            }
+            catch (ArgumentException ex)
+            {
+                return BadRequest(new { message = ex.Message });
             }
             catch (InvalidOperationException ex)
             {
@@ -399,6 +448,8 @@ namespace Listenarr.Api.Features.Library
                 root.ResolvedCaseSensitivity.ToString(),
                 root.PathIdentityState.ToString(),
                 root.PathIdentityKey,
+                root.CreatedAt,
+                root.UpdatedAt,
                 active);
         }
     }

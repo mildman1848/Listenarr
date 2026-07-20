@@ -1,6 +1,10 @@
+using Listenarr.Tests.Common;
+
 namespace Listenarr.Tests.Features.Domain.Utils;
 
-public sealed class FileSystemPathIdentityTests
+[Trait("Name", "FileSystemPathIdentityTests")]
+[Trait("Category", "Domain")]
+public sealed class FileSystemPathIdentityTests : BaseTests
 {
     [Fact]
     public void UnixIdentity_PreservesLiteralBackslash()

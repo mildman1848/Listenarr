@@ -15,14 +15,20 @@
  * You should have received a copy of the GNU Affero General Public License
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
+using System.Text.Json;
+using Listenarr.Tests.Common;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.OpenApi;
+using Swashbuckle.AspNetCore.Swagger;
 using Listenarr.Infrastructure.Persistence.Repositories;
 using AppRootFoldersController = Listenarr.Api.Features.Library.RootFoldersController;
 using RootFoldersController = Listenarr.Tests.Features.Api.Features.Library.RootFoldersControllerTestAdapter;
 
 namespace Listenarr.Tests.Features.Api.Features.Library
 {
-    public class RootFoldersControllerTests
+    [Trait("Name", "RootFoldersControllerTests")]
+    [Trait("Category", "Api")]
+    public sealed class RootFoldersControllerTests : BaseTests
     {
         private class FakeUnmatchedQueue : IUnmatchedScanQueueService
         {
@@ -129,10 +135,26 @@ namespace Listenarr.Tests.Features.Api.Features.Library
         [Fact]
         public async Task GetAll_ReturnsAll()
         {
+            var createdAt = new DateTime(2026, 7, 20, 12, 0, 0, DateTimeKind.Utc);
+            var updatedAt = createdAt.AddMinutes(5);
             var svc = new FakeService();
             svc.Store.AddRange(new[] {
-                new RootFolder { Id = 1, Name = "Root1", Path = FileUtils.GetAbsolutePath("root1") },
-                new RootFolder { Id = 2, Name = "Root2", Path = FileUtils.GetAbsolutePath("root2") }
+                new RootFolder
+                {
+                    Id = 1,
+                    Name = "Root1",
+                    Path = FileUtils.GetAbsolutePath("root1"),
+                    CreatedAt = createdAt,
+                    UpdatedAt = null
+                },
+                new RootFolder
+                {
+                    Id = 2,
+                    Name = "Root2",
+                    Path = FileUtils.GetAbsolutePath("root2"),
+                    CreatedAt = createdAt,
+                    UpdatedAt = updatedAt
+                }
             });
 
             var _db = CreateDb();
@@ -147,6 +169,83 @@ namespace Listenarr.Tests.Features.Api.Features.Library
                 item => Assert.Equal(
                     OperatingSystem.IsWindows() ? "Windows" : "Unix",
                     item.PathSyntax));
+            Assert.Equal(createdAt, list[0].CreatedAt);
+            Assert.Null(list[0].UpdatedAt);
+            Assert.Equal(createdAt, list[1].CreatedAt);
+            Assert.Equal(updatedAt, list[1].UpdatedAt);
+        }
+
+        [Fact]
+        public void OpenApi_PreservesLegacyPutRouteAndTimestampContract()
+        {
+            using var factory = new Listenarr.Tests.Mocks.ListenarrWebApplicationFactory();
+            var swaggerDocument = factory.Services
+                .GetRequiredService<ISwaggerProvider>()
+                .GetSwagger("v1");
+            using var textWriter = new StringWriter();
+            var writer = new OpenApiJsonWriter(textWriter);
+            swaggerDocument.SerializeAs(OpenApiSpecVersion.OpenApi3_0, writer);
+            using var document = JsonDocument.Parse(textWriter.ToString());
+            var root = document.RootElement;
+            var rootFolderPath = root
+                .GetProperty("paths")
+                .GetProperty("/api/v1/rootfolders/{id}");
+            var put = rootFolderPath.GetProperty("put");
+            var requestSchemaReference = put
+                .GetProperty("requestBody")
+                .GetProperty("content")
+                .GetProperty("application/json")
+                .GetProperty("schema")
+                .GetProperty("$ref")
+                .GetString();
+            const string schemaReferencePrefix = "#/components/schemas/";
+            Assert.NotNull(requestSchemaReference);
+            Assert.StartsWith(schemaReferencePrefix, requestSchemaReference, StringComparison.Ordinal);
+            var schemaName = requestSchemaReference[schemaReferencePrefix.Length..];
+            Assert.EndsWith(
+                $".{nameof(RootFolder)}",
+                schemaName,
+                StringComparison.Ordinal);
+
+            var schema = root
+                .GetProperty("components")
+                .GetProperty("schemas")
+                .GetProperty(schemaName);
+            var properties = schema.GetProperty("properties");
+            var createdAt = properties.GetProperty("createdAt");
+            Assert.Equal("string", createdAt.GetProperty("type").GetString());
+            Assert.Equal("date-time", createdAt.GetProperty("format").GetString());
+            Assert.False(
+                createdAt.TryGetProperty("nullable", out var createdAtNullable)
+                && createdAtNullable.GetBoolean());
+
+            var updatedAt = properties.GetProperty("updatedAt");
+            Assert.Equal("string", updatedAt.GetProperty("type").GetString());
+            Assert.Equal("date-time", updatedAt.GetProperty("format").GetString());
+            Assert.True(updatedAt.GetProperty("nullable").GetBoolean());
+
+            var createRequestSchemaReference = root
+                .GetProperty("paths")
+                .GetProperty("/api/v1/rootfolders")
+                .GetProperty("post")
+                .GetProperty("requestBody")
+                .GetProperty("content")
+                .GetProperty("application/json")
+                .GetProperty("schema")
+                .GetProperty("$ref")
+                .GetString();
+            Assert.Equal(requestSchemaReference, createRequestSchemaReference);
+        }
+
+        [Fact]
+        public void Update_IsExposedAsLegacyPutAction()
+        {
+            var method = typeof(AppRootFoldersController).GetMethod(nameof(AppRootFoldersController.Update));
+
+            Assert.NotNull(method);
+            var put = Assert.Single(method.GetCustomAttributes(typeof(Microsoft.AspNetCore.Mvc.HttpPutAttribute), inherit: true));
+            Assert.Equal("{id}", ((Microsoft.AspNetCore.Mvc.HttpPutAttribute)put).Template);
+            Assert.Empty(method.GetCustomAttributes(typeof(Microsoft.AspNetCore.Mvc.NonActionAttribute), inherit: true));
         }
 
         [Fact]
@@ -162,6 +261,38 @@ namespace Listenarr.Tests.Features.Api.Features.Library
         }
 
         [Fact]
+        public async Task Create_LegacyRootFolderBody_IgnoresClientManagedIdentityAndTimestamps()
+        {
+            var svc = new FakeService();
+            var db = CreateDb();
+            var controller = new RootFoldersController(
+                svc,
+                _fakeQueue,
+                new EfAudiobookFileRepository(db),
+                new AudiobookRepository(db),
+                new LocalFileSystem());
+            var clientCreatedAt = new DateTime(2001, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+            var clientUpdatedAt = clientCreatedAt.AddDays(1);
+
+            var result = await controller.Create(new RootFolder
+            {
+                Id = 999,
+                Name = "Legacy Create",
+                Path = FileUtils.GetAbsolutePath("legacy-create"),
+                IsDefault = true,
+                CreatedAt = clientCreatedAt,
+                UpdatedAt = clientUpdatedAt
+            });
+
+            var created = Assert.IsType<Microsoft.AspNetCore.Mvc.CreatedAtActionResult>(result);
+            var payload = Assert.IsType<RootFolderDto>(created.Value);
+            Assert.Equal(1, payload.Id);
+            Assert.NotEqual(clientCreatedAt, payload.CreatedAt);
+            Assert.Null(payload.UpdatedAt);
+            Assert.True(payload.IsDefault);
+        }
+
+        [Fact]
         public async Task Create_DuplicatePath_ReturnsBadRequest()
         {
             var svc = new FakeService();
@@ -169,11 +300,13 @@ namespace Listenarr.Tests.Features.Api.Features.Library
             var _db = CreateDb();
             var controller = new RootFoldersController(svc, _fakeQueue, new EfAudiobookFileRepository(_db), new AudiobookRepository(_db), new LocalFileSystem());
 
-            var req = new RootFolderCreateRequest(
-                "New",
-                FileUtils.GetAbsolutePath("dup"),
-                false,
-                FileSystemCaseSensitivityMode.Auto);
+            var req = new RootFolder
+            {
+                Name = "New",
+                Path = FileUtils.GetAbsolutePath("dup"),
+                IsDefault = false,
+                CaseSensitivityMode = FileSystemCaseSensitivityMode.Auto
+            };
             var res = await controller.Create(req);
 
             var bad = Assert.IsType<Microsoft.AspNetCore.Mvc.BadRequestObjectResult>(res);
@@ -192,6 +325,381 @@ namespace Listenarr.Tests.Features.Api.Features.Library
 
             var bad = Assert.IsType<Microsoft.AspNetCore.Mvc.BadRequestObjectResult>(res);
             Assert.Contains("Id mismatch", bad.Value.ToString(), StringComparison.OrdinalIgnoreCase);
+        }
+
+        [Fact]
+        public async Task Update_DistinctPath_UsesDurableMetadataOnlyCompatibilityAdapter()
+        {
+            var sourcePath = FileUtils.GetAbsolutePath("legacy-source");
+            var targetPath = FileUtils.GetAbsolutePath("legacy-target");
+            var svc = new FakeService();
+            svc.Store.Add(new RootFolder
+            {
+                Id = 1,
+                Name = "Old Name",
+                Path = sourcePath,
+                CreatedAt = new DateTime(2026, 7, 20, 12, 0, 0, DateTimeKind.Utc)
+            });
+            var relocationService = new Mock<IRootFolderRelocationService>();
+            relocationService.Setup(service => service.StartAsync(
+                    1,
+                    It.IsAny<RootFolderPathChangeCommand>(),
+                    It.IsAny<CancellationToken>()))
+                .Callback<int, RootFolderPathChangeCommand, CancellationToken>((_, command, _) =>
+                {
+                    var root = svc.Store.Single();
+                    root.Path = command.TargetPath;
+                    root.Name = command.DesiredName;
+                    root.IsDefault = command.DesiredIsDefault;
+                    root.CaseSensitivityMode = command.TargetCaseSensitivityMode;
+                    root.UpdatedAt = DateTime.UtcNow;
+                })
+                .ReturnsAsync(new RootFolderPathChangeResult(
+                    null,
+                    1,
+                    sourcePath,
+                    targetPath,
+                    RootFolderRelocationStatus.Completed,
+                    0,
+                    0,
+                    null));
+            var db = CreateDb();
+            var controller = new RootFoldersController(
+                svc,
+                _fakeQueue,
+                new EfAudiobookFileRepository(db),
+                new AudiobookRepository(db),
+                new LocalFileSystem(),
+                relocationService: relocationService.Object);
+            var request = new RootFolder
+            {
+                Id = 1,
+                Name = "New Name",
+                Path = targetPath,
+                IsDefault = true,
+                CaseSensitivityMode = FileSystemCaseSensitivityMode.Insensitive
+            };
+
+            var result = await controller.Update(
+                1,
+                request,
+                moveFiles: false,
+                deleteEmptySource: false);
+
+            var ok = Assert.IsType<Microsoft.AspNetCore.Mvc.OkObjectResult>(result);
+            var payload = Assert.IsType<RootFolderDto>(ok.Value);
+            Assert.Equal(targetPath, payload.Path);
+            Assert.Equal("New Name", payload.Name);
+            Assert.True(payload.IsDefault);
+            Assert.NotNull(payload.UpdatedAt);
+            relocationService.Verify(service => service.StartAsync(
+                1,
+                It.Is<RootFolderPathChangeCommand>(command =>
+                    command.TargetPath == targetPath
+                    && command.Mode == RootFolderRelocationMode.MetadataOnly
+                    && !command.DeleteEmptySource
+                    && command.DesiredName == "New Name"
+                    && command.DesiredIsDefault
+                    && command.TargetCaseSensitivityMode == FileSystemCaseSensitivityMode.Insensitive),
+                It.IsAny<CancellationToken>()), Times.Once);
+        }
+
+        [Fact]
+        public async Task Update_InvalidPersistedSourceSyntax_StillAllowsMetadataRepairThroughDurableWorkflow()
+        {
+            var invalidSourcePath = "invalid::legacy-root";
+            var targetPath = FileUtils.GetAbsolutePath("legacy-repaired-root");
+            var svc = new FakeService();
+            svc.Store.Add(new RootFolder
+            {
+                Id = 1,
+                Name = "Legacy Root",
+                Path = invalidSourcePath
+            });
+            var semanticsResolver = new Mock<IFileSystemSemanticsResolver>();
+            semanticsResolver.Setup(resolver => resolver.ResolveAsync(
+                    invalidSourcePath,
+                    It.IsAny<FileSystemCaseSensitivityMode>(),
+                    It.IsAny<CancellationToken>()))
+                .ThrowsAsync(new ArgumentException("invalid legacy source"));
+            semanticsResolver.Setup(resolver => resolver.ResolveAsync(
+                    targetPath,
+                    It.IsAny<FileSystemCaseSensitivityMode>(),
+                    It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new FileSystemSemanticsResolution(
+                    FileSystemPathSemantics.CurrentHostDefault,
+                    PathIdentityState.Valid,
+                    Path.GetPathRoot(targetPath) ?? targetPath));
+            var relocationService = new Mock<IRootFolderRelocationService>();
+            relocationService.Setup(service => service.StartAsync(
+                    1,
+                    It.IsAny<RootFolderPathChangeCommand>(),
+                    It.IsAny<CancellationToken>()))
+                .Callback<int, RootFolderPathChangeCommand, CancellationToken>((_, command, _) =>
+                {
+                    svc.Store.Single().Path = command.TargetPath;
+                })
+                .ReturnsAsync(new RootFolderPathChangeResult(
+                    null,
+                    1,
+                    invalidSourcePath,
+                    targetPath,
+                    RootFolderRelocationStatus.Completed,
+                    0,
+                    0,
+                    null));
+            var db = CreateDb();
+            var controller = new RootFoldersController(
+                svc,
+                _fakeQueue,
+                new EfAudiobookFileRepository(db),
+                new AudiobookRepository(db),
+                new LocalFileSystem(),
+                semanticsResolver.Object,
+                relocationService.Object);
+
+            var result = await controller.Update(
+                1,
+                new RootFolder
+                {
+                    Id = 1,
+                    Name = "Repaired Root",
+                    Path = targetPath
+                },
+                moveFiles: false);
+
+            var ok = Assert.IsType<Microsoft.AspNetCore.Mvc.OkObjectResult>(result);
+            Assert.Equal(targetPath, Assert.IsType<RootFolderDto>(ok.Value).Path);
+            relocationService.Verify(service => service.StartAsync(
+                1,
+                It.Is<RootFolderPathChangeCommand>(command =>
+                    command.Mode == RootFolderRelocationMode.MetadataOnly
+                    && command.TargetPath == targetPath),
+                It.IsAny<CancellationToken>()), Times.Once);
+        }
+
+        [Fact]
+        public async Task Update_DistinctPathWithMoveFiles_ReturnsAcceptedAndUsesRelocateMode()
+        {
+            var sourcePath = FileUtils.GetAbsolutePath("legacy-physical-source");
+            var targetPath = FileUtils.GetAbsolutePath("legacy-physical-target");
+            var relocationId = Guid.NewGuid();
+            var svc = new FakeService();
+            svc.Store.Add(new RootFolder
+            {
+                Id = 1,
+                Name = "Root",
+                Path = sourcePath
+            });
+            var relocationService = new Mock<IRootFolderRelocationService>();
+            relocationService.Setup(service => service.StartAsync(
+                    1,
+                    It.IsAny<RootFolderPathChangeCommand>(),
+                    It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new RootFolderPathChangeResult(
+                    relocationId,
+                    1,
+                    sourcePath,
+                    targetPath,
+                    RootFolderRelocationStatus.Pending,
+                    1,
+                    0,
+                    null));
+            var db = CreateDb();
+            var controller = new RootFoldersController(
+                svc,
+                _fakeQueue,
+                new EfAudiobookFileRepository(db),
+                new AudiobookRepository(db),
+                new LocalFileSystem(),
+                relocationService: relocationService.Object);
+
+            var result = await controller.Update(
+                1,
+                new RootFolder
+                {
+                    Id = 1,
+                    Name = "Root",
+                    Path = targetPath
+                },
+                moveFiles: true,
+                deleteEmptySource: true);
+
+            var accepted = Assert.IsType<Microsoft.AspNetCore.Mvc.AcceptedAtRouteResult>(result);
+            Assert.Equal("GetRootFolderRelocation", accepted.RouteName);
+            Assert.Equal(relocationId, accepted.RouteValues!["id"]);
+            relocationService.Verify(service => service.StartAsync(
+                1,
+                It.Is<RootFolderPathChangeCommand>(command =>
+                    command.Mode == RootFolderRelocationMode.Relocate
+                    && command.DeleteEmptySource
+                    && command.TargetPath == targetPath),
+                It.IsAny<CancellationToken>()), Times.Once);
+        }
+
+        [Fact]
+        public async Task Update_CaseOnlyEditOnInsensitivePersistedRoot_PreservesCanonicalSpelling()
+        {
+            var sourcePath = FileUtils.GetAbsolutePath("LegacyCaseRoot");
+            var targetPath = sourcePath.ToLowerInvariant();
+            var svc = new FakeService();
+            svc.Store.Add(new RootFolder
+            {
+                Id = 1,
+                Name = "Root",
+                Path = sourcePath,
+                CaseSensitivityMode = FileSystemCaseSensitivityMode.Insensitive
+            });
+            var relocationService = new Mock<IRootFolderRelocationService>();
+            var db = CreateDb();
+            var controller = new RootFoldersController(
+                svc,
+                _fakeQueue,
+                new EfAudiobookFileRepository(db),
+                new AudiobookRepository(db),
+                new LocalFileSystem(),
+                relocationService: relocationService.Object);
+
+            var result = await controller.Update(
+                1,
+                new RootFolder
+                {
+                    Id = 1,
+                    Name = "Renamed",
+                    Path = targetPath,
+                    CaseSensitivityMode = FileSystemCaseSensitivityMode.Sensitive
+                });
+
+            var ok = Assert.IsType<Microsoft.AspNetCore.Mvc.OkObjectResult>(result);
+            var payload = Assert.IsType<RootFolderDto>(ok.Value);
+            Assert.Equal(sourcePath, payload.Path);
+            Assert.Equal("Renamed", payload.Name);
+            relocationService.Verify(service => service.StartAsync(
+                It.IsAny<int>(),
+                It.IsAny<RootFolderPathChangeCommand>(),
+                It.IsAny<CancellationToken>()), Times.Never);
+        }
+
+        [Fact]
+        public async Task Update_AutoRootUsesPersistedSensitiveResolutionInsteadOfFreshInsensitiveProbe()
+        {
+            var sourcePath = FileUtils.GetAbsolutePath("PersistedAutoSensitiveRoot");
+            var targetPath = sourcePath.ToLowerInvariant();
+            var svc = new FakeService();
+            svc.Store.Add(new RootFolder
+            {
+                Id = 1,
+                Name = "Root",
+                Path = sourcePath,
+                CaseSensitivityMode = FileSystemCaseSensitivityMode.Auto,
+                ResolvedCaseSensitivity = FileSystemCaseSensitivity.Sensitive
+            });
+            var relocationService = new Mock<IRootFolderRelocationService>();
+            relocationService.Setup(service => service.StartAsync(
+                    1,
+                    It.IsAny<RootFolderPathChangeCommand>(),
+                    It.IsAny<CancellationToken>()))
+                .Callback<int, RootFolderPathChangeCommand, CancellationToken>((_, command, _) =>
+                {
+                    svc.Store.Single().Path = command.TargetPath;
+                })
+                .ReturnsAsync(new RootFolderPathChangeResult(
+                    null,
+                    1,
+                    sourcePath,
+                    targetPath,
+                    RootFolderRelocationStatus.Completed,
+                    0,
+                    0,
+                    null));
+            var db = CreateDb();
+            var controller = new RootFoldersController(
+                svc,
+                _fakeQueue,
+                new EfAudiobookFileRepository(db),
+                new AudiobookRepository(db),
+                new LocalFileSystem(),
+                BuildSemanticsResolver(FileSystemCaseSensitivity.Insensitive),
+                relocationService.Object);
+
+            var result = await controller.Update(
+                1,
+                new RootFolder
+                {
+                    Id = 1,
+                    Name = "Root",
+                    Path = targetPath,
+                    CaseSensitivityMode = FileSystemCaseSensitivityMode.Auto
+                });
+
+            var ok = Assert.IsType<Microsoft.AspNetCore.Mvc.OkObjectResult>(result);
+            Assert.Equal(targetPath, Assert.IsType<RootFolderDto>(ok.Value).Path);
+            relocationService.Verify(service => service.StartAsync(
+                1,
+                It.Is<RootFolderPathChangeCommand>(command =>
+                    command.TargetPath == targetPath
+                    && command.Mode == RootFolderRelocationMode.MetadataOnly),
+                It.IsAny<CancellationToken>()), Times.Once);
+        }
+
+        [Fact]
+        public async Task Update_CaseOnlyEditOnSensitivePersistedRoot_UsesRelocation()
+        {
+            var sourcePath = FileUtils.GetAbsolutePath("LegacySensitiveRoot");
+            var targetPath = sourcePath.ToLowerInvariant();
+            var svc = new FakeService();
+            svc.Store.Add(new RootFolder
+            {
+                Id = 1,
+                Name = "Root",
+                Path = sourcePath,
+                CaseSensitivityMode = FileSystemCaseSensitivityMode.Sensitive
+            });
+            var relocationService = new Mock<IRootFolderRelocationService>();
+            relocationService.Setup(service => service.StartAsync(
+                    1,
+                    It.IsAny<RootFolderPathChangeCommand>(),
+                    It.IsAny<CancellationToken>()))
+                .Callback<int, RootFolderPathChangeCommand, CancellationToken>((_, command, _) =>
+                {
+                    svc.Store.Single().Path = command.TargetPath;
+                })
+                .ReturnsAsync(new RootFolderPathChangeResult(
+                    null,
+                    1,
+                    sourcePath,
+                    targetPath,
+                    RootFolderRelocationStatus.Completed,
+                    0,
+                    0,
+                    null));
+            var db = CreateDb();
+            var controller = new RootFoldersController(
+                svc,
+                _fakeQueue,
+                new EfAudiobookFileRepository(db),
+                new AudiobookRepository(db),
+                new LocalFileSystem(),
+                relocationService: relocationService.Object);
+
+            var result = await controller.Update(
+                1,
+                new RootFolder
+                {
+                    Id = 1,
+                    Name = "Root",
+                    Path = targetPath,
+                    CaseSensitivityMode = FileSystemCaseSensitivityMode.Insensitive
+                });
+
+            var ok = Assert.IsType<Microsoft.AspNetCore.Mvc.OkObjectResult>(result);
+            Assert.Equal(targetPath, Assert.IsType<RootFolderDto>(ok.Value).Path);
+            relocationService.Verify(service => service.StartAsync(
+                1,
+                It.Is<RootFolderPathChangeCommand>(command =>
+                    command.TargetPath == targetPath
+                    && command.Mode == RootFolderRelocationMode.MetadataOnly),
+                It.IsAny<CancellationToken>()), Times.Once);
         }
 
         [Fact]

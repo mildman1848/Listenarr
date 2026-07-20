@@ -1165,6 +1165,11 @@ namespace Listenarr.Infrastructure.Persistence.Migrations
 
                     b.HasKey("Id");
 
+                    b.HasIndex("IsDefault")
+                        .IsUnique()
+                        .HasDatabaseName("IX_RootFolders_SingleDefault")
+                        .HasFilter("\"IsDefault\" = 1");
+
                     b.HasIndex("Name");
 
                     b.HasIndex("Path")

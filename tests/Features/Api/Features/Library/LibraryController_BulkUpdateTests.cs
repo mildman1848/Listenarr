@@ -22,7 +22,9 @@ using Microsoft.AspNetCore.Mvc;
 
 namespace Listenarr.Tests.Features.Api.Features.Library
 {
-    public class LibraryController_BulkUpdateTests : BaseTests
+    [Trait("Name", "LibraryController_BulkUpdateTests")]
+    [Trait("Category", "LibraryController")]
+    public sealed class LibraryController_BulkUpdateTests : BaseTests
     {
         [Fact]
         public async Task BulkUpdate_InvalidRootFolderStillAppliesValidMetadataUpdates()
@@ -54,6 +56,52 @@ namespace Listenarr.Tests.Features.Api.Features.Library
             var stored = await GetFreshAudiobookAsync(audiobook.Id);
             Assert.NotNull(stored);
             Assert.True(stored.Monitored);
+        }
+
+        [Fact]
+        public async Task BulkUpdate_CustomRootOutsideConfiguredBoundaries_IsRejectedWithoutPathRewrite()
+        {
+            var configuredRoot = FileService.GetTempDirectory("bulk-configured-root");
+            var outsideRoot = FileService.GetTempDirectory("bulk-outside-root");
+            await _applicationSettingsRepository.SaveAsync(new ApplicationSettingsBuilder()
+                .WithOutputPath(configuredRoot)
+                .WithFileNamingPattern("{Author}/{Title}")
+                .Build());
+            var originalBasePath = Path.Join(configuredRoot, "Existing", "Book");
+            var audiobook = await _audiobookRepository.AddAsync(new Audiobook
+            {
+                Title = "Boundary Test",
+                Authors = ["Author"],
+                Monitored = false,
+                BasePath = originalBasePath
+            });
+
+            var actionResult = await _provider.GetRequiredService<LibraryController>()
+                .BulkUpdateAudiobooks(new LibraryController.BulkUpdateRequest
+                {
+                    Ids = [audiobook.Id],
+                    Updates = new Dictionary<string, object>
+                    {
+                        ["monitored"] = true,
+                        ["rootFolder"] = outsideRoot
+                    }
+                });
+
+            var ok = Assert.IsType<OkObjectResult>(actionResult);
+            var json = JsonSerializer.Serialize(ok.Value);
+            using var document = JsonDocument.Parse(json);
+            var result = Assert.Single(document.RootElement.GetProperty("results").EnumerateArray());
+            Assert.True(result.GetProperty("success").GetBoolean());
+            Assert.Contains(
+                result.GetProperty("errors").EnumerateArray(),
+                error => error.GetString()?.Contains(
+                    "configured root folder or output path",
+                    StringComparison.OrdinalIgnoreCase) == true);
+
+            var stored = await GetFreshAudiobookAsync(audiobook.Id);
+            Assert.NotNull(stored);
+            Assert.True(stored.Monitored);
+            Assert.Equal(originalBasePath, stored.BasePath);
         }
 
         [Fact]

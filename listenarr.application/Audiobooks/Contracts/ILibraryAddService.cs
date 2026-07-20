@@ -56,6 +56,12 @@ namespace Listenarr.Application.Audiobooks.Contracts
 
         public string? ValidationMessage { get; set; }
 
+        public string? ValidationCode { get; set; }
+
+        public string? ValidationField { get; set; }
+
+        public string? ResolvedDestination { get; set; }
+
         public Audiobook? Audiobook { get; set; }
     }
 }

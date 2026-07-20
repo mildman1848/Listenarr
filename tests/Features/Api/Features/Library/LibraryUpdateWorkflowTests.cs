@@ -11,11 +11,14 @@
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Logging.Abstractions;
 
+using Listenarr.Tests.Common;
+
 namespace Listenarr.Tests.Features.Api.Features.Library;
 
+[Trait("Name", "LibraryUpdateWorkflowTests")]
 [Trait("Area", "LibraryApi")]
 [Trait("Category", "LibraryController")]
-public sealed class LibraryUpdateWorkflowTests
+public sealed class LibraryUpdateWorkflowTests : BaseTests
 {
     [Fact]
     public async Task UpdateAsync_DestinationOnlyRewrite_DoesNotIssueMetadataWrite()

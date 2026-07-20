@@ -1,9 +1,13 @@
 using System.Data.Common;
 using Microsoft.EntityFrameworkCore;
 
+using Listenarr.Tests.Common;
+
 namespace Listenarr.Tests.Features.Infrastructure.Library.Moving;
 
-public sealed class EfMoveExecutionStoreTests
+[Trait("Name", "EfMoveExecutionStoreTests")]
+[Trait("Category", "Infrastructure")]
+public sealed class EfMoveExecutionStoreTests : BaseTests
 {
     [Fact]
     public async Task ProviderFailures_AreTranslatedAcrossMoveExecutionBoundary()

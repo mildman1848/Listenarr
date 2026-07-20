@@ -16,6 +16,7 @@ public partial class FileMover
         out string reason)
     {
         reason = string.Empty;
+        BeforeDirectoryTreePreflightForTest?.Invoke();
         if (!FileSystemSafety.TryEnumerateTreeWithoutLinks(
                 sourceRoot,
                 out var sourceFiles,
