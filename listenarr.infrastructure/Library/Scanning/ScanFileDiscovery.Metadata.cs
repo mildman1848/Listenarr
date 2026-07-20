@@ -111,8 +111,8 @@ internal static partial class ScanFileDiscovery
             canonicalRoot,
             semantics))
         {
-            var segment = NormalizeMetadataToken(Path.GetFileName(ancestor));
-            if (!titleTokens.Contains(segment))
+            var segment = Path.GetFileName(ancestor);
+            if (!SegmentMatchesExpectedTitle(segment, titleTokens))
             {
                 continue;
             }
@@ -133,6 +133,24 @@ internal static partial class ScanFileDiscovery
         }
 
         return null;
+    }
+
+    private static bool SegmentMatchesExpectedTitle(
+        string segment,
+        IReadOnlySet<string> titleTokens)
+    {
+        var normalizedSegment = NormalizeMetadataToken(segment);
+        if (titleTokens.Contains(normalizedSegment))
+        {
+            return true;
+        }
+
+        return segment
+            .Split(
+                [" - ", " – ", " — "],
+                StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Select(NormalizeMetadataToken)
+            .Any(titleTokens.Contains);
     }
 
     private static string? TryFindIdentifierBoundary(
