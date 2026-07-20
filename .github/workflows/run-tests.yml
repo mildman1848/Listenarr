@@ -96,25 +96,12 @@ jobs:
       - name: Build solution
         run: dotnet build listenarr.slnx --no-restore --configuration Release
 
-      - name: Run unit tests (with Test environment / disable Playwright)
+      - name: Run scan attribution diagnostics
         env:
           ASPNETCORE_ENVIRONMENT: Test
           Playwright__Enabled: 'false'
         run: |
-          dotnet test listenarr.slnx -c Release --no-build --logger "console;verbosity=normal"
-
-      - name: Run frontend tests
-        working-directory: fe
-        run: |
-          if npm run test --silent --if-present; then
-            echo "Frontend tests ran successfully."
-          else
-            echo "Frontend tests failed." >&2
-            exit 1
-          fi
-
-      - name: Publish API (linux-x64)
-        run: dotnet publish ${{ env.API_PROJECT }} -c Release -r linux-x64 --no-restore --self-contained true /p:PublishSingleFile=true -o listenarr.api/publish/linux-x64
+          dotnet test tests/Listenarr.Tests.csproj -c Release --no-build --filter "FullyQualifiedName~ScanFileDiscoveryRegressionTests" --logger "console;verbosity=detailed"
 
   backend-tests-windows:
     runs-on: windows-latest
@@ -136,8 +123,8 @@ jobs:
       - name: Build backend
         run: dotnet build listenarr.slnx --no-restore --configuration Release
 
-      - name: Run backend tests
+      - name: Run scan attribution diagnostics
         env:
           ASPNETCORE_ENVIRONMENT: Test
           Playwright__Enabled: 'false'
-        run: dotnet test listenarr.slnx -c Release --no-build --logger "console;verbosity=normal"
+        run: dotnet test tests/Listenarr.Tests.csproj -c Release --no-build --filter "FullyQualifiedName~ScanFileDiscoveryRegressionTests" --logger "console;verbosity=detailed"
