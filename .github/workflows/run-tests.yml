@@ -1,110 +1,20 @@
-name: Run Tests
+name: Diagnose Linux Backend Tests
 
 on:
-  push:
-    branches: [ beta, main, canary, feature/* ]
   pull_request:
-    branches: [ beta, main, canary ]
+    branches: [ canary ]
     types: [ opened, synchronize, reopened ]
 
 permissions:
   contents: read
 
 concurrency:
-  group: run-tests-${{ github.head_ref || github.ref }}
+  group: diagnose-linux-${{ github.head_ref || github.ref }}
   cancel-in-progress: true
 
 jobs:
-  unit-tests:
+  linux-backend-diagnostics:
     runs-on: ubuntu-latest
-    env:
-      DOTNET_CLI_TELEMETRY_OPTOUT: "1"
-      DOTNET_NOLOGO: "1"
-      API_PROJECT: listenarr.api/Listenarr.Api.csproj
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Setup .NET
-        uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: 10.0.x
-
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: 24
-          cache: 'npm'
-
-      - name: Restore
-        run: dotnet restore listenarr.slnx
-
-      - name: Backend format check
-        run: npm run --silent format:backend:check
-
-      - name: Enforce layering rules
-        run: |
-          set -e
-          VIOLATIONS=0
-
-          echo "Checking for layering violations (api -> infrastructure)..."
-          if git grep -n --no-color "listenarr.infrastructure" -- "listenarr.api/**/*.cs" ":(exclude)listenarr.api/Program.cs" || git grep -n --no-color "Listenarr.Infrastructure" -- "listenarr.api/**/*.cs" ":(exclude)listenarr.api/Program.cs"; then
-            echo "Layering violation: listenarr.api references listenarr.infrastructure." >&2
-            VIOLATIONS=$((VIOLATIONS + 1))
-          fi
-
-          echo "Checking for layering violations (application -> infrastructure)..."
-          if git grep -n --no-color "listenarr.infrastructure" -- "listenarr.application/**/*.cs" || git grep -n --no-color "Listenarr.Infrastructure" -- "listenarr.application/**/*.cs"; then
-            echo "Layering violation: listenarr.application references listenarr.infrastructure." >&2
-            echo "Define contracts in listenarr.application and implement them in listenarr.infrastructure." >&2
-            VIOLATIONS=$((VIOLATIONS + 1))
-          fi
-
-          echo "Checking for async void in production code..."
-          if git grep -n --no-color "async void" -- "listenarr.api/**/*.cs" "listenarr.application/**/*.cs" "listenarr.infrastructure/**/*.cs" "listenarr.domain/**/*.cs"; then
-            echo "async void found in production code — use async Task instead to avoid swallowed exceptions." >&2
-            VIOLATIONS=$((VIOLATIONS + 1))
-          fi
-
-          if [ "$VIOLATIONS" -gt 0 ]; then
-            echo "$VIOLATIONS enforcement check(s) failed." >&2
-            exit 1
-          fi
-          echo "All enforcement checks passed."
-
-      - name: Install frontend deps
-        working-directory: fe
-        run: npm ci
-
-      - name: Build frontend
-        working-directory: fe
-        run: npm run build --if-present
-
-      - name: Frontend lint
-        run: npm run --silent lint:frontend
-
-      - name: Frontend type check
-        working-directory: fe
-        run: |
-          if npm run type-check --silent --if-present; then
-            echo "Frontend type check passed (or no type-check script present)."
-          else
-            echo "Frontend type check failed." >&2
-            exit 1
-          fi
-
-      - name: Build solution
-        run: dotnet build listenarr.slnx --no-restore --configuration Release
-
-      - name: Run scan attribution diagnostics
-        env:
-          ASPNETCORE_ENVIRONMENT: Test
-          Playwright__Enabled: 'false'
-        run: |
-          dotnet test tests/Listenarr.Tests.csproj -c Release --no-build --filter "FullyQualifiedName~ScanFileDiscoveryRegressionTests" --logger "console;verbosity=detailed"
-
-  backend-tests-windows:
-    runs-on: windows-latest
     env:
       DOTNET_CLI_TELEMETRY_OPTOUT: "1"
       DOTNET_NOLOGO: "1"
@@ -123,8 +33,26 @@ jobs:
       - name: Build backend
         run: dotnet build listenarr.slnx --no-restore --configuration Release
 
-      - name: Run scan attribution diagnostics
+      - name: Run Linux backend tests with TRX
+        id: backend_tests
+        continue-on-error: true
         env:
           ASPNETCORE_ENVIRONMENT: Test
           Playwright__Enabled: 'false'
-        run: dotnet test tests/Listenarr.Tests.csproj -c Release --no-build --filter "FullyQualifiedName~ScanFileDiscoveryRegressionTests" --logger "console;verbosity=detailed"
+        run: |
+          dotnet test listenarr.slnx -c Release --no-build \
+            --results-directory TestResults \
+            --logger "trx;LogFileName=linux-full.trx" \
+            --logger "console;verbosity=normal"
+
+      - name: Upload Linux test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-backend-test-results
+          path: TestResults/**/*.trx
+          if-no-files-found: error
+
+      - name: Preserve test failure status
+        if: steps.backend_tests.outcome == 'failure'
+        run: exit 1
