@@ -84,7 +84,7 @@ public sealed class ScanFileDiscoveryRegressionTests : BaseTests, IDisposable
         var expected = CreateAudioFile(
             "Jules Verne",
             "Jules Verne - Captain Nemo - Twenty Thousand Leagues Under the Sea",
-            "Twenty Thousand Leagues Under the Sea.m4b");
+            "book.m4b");
 
         var found = Discover(Book(
             "Twenty Thousand Leagues Under the Sea",
@@ -162,6 +162,19 @@ public sealed class ScanFileDiscoveryRegressionTests : BaseTests, IDisposable
             "61 - track.mp3");
 
         var found = Discover(Book("Retten die Biber", "Elfie Donnelly"));
+
+        Assert.Empty(found);
+    }
+
+    [Fact]
+    public void Discover_ShortTitle_DoesNotMatchLongerDecoratedFolderComponent()
+    {
+        _ = CreateAudioFile(
+            "Shared Author",
+            "Series - Book Two",
+            "part.m4b");
+
+        var found = Discover(Book("Book", "Shared Author"));
 
         Assert.Empty(found);
     }
