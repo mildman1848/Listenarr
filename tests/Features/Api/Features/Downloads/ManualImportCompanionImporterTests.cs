@@ -48,7 +48,7 @@ public sealed class ManualImportCompanionImporterTests : BaseTests
             };
             var fileService = new Mock<IAudiobookFileService>(MockBehavior.Strict);
             fileService
-                .Setup(service => service.CheckPathOwnershipAsync(
+                .Setup(service => service.CheckAudiobookFileOwnershipAsync(
                     audiobook,
                     It.IsAny<string>(),
                     It.IsAny<string>(),
@@ -155,7 +155,7 @@ public sealed class ManualImportCompanionImporterTests : BaseTests
             };
             var fileService = new Mock<IAudiobookFileService>(MockBehavior.Strict);
             fileService
-                .Setup(service => service.CheckPathOwnershipAsync(
+                .Setup(service => service.CheckAudiobookFileOwnershipAsync(
                     audiobook,
                     It.IsAny<string>(),
                     It.IsAny<string>(),
