@@ -7,6 +7,13 @@ public static class TrackedFilePathIndexBuilder
     public static HashSet<string> Build(
         IEnumerable<AudiobookFile> files,
         IEnumerable<Audiobook> audiobooks,
+        FileSystemPathSemantics comparisonSemantics) =>
+        ResolvePaths(files, audiobooks, comparisonSemantics)
+            .ToHashSet(comparisonSemantics.Comparer);
+
+    public static IReadOnlyList<string> ResolvePaths(
+        IEnumerable<AudiobookFile> files,
+        IEnumerable<Audiobook> audiobooks,
         FileSystemPathSemantics comparisonSemantics)
     {
         ArgumentNullException.ThrowIfNull(files);
@@ -21,7 +28,7 @@ public static class TrackedFilePathIndexBuilder
         var basePaths = audiobookList.ToDictionary(
             audiobook => audiobook.Id,
             audiobook => audiobook.BasePath);
-        var tracked = new HashSet<string>(comparisonSemantics.Comparer);
+        var tracked = new List<string>();
 
         foreach (var file in files)
         {
