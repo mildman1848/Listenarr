@@ -180,7 +180,7 @@ public sealed class ManualImportCompanionImporter
                         "The companion import destination has no parent directory.");
                 if (_audiobookFileService != null && targetAudiobook != null)
                 {
-                    var ownership = await _audiobookFileService.CheckPathOwnershipAsync(
+                    var ownership = await _audiobookFileService.CheckAudiobookFileOwnershipAsync(
                         targetAudiobook,
                         destinationPath,
                         destinationDirectory,
