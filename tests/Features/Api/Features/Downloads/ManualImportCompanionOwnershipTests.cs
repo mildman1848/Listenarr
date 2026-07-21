@@ -76,7 +76,8 @@ public sealed class ManualImportCompanionOwnershipTests : BaseTests
             new LocalFileSystem(),
             semanticsResolver,
             ownershipStore.Object,
-            NullLogger<ManualImportCompanionImporter>.Instance);
+            NullLogger<ManualImportCompanionImporter>.Instance,
+            fileService);
         var tracker = new ManualImportDestinationTracker(
             new LocalFileSystem(),
             semanticsResolver);
