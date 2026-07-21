@@ -15,6 +15,7 @@
  * You should have received a copy of the GNU Affero General Public License
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
+using Listenarr.Application.Audiobooks.Files;
 using Listenarr.Domain.Common;
 using Microsoft.EntityFrameworkCore;
 
@@ -185,8 +186,6 @@ namespace Listenarr.Infrastructure.Persistence.Repositories
                     propertyName => propertyName,
                     propertyName => existingEntry.Property(propertyName).CurrentValue);
                 existingEntry.CurrentValues.SetValues(file);
-                // Metadata updates cannot safely establish a new path or ownership.
-                // Move/rename workflows update those references under their coordinated contracts.
                 existing.AudiobookId = preservedAudiobookId;
                 foreach (var pair in preservedValues)
                 {
@@ -228,10 +227,23 @@ namespace Listenarr.Infrastructure.Persistence.Repositories
 
         public async Task<List<string>> GetAllFilePathsAsync(CancellationToken ct = default)
         {
-            return await _db.AudiobookFiles
-                .Where(f => f.Path != null)
-                .Select(f => f.Path!)
+            var files = await _db.AudiobookFiles
+                .AsNoTracking()
                 .ToListAsync(ct);
+            var audiobooks = await _db.Audiobooks
+                .AsNoTracking()
+                .Select(audiobook => new Audiobook
+                {
+                    Id = audiobook.Id,
+                    BasePath = audiobook.BasePath,
+                    FilePath = audiobook.FilePath
+                })
+                .ToListAsync(ct);
+            return TrackedFilePathIndexBuilder.ResolvePaths(
+                    files,
+                    audiobooks,
+                    FileSystemPathSemantics.CurrentHostDefault)
+                .ToList();
         }
 
         public async Task<List<AudiobookFile>> GetAllAsync(CancellationToken ct = default)
@@ -243,7 +255,6 @@ namespace Listenarr.Infrastructure.Persistence.Repositories
 
         public async Task<List<AudiobookFormatSummary>> GetFormatSummariesAsync(CancellationToken ct = default)
         {
-            // One row per (AudiobookId, Format, Codec, Container) — avoids materialising chapter-level rows
             var rows = await _db.AudiobookFiles
                 .AsNoTracking()
                 .GroupBy(f => new { f.AudiobookId, f.Format, f.Codec, f.Container })
@@ -300,8 +311,6 @@ namespace Listenarr.Infrastructure.Persistence.Repositories
             if (string.IsNullOrWhiteSpace(candidate.CanonicalPath)
                 || candidate.PathSyntax == null)
             {
-                // The lookup key already matched, and the legacy row lacks enough
-                // authoritative detail to prove that the identities are distinct.
                 return true;
             }
 
