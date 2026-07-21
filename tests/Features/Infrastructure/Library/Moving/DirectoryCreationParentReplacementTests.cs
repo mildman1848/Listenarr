@@ -22,6 +22,7 @@ public sealed class DirectoryCreationParentReplacementTests : BaseTests
         Directory.Delete(probe);
 
         var destination = Path.Join(parent, "Book");
+        var semantics = FileSystemPathSemantics.CurrentHostDefault;
         var store = _provider.GetRequiredService<ILibraryDirectoryOwnershipStore>();
         var hookRan = false;
         using var hook = ExclusiveDirectoryCreator.PushBeforeCreateHook(path =>
@@ -42,7 +43,7 @@ public sealed class DirectoryCreationParentReplacementTests : BaseTests
                 store.EnsureCreatedHierarchyAsync(
                     destination,
                     root,
-                    FileSystemPathSemantics.CurrentHostDefault,
+                    semantics,
                     "parent-replacement-regression"));
 
             Assert.True(hookRan);
@@ -51,6 +52,13 @@ public sealed class DirectoryCreationParentReplacementTests : BaseTests
                 external,
                 ".listenarr-directory-owner.json")));
             Assert.False(Directory.Exists(Path.Join(external, "Book")));
+            var resolution = await store.ResolveOwnedAsync(
+                destination,
+                semantics,
+                CancellationToken.None);
+            Assert.Equal(
+                LibraryDirectoryOwnershipResolutionState.Unowned,
+                resolution.State);
         }
         finally
         {
