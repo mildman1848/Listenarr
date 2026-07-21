@@ -80,6 +80,15 @@ public partial class FileMover
         string sourceFile,
         string destinationFile)
     {
+        if (await IsLinkedFilesystemAliasAsync(sourceFile, destinationFile))
+        {
+            _logger.LogWarning(
+                "Blocked file move because source and destination are linked aliases: {Source} -> {Destination}",
+                LogRedaction.SanitizeFilePath(sourceFile),
+                LogRedaction.SanitizeFilePath(destinationFile));
+            return null;
+        }
+
         var sourceIdentity = await ResolveFileMoveLockIdentityAsync(sourceFile);
         var destinationIdentity = await ResolveFileMoveLockIdentityAsync(
             destinationFile);
