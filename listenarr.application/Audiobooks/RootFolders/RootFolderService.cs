@@ -231,11 +231,6 @@ namespace Listenarr.Application.Audiobooks.RootFolders
                 }
                 catch (ArgumentException exception)
                 {
-                    // Legacy/manual databases may contain a root path that is invalid for
-                    // the current host OS, especially after switching between Docker/Linux
-                    // paths and a Windows development host. Do not let that stale row block
-                    // creation of a valid root; identity reconciliation will mark it
-                    // unavailable until the user repairs or deletes it.
                     _logger?.LogWarning(
                         exception,
                         "Skipping root folder {RootFolderId} with invalid stored path while checking root-folder conflicts.",
@@ -257,9 +252,7 @@ namespace Listenarr.Application.Audiobooks.RootFolders
             activeJobs ??= Array.Empty<MoveJob>();
 
             var conflictingJob = activeJobs.FirstOrDefault(job =>
-                job.Status.IsActive() &&
-                (IsMoveJobPathInsideRoot(job.SourcePath, rootPath, semantics) ||
-                 IsMoveJobPathInsideRoot(job.RequestedPath, rootPath, semantics)));
+                MoveJobBoundaryConflict.TouchesBoundary(job, rootPath, semantics));
 
             if (conflictingJob == null)
             {
@@ -268,22 +261,6 @@ namespace Listenarr.Application.Audiobooks.RootFolders
 
             throw new InvalidOperationException(
                 $"Root folder has active move job {conflictingJob.Id}; wait for queued or processing moves touching this root to finish before deleting or reassigning it.");
-        }
-
-        private static bool IsMoveJobPathInsideRoot(
-            string? path,
-            string rootPath,
-            FileSystemPathSemantics semantics)
-        {
-            if (string.IsNullOrWhiteSpace(path))
-            {
-                return false;
-            }
-
-            return FileSystemPathIdentity.IsSameOrInside(
-                path,
-                rootPath,
-                semantics);
         }
 
         private async Task<FileSystemSemanticsResolution> ResolveSemanticsAsync(
