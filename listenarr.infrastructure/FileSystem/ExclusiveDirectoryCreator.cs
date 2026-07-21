@@ -8,10 +8,20 @@ internal static class ExclusiveDirectoryCreator
     private const int ErrorAlreadyExists = 183;
     private const int UnixAlreadyExists = 17;
     private const uint UnixDefaultMode = 0x1FF;
+    private static readonly AsyncLocal<Action<string>?> BeforeCreateHook = new();
+
+    internal static IDisposable PushBeforeCreateHook(Action<string> hook)
+    {
+        ArgumentNullException.ThrowIfNull(hook);
+        var previous = BeforeCreateHook.Value;
+        BeforeCreateHook.Value = hook;
+        return new HookScope(previous);
+    }
 
     public static bool TryCreate(string path)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(path);
+        BeforeCreateHook.Value?.Invoke(path);
         return OperatingSystem.IsWindows()
             ? TryCreateWindows(path)
             : TryCreateUnix(path);
@@ -59,4 +69,20 @@ internal static class ExclusiveDirectoryCreator
     private static extern int CreateDirectoryUnix(
         [MarshalAs(UnmanagedType.LPUTF8Str)] string path,
         uint mode);
+
+    private sealed class HookScope(Action<string>? previous) : IDisposable
+    {
+        private bool _disposed;
+
+        public void Dispose()
+        {
+            if (_disposed)
+            {
+                return;
+            }
+
+            BeforeCreateHook.Value = previous;
+            _disposed = true;
+        }
+    }
 }
