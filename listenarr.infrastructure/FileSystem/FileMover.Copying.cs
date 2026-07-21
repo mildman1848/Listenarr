@@ -115,6 +115,17 @@ namespace Listenarr.Infrastructure.FileSystem
         {
             try
             {
+                if (await IsLinkedFilesystemAliasAsync(sourceFile, destFile))
+                {
+                    LogMutation(
+                        FileMutationOutcome.Blocked,
+                        FileAction.Copy,
+                        sourceFile,
+                        destFile,
+                        "Source and destination are linked aliases of the same file");
+                    return false;
+                }
+
                 if (await IsSameFilesystemPathAsync(sourceFile, destFile))
                 {
                     LogMutation(
@@ -146,6 +157,17 @@ namespace Listenarr.Infrastructure.FileSystem
         {
             try
             {
+                if (await IsLinkedFilesystemAliasAsync(sourceFile, destFile))
+                {
+                    LogMutation(
+                        FileMutationOutcome.Blocked,
+                        FileAction.HardlinkCopy,
+                        sourceFile,
+                        destFile,
+                        "Source and destination are linked aliases of the same file");
+                    return false;
+                }
+
                 if (await IsSameFilesystemPathAsync(sourceFile, destFile))
                 {
                     LogMutation(
@@ -157,7 +179,6 @@ namespace Listenarr.Infrastructure.FileSystem
                     return true;
                 }
 
-                // Ensure destination directory exists
                 var destDir = Path.GetDirectoryName(destFile) ?? string.Empty;
                 if (!string.IsNullOrEmpty(destDir) && !Directory.Exists(destDir))
                 {
@@ -169,11 +190,6 @@ namespace Listenarr.Infrastructure.FileSystem
                     return true;
                 }
 
-                // Safe ordering: hardlink/copy to a temp path first, then atomically rename
-                // onto the destination. This ensures the original destFile is never deleted
-                // until we have a confirmed replacement ready.
-                // Use Path.GetFileName to ensure the random name has no separators (satisfies static analysis).
-                // Use Path.Join (not Path.Combine) to prevent a rooted second arg from silently discarding destDir.
                 var tempDestName = Path.GetFileName(Path.GetRandomFileName()) + ".tmp";
                 var tempDest = Path.Join(destDir, tempDestName);
                 try
@@ -188,7 +204,6 @@ namespace Listenarr.Infrastructure.FileSystem
                     }
                     else
                     {
-                        // Unix/Linux/macOS
                         var result = LinkNative(sourceFile, tempDest);
                         if (result != 0)
                         {
@@ -197,36 +212,28 @@ namespace Listenarr.Infrastructure.FileSystem
                         }
                     }
 
-                    // Hardlink succeeded — atomically replace destination
                     File.Move(tempDest, destFile, overwrite: true);
                     LogMutation(FileMutationOutcome.Success, FileAction.HardlinkCopy, sourceFile, destFile);
                     return true;
                 }
                 catch (Exception linkEx) when (linkEx is not OperationCanceledException && linkEx is not OutOfMemoryException && linkEx is not StackOverflowException)
                 {
-                    // Clean up temp file if hardlink left one behind
                     try { if (File.Exists(tempDest)) File.Delete(tempDest); }
                     catch (Exception cleanupEx) when (cleanupEx is not OperationCanceledException
                                                    && cleanupEx is not OutOfMemoryException
                                                    && cleanupEx is not StackOverflowException)
                     {
-                        /* best-effort temp cleanup */
                     }
 
-                    // Hardlink failed (likely cross-volume or unsupported filesystem)
                     var isCrossDevice = linkEx is IOException ioEx && ioEx.Message.Contains("error code 17");
                     if (!isCrossDevice)
-                        isCrossDevice = linkEx is IOException ioEx2 && ioEx2.Message.Contains("error code 18"); // Unix EXDEV
+                        isCrossDevice = linkEx is IOException ioEx2 && ioEx2.Message.Contains("error code 18");
 
                     if (isCrossDevice)
                         _logger.LogInformation("Hardlink not possible (source and destination are on different drives), falling back to copy: {Source} -> {Dest}", sourceFile, destFile);
                     else
                         _logger.LogWarning(linkEx, "Hardlink failed, falling back to copy: {Source} -> {Dest}", sourceFile, destFile);
 
-                    // Fallback to copy — copy to a temp file first, then atomically rename onto destination
-                    // so the existing file is never overwritten until a complete replacement is confirmed.
-                    // Use Path.GetFileName to strip any separators from GetRandomFileName (satisfies static analysis).
-                    // Use Path.Join (not Path.Combine) to prevent rooted second arg from silently discarding destDir.
                     var tempCopyName = Path.GetFileName(Path.GetRandomFileName()) + ".tmp";
                     var tempCopyPath = Path.Join(destDir, tempCopyName);
                     try
@@ -238,13 +245,11 @@ namespace Listenarr.Infrastructure.FileSystem
                     }
                     finally
                     {
-                        // Best-effort cleanup of temp copy if something went wrong before/after the move
                         try { if (File.Exists(tempCopyPath)) File.Delete(tempCopyPath); }
                         catch (Exception cleanupEx) when (cleanupEx is not OperationCanceledException
                                                        && cleanupEx is not OutOfMemoryException
                                                        && cleanupEx is not StackOverflowException)
                         {
-                            // best-effort cleanup; ignore non-critical failures
                         }
                     }
                 }
@@ -285,6 +290,16 @@ namespace Listenarr.Infrastructure.FileSystem
         public async Task<bool> PerformActionOn(FileAction action, string source, string? destination = null)
         {
             if (action == FileAction.None || destination == null) return true;
+            if (await IsLinkedFilesystemAliasAsync(source, destination))
+            {
+                LogMutation(
+                    FileMutationOutcome.Blocked,
+                    action,
+                    source,
+                    destination,
+                    "Source and destination are linked aliases of the same file");
+                return false;
+            }
             if (await IsSameFilesystemPathAsync(source, destination))
             {
                 LogMutation(
@@ -296,7 +311,6 @@ namespace Listenarr.Infrastructure.FileSystem
                 return true;
             }
 
-            // Ensure destination directory exists
             var directory = Path.GetDirectoryName(destination);
             if (!string.IsNullOrEmpty(directory))
             {
@@ -324,7 +338,6 @@ namespace Listenarr.Infrastructure.FileSystem
                         return await CopyFileAsync(source, destination);
                 }
 
-                // Unhandled action: We are unable to fulfill the request
                 return false;
             }
             catch (Exception exception) when (exception is not (OperationCanceledException or OutOfMemoryException or StackOverflowException))
@@ -348,9 +361,6 @@ namespace Listenarr.Infrastructure.FileSystem
                 return IdempotentFileMoveOutcome.Completed;
             }
 
-            // Removing the source is safe only when filesystem identity resolution
-            // conclusively proved that the paths are different. An unavailable probe
-            // can otherwise compare a file with an alias of itself and delete it.
             if (equivalence == null
                 || IsLinkedOrUnverifiableEntry(sourceFile)
                 || IsLinkedOrUnverifiableEntry(destFile)
