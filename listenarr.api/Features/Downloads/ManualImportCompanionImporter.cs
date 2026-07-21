@@ -178,17 +178,9 @@ public sealed class ManualImportCompanionImporter
                 var destinationDirectory = Path.GetDirectoryName(destinationPath)
                     ?? throw new InvalidOperationException(
                         "The companion import destination has no parent directory.");
-                if (FileUtils.IsAudioFile(companionFile))
+                if (_audiobookFileService != null && targetAudiobook != null)
                 {
-                    if (_audiobookFileService == null || targetAudiobook == null)
-                    {
-                        _logger.LogWarning(
-                            "Skipping audio companion file {FilePath} because destination ownership cannot be verified",
-                            companionFile);
-                        continue;
-                    }
-
-                    var ownership = await _audiobookFileService.CheckAudiobookFileOwnershipAsync(
+                    var ownership = await _audiobookFileService.CheckPathOwnershipAsync(
                         targetAudiobook,
                         destinationPath,
                         destinationDirectory,
@@ -198,13 +190,20 @@ public sealed class ManualImportCompanionImporter
                             AudiobookFileOwnershipCheckOutcome.AlreadyOwnedByAudiobook))
                     {
                         _logger.LogWarning(
-                            "Skipping audio companion file {FilePath} because destination {DestinationPath} is not available: {Outcome}. {Reason}",
+                            "Skipping companion file {FilePath} because destination {DestinationPath} is not available: {Outcome}. {Reason}",
                             companionFile,
                             destinationPath,
                             ownership.Outcome,
                             ownership.Reason);
                         continue;
                     }
+                }
+                else if (FileUtils.IsAudioFile(companionFile))
+                {
+                    _logger.LogWarning(
+                        "Skipping audio companion file {FilePath} because destination ownership cannot be verified",
+                        companionFile);
+                    continue;
                 }
 
                 await _directoryOwnershipStore.EnsureCreatedHierarchyAsync(
