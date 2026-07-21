@@ -52,7 +52,7 @@ public sealed class RootFolderActiveMoveBoundaryTests
         relocationService.Setup(service => service.GetActiveForRootAsync(
                 It.IsAny<int>(),
                 It.IsAny<CancellationToken>()))
-            .ReturnsAsync((RootFolderRelocationResult?)null);
+            .ReturnsAsync((RootFolderRelocation?)null);
         var service = new RootFolderService(
             repository,
             Mock.Of<ILogger<RootFolderService>>(),
