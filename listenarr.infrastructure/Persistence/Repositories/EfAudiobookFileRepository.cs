@@ -232,12 +232,6 @@ namespace Listenarr.Infrastructure.Persistence.Repositories
                 .ToListAsync(ct);
             var audiobooks = await _db.Audiobooks
                 .AsNoTracking()
-                .Select(audiobook => new Audiobook
-                {
-                    Id = audiobook.Id,
-                    BasePath = audiobook.BasePath,
-                    FilePath = audiobook.FilePath
-                })
                 .ToListAsync(ct);
             return TrackedFilePathIndexBuilder.ResolvePaths(
                     files,
