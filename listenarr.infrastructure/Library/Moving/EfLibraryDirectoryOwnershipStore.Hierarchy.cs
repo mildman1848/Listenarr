@@ -1,4 +1,5 @@
 using Listenarr.Domain.Common;
+using Listenarr.Infrastructure.FileSystem;
 
 namespace Listenarr.Infrastructure.Library.Moving;
 
@@ -75,8 +76,10 @@ internal sealed partial class EfLibraryDirectoryOwnershipStore
                     "The directory creation target is occupied by a file.");
             }
 
-            var created = ExclusiveDirectoryCreator.TryCreate(directory);
-            if (!created)
+            using var creation = ExclusiveDirectoryCreator.TryCreatePinned(
+                parent,
+                Path.GetFileName(directory));
+            if (!creation.Created)
             {
                 ValidateExistingDirectory(
                     directory,
@@ -108,28 +111,33 @@ internal sealed partial class EfLibraryDirectoryOwnershipStore
                 continue;
             }
 
-            // Exclusive creation is the irreversible boundary for this directory. Once
-            // Listenarr has created it, finish the durable claim and marker publication even
-            // if the originating request disconnects; otherwise a later retry must correctly
-            // refuse to adopt the now pre-existing but unowned directory.
+            // The pinned parent and child handles stay alive through database persistence and
+            // marker publication. External pathname replacement therefore cannot redirect the
+            // creation or either ownership proof outside the validated parent directory.
             try
             {
-                createdOwnerships.Add(await RecordCreatedAsync(
+                createdOwnerships.Add(await RecordPinnedCreatedAsync(
                     new LibraryDirectoryOwnershipClaim(
                         directory,
                         semantics,
                         creationWorkflow,
                         creationOperationId,
                         audiobookId),
+                    creation,
                     CancellationToken.None));
             }
             catch (Exception exception) when (exception is not (
                 OutOfMemoryException or StackOverflowException))
             {
-                await TryCompensateFailedExclusiveCreationAsync(
-                    directory,
-                    parent,
-                    semantics);
+                // Path-based compensation is allowed only while the visible path still
+                // identifies the pinned generation. A replaced pathname is preserved.
+                if (creation.VisiblePathMatches())
+                {
+                    await TryCompensateFailedExclusiveCreationAsync(
+                        directory,
+                        parent,
+                        semantics);
+                }
                 throw;
             }
         }
