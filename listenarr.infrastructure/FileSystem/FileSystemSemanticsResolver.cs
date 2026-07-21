@@ -1,4 +1,3 @@
-using System.Collections.Concurrent;
 using Listenarr.Domain.Common;
 
 namespace Listenarr.Infrastructure.FileSystem;
@@ -6,8 +5,6 @@ namespace Listenarr.Infrastructure.FileSystem;
 public sealed class FileSystemSemanticsResolver : IFileSystemSemanticsResolver
 {
     private const string ProbePrefix = ".listenarr-case-probe-";
-    private readonly ConcurrentDictionary<string, FileSystemSemanticsResolution> _cache = new(
-        OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
 
     internal Action<string>? BeforeProbeForTest { get; init; }
 
@@ -46,18 +43,8 @@ public sealed class FileSystemSemanticsResolver : IFileSystemSemanticsResolver
             return ValueTask.FromResult(Unavailable(syntax, fullPath, "No existing filesystem boundary could be found."));
         }
 
-        if (_cache.TryGetValue(boundary, out var cached))
-        {
-            return ValueTask.FromResult(cached with { CanonicalPath = fullPath });
-        }
-
         BeforeProbeForTest?.Invoke(boundary);
         var resolved = Probe(boundary, syntax);
-        if (resolved.State == PathIdentityState.Valid)
-        {
-            _cache[boundary] = resolved;
-        }
-
         return ValueTask.FromResult(resolved with { CanonicalPath = fullPath });
     }
 
