@@ -70,12 +70,86 @@ public partial class FileMover
             snapshot.SourceRoot,
             destinationRoot,
             destinationRoot);
-        Directory.CreateDirectory(destinationRoot);
-        await EnsureDirectoryCopyTargetSafeAsync(
-            snapshot.SourceRoot,
-            destinationRoot,
-            destinationRoot);
 
+        if (Directory.Exists(destinationRoot))
+        {
+            if (await DirectoryCopySnapshotExactlyMatchesAsync(snapshot, destinationRoot))
+            {
+                return;
+            }
+
+            throw new IOException(
+                "Directory copy destination already exists with conflicting or unexpected content.");
+        }
+
+        var destinationParent = Path.GetDirectoryName(destinationRoot);
+        if (string.IsNullOrWhiteSpace(destinationParent)
+            || !Directory.Exists(destinationParent)
+            || IsLinkedOrUnverifiableEntry(destinationParent))
+        {
+            throw new IOException(
+                "Directory copy requires an existing, non-linked destination parent.");
+        }
+
+        var stagingName = $".{Path.GetFileName(destinationRoot)}.listenarr-copy-{Guid.NewGuid():N}";
+        var stagingRoot = Path.Join(destinationParent, stagingName);
+        using var stagingCreation = ExclusiveDirectoryCreator.TryCreatePinned(
+            destinationParent,
+            stagingName);
+        if (!stagingCreation.Created || !stagingCreation.VisiblePathMatches())
+        {
+            throw new IOException(
+                "Directory copy staging could not be created with exclusive ownership.");
+        }
+
+        var published = false;
+        try
+        {
+            await PopulateDirectoryCopyStagingAsync(snapshot, stagingRoot);
+            if (!stagingCreation.VisiblePathMatches()
+                || !await DirectoryCopySnapshotExactlyMatchesAsync(snapshot, stagingRoot)
+                || !await SourceSnapshotStillMatchesAsync(snapshot))
+            {
+                throw new IOException(
+                    "Directory copy staging or source changed before publication.");
+            }
+
+            try
+            {
+                Directory.Move(stagingRoot, destinationRoot);
+                published = true;
+            }
+            catch (IOException) when (Directory.Exists(destinationRoot))
+            {
+                if (await DirectoryCopySnapshotExactlyMatchesAsync(snapshot, destinationRoot))
+                {
+                    return;
+                }
+
+                throw new IOException(
+                    "Directory copy destination appeared with conflicting or unexpected content before publication.");
+            }
+
+            if (!await DirectoryCopySnapshotExactlyMatchesAsync(snapshot, destinationRoot)
+                || !await SourceSnapshotStillMatchesAsync(snapshot))
+            {
+                throw new IOException(
+                    "The published directory snapshot could not be verified exactly.");
+            }
+        }
+        finally
+        {
+            if (!published && stagingCreation.VisiblePathMatches())
+            {
+                await TryCleanupDirectoryCopyStagingAsync(snapshot, stagingRoot);
+            }
+        }
+    }
+
+    private async Task PopulateDirectoryCopyStagingAsync(
+        DirectoryCopySnapshot snapshot,
+        string stagingRoot)
+    {
         foreach (var relativeDirectory in snapshot.RelativeDirectories)
         {
             var sourceDirectory = ResolveSnapshotPath(
@@ -89,23 +163,18 @@ public partial class FileMover
                     $"Directory copy source changed after verification: {relativeDirectory}");
             }
 
-            var destinationPath = ResolveSnapshotPath(
-                destinationRoot,
+            var stagingDirectory = ResolveSnapshotPath(
+                stagingRoot,
                 relativeDirectory,
-                "destination directory");
-            await EnsureDirectoryCopyTargetSafeAsync(
-                snapshot.SourceRoot,
-                destinationRoot,
-                destinationPath);
-            if (File.Exists(destinationPath)
-                || (Directory.Exists(destinationPath)
-                    && IsLinkedOrUnverifiableEntry(destinationPath)))
+                "staging directory");
+            if (File.Exists(stagingDirectory)
+                || Directory.Exists(stagingDirectory))
             {
                 throw new IOException(
-                    $"Directory copy destination is unsafe: {relativeDirectory}");
+                    $"Directory copy staging was unexpectedly occupied: {relativeDirectory}");
             }
 
-            Directory.CreateDirectory(destinationPath);
+            Directory.CreateDirectory(stagingDirectory);
         }
 
         foreach (var relativeFile in snapshot.RelativeFiles)
@@ -122,45 +191,211 @@ public partial class FileMover
                     $"Directory copy source changed after verification: {relativeFile}");
             }
 
-            var destinationFile = ResolveSnapshotPath(
-                destinationRoot,
+            var stagingFile = ResolveSnapshotPath(
+                stagingRoot,
                 relativeFile,
-                "destination file");
-            await EnsureDirectoryCopyTargetSafeAsync(
-                snapshot.SourceRoot,
-                destinationRoot,
-                destinationFile);
-            if (Directory.Exists(destinationFile)
-                || IsLinkedOrUnverifiableEntry(destinationFile))
+                "staging file");
+            if (File.Exists(stagingFile)
+                || Directory.Exists(stagingFile))
             {
                 throw new IOException(
-                    $"Directory copy destination is unsafe: {relativeFile}");
+                    $"Directory copy staging was unexpectedly occupied: {relativeFile}");
             }
 
-            if (File.Exists(destinationFile)
-                && await FileSystemSafety.FilesHaveSameContentAsync(sourceFile, destinationFile))
+            File.Copy(sourceFile, stagingFile, overwrite: false);
+            if (IsLinkedOrUnverifiableEntry(stagingFile)
+                || !await FileSystemSafety.FilesHaveSameContentAsync(sourceFile, stagingFile))
             {
-                LogMutation(
-                    FileMutationOutcome.Skipped,
-                    FileAction.Copy,
-                    sourceFile,
-                    destinationFile,
-                    "Destination already has identical content");
-                continue;
+                throw new IOException(
+                    $"Directory copy staging content could not be verified: {relativeFile}");
             }
-
-            File.Copy(sourceFile, destinationFile, overwrite: true);
             LogMutation(
                 FileMutationOutcome.Success,
                 FileAction.Copy,
                 sourceFile,
-                destinationFile);
+                stagingFile,
+                "Copied into an isolated staging snapshot");
+        }
+    }
+
+    private async Task<bool> SourceSnapshotStillMatchesAsync(
+        DirectoryCopySnapshot snapshot)
+    {
+        if (!TryCaptureDirectoryCopySnapshot(
+                snapshot.SourceRoot,
+                out var currentSnapshot,
+                out _)
+            || currentSnapshot == null)
+        {
+            return false;
         }
 
-        if (!await DirectoryCopySnapshotStillMatchesAsync(snapshot, destinationRoot))
+        var comparer = OperatingSystem.IsWindows()
+            ? StringComparer.OrdinalIgnoreCase
+            : StringComparer.Ordinal;
+        if (!snapshot.RelativeDirectories.SequenceEqual(
+                currentSnapshot.RelativeDirectories,
+                comparer)
+            || !snapshot.RelativeFiles.SequenceEqual(
+                currentSnapshot.RelativeFiles,
+                comparer))
         {
-            throw new IOException(
-                "Directory copy source changed after verification; the verified destination snapshot was preserved.");
+            return false;
+        }
+
+        foreach (var relativeFile in snapshot.RelativeFiles)
+        {
+            var sourceFile = ResolveSnapshotPath(
+                snapshot.SourceRoot,
+                relativeFile,
+                "source file");
+            if (!File.Exists(sourceFile)
+                || IsLinkedOrUnverifiableEntry(sourceFile))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private async Task<bool> DirectoryCopySnapshotExactlyMatchesAsync(
+        DirectoryCopySnapshot snapshot,
+        string candidateRoot)
+    {
+        if (!Directory.Exists(candidateRoot)
+            || IsLinkedOrUnverifiableEntry(candidateRoot)
+            || !FileSystemSafety.TryEnumerateTreeWithoutLinks(
+                candidateRoot,
+                out var candidateFiles,
+                out var candidateDirectories,
+                out _))
+        {
+            return false;
+        }
+
+        var comparer = OperatingSystem.IsWindows()
+            ? StringComparer.OrdinalIgnoreCase
+            : StringComparer.Ordinal;
+        var relativeDirectories = candidateDirectories
+            .Select(path => GetVerifiedRelativePath(candidateRoot, path))
+            .OrderBy(PathDepth)
+            .ThenBy(path => path, comparer)
+            .ToArray();
+        var relativeFiles = candidateFiles
+            .Select(path => GetVerifiedRelativePath(candidateRoot, path))
+            .OrderBy(path => path, comparer)
+            .ToArray();
+        if (!snapshot.RelativeDirectories.SequenceEqual(relativeDirectories, comparer)
+            || !snapshot.RelativeFiles.SequenceEqual(relativeFiles, comparer))
+        {
+            return false;
+        }
+
+        foreach (var relativeFile in snapshot.RelativeFiles)
+        {
+            var sourceFile = ResolveSnapshotPath(
+                snapshot.SourceRoot,
+                relativeFile,
+                "source file");
+            var candidateFile = ResolveSnapshotPath(
+                candidateRoot,
+                relativeFile,
+                "candidate file");
+            if (!File.Exists(sourceFile)
+                || !File.Exists(candidateFile)
+                || IsLinkedOrUnverifiableEntry(sourceFile)
+                || IsLinkedOrUnverifiableEntry(candidateFile)
+                || !await FileSystemSafety.FilesHaveSameContentAsync(
+                    sourceFile,
+                    candidateFile))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private static async Task TryCleanupDirectoryCopyStagingAsync(
+        DirectoryCopySnapshot snapshot,
+        string stagingRoot)
+    {
+        try
+        {
+            if (!Directory.Exists(stagingRoot)
+                || IsLinkedOrUnverifiableEntry(stagingRoot)
+                || !FileSystemSafety.TryEnumerateTreeWithoutLinks(
+                    stagingRoot,
+                    out var files,
+                    out var directories,
+                    out _))
+            {
+                return;
+            }
+
+            var expectedFiles = snapshot.RelativeFiles.ToHashSet(
+                OperatingSystem.IsWindows()
+                    ? StringComparer.OrdinalIgnoreCase
+                    : StringComparer.Ordinal);
+            var expectedDirectories = snapshot.RelativeDirectories.ToHashSet(
+                OperatingSystem.IsWindows()
+                    ? StringComparer.OrdinalIgnoreCase
+                    : StringComparer.Ordinal);
+            var relativeFiles = files
+                .Select(path => GetVerifiedRelativePath(stagingRoot, path))
+                .ToArray();
+            var relativeDirectories = directories
+                .Select(path => GetVerifiedRelativePath(stagingRoot, path))
+                .ToArray();
+            if (relativeFiles.Any(path => !expectedFiles.Contains(path))
+                || relativeDirectories.Any(path => !expectedDirectories.Contains(path)))
+            {
+                return;
+            }
+
+            foreach (var relativeFile in relativeFiles)
+            {
+                var stagingFile = ResolveSnapshotPath(
+                    stagingRoot,
+                    relativeFile,
+                    "staging cleanup file");
+                var sourceFile = ResolveSnapshotPath(
+                    snapshot.SourceRoot,
+                    relativeFile,
+                    "source cleanup file");
+                if (IsLinkedOrUnverifiableEntry(stagingFile)
+                    || !File.Exists(sourceFile)
+                    || !await FileSystemSafety.FilesHaveSameContentAsync(
+                        sourceFile,
+                        stagingFile))
+                {
+                    return;
+                }
+            }
+
+            foreach (var relativeFile in relativeFiles)
+            {
+                File.Delete(ResolveSnapshotPath(
+                    stagingRoot,
+                    relativeFile,
+                    "staging cleanup file"));
+            }
+            foreach (var relativeDirectory in relativeDirectories
+                         .OrderByDescending(PathDepth))
+            {
+                Directory.Delete(ResolveSnapshotPath(
+                    stagingRoot,
+                    relativeDirectory,
+                    "staging cleanup directory"),
+                    recursive: false);
+            }
+            Directory.Delete(stagingRoot, recursive: false);
+        }
+        catch (Exception exception) when (exception is not (
+            OperationCanceledException or OutOfMemoryException or StackOverflowException))
+        {
+            // Uncertain or externally changed staging is preserved for diagnosis.
         }
     }
 
@@ -200,79 +435,9 @@ public partial class FileMover
 
     private async Task<bool> DirectoryCopySnapshotStillMatchesAsync(
         DirectoryCopySnapshot snapshot,
-        string destinationRoot)
-    {
-        await EnsureDirectoryCopyTargetSafeAsync(
-            snapshot.SourceRoot,
-            destinationRoot,
-            destinationRoot);
-        if (!TryCaptureDirectoryCopySnapshot(
-                snapshot.SourceRoot,
-                out var currentSnapshot,
-                out _)
-            || currentSnapshot == null)
-        {
-            return false;
-        }
-
-        var comparer = OperatingSystem.IsWindows()
-            ? StringComparer.OrdinalIgnoreCase
-            : StringComparer.Ordinal;
-        if (!snapshot.RelativeDirectories.SequenceEqual(
-                currentSnapshot.RelativeDirectories,
-                comparer)
-            || !snapshot.RelativeFiles.SequenceEqual(
-                currentSnapshot.RelativeFiles,
-                comparer))
-        {
-            return false;
-        }
-
-        foreach (var relativeDirectory in snapshot.RelativeDirectories)
-        {
-            var destinationDirectory = ResolveSnapshotPath(
-                destinationRoot,
-                relativeDirectory,
-                "destination directory");
-            await EnsureDirectoryCopyTargetSafeAsync(
-                snapshot.SourceRoot,
-                destinationRoot,
-                destinationDirectory);
-            if (!Directory.Exists(destinationDirectory)
-                || IsLinkedOrUnverifiableEntry(destinationDirectory))
-            {
-                return false;
-            }
-        }
-
-        foreach (var relativeFile in snapshot.RelativeFiles)
-        {
-            var sourceFile = ResolveSnapshotPath(
-                snapshot.SourceRoot,
-                relativeFile,
-                "source file");
-            var destinationFile = ResolveSnapshotPath(
-                destinationRoot,
-                relativeFile,
-                "destination file");
-            await EnsureDirectoryCopyTargetSafeAsync(
-                snapshot.SourceRoot,
-                destinationRoot,
-                destinationFile);
-            if (!File.Exists(sourceFile)
-                || !File.Exists(destinationFile)
-                || IsLinkedOrUnverifiableEntry(sourceFile)
-                || IsLinkedOrUnverifiableEntry(destinationFile)
-                || !await FileSystemSafety.FilesHaveSameContentAsync(
-                    sourceFile,
-                    destinationFile))
-            {
-                return false;
-            }
-        }
-
-        return true;
-    }
+        string destinationRoot) =>
+        await SourceSnapshotStillMatchesAsync(snapshot)
+        && await DirectoryCopySnapshotExactlyMatchesAsync(snapshot, destinationRoot);
 
     private static string GetVerifiedRelativePath(string root, string path)
     {
