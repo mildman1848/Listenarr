@@ -6,6 +6,11 @@
  * it under the terms of the GNU Affero General Public License as published
  * by the Free Software Foundation, either version 3 of the License, or
  * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU Affero General Public License for more details.
  */
 using Listenarr.Domain.Common;
 using Microsoft.Extensions.Logging;
@@ -153,14 +158,10 @@ public partial class FileMover
             return true;
         }
 
-        // Existing file operations historically treat two aliases of the same
-        // regular file as an idempotent no-op. Directory aliases must instead
-        // fall through to the overlap check, where physical equality blocks the
-        // move before Directory.Move or copy/delete fallback can run.
-        return sourceResolution.EntryKind == PhysicalPathEntryKind.File
-            && destinationResolution.EntryKind == PhysicalPathEntryKind.File
-            ? true
-            : null;
+        // Lexically distinct aliases reached through a symbolic link, junction, or
+        // linked ancestor are never an idempotent no-op. Callers must block or perform
+        // a real publication rather than reporting success while a source pathname remains.
+        return null;
     }
 
     private static bool TryResolvePhysicalPath(
