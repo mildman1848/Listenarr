@@ -41,6 +41,20 @@ public sealed class ManualImportCompanionImporterTests : BaseTests
                     It.IsAny<CancellationToken>()))
                 .Callback(() => cancellation.Cancel())
                 .ReturnsAsync([]);
+            var audiobook = new Audiobook
+            {
+                Id = 42,
+                BasePath = destinationDirectory
+            };
+            var fileService = new Mock<IAudiobookFileService>(MockBehavior.Strict);
+            fileService
+                .Setup(service => service.CheckPathOwnershipAsync(
+                    audiobook,
+                    It.IsAny<string>(),
+                    It.IsAny<string>(),
+                    It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new AudiobookFileOwnershipCheckResult(
+                    AudiobookFileOwnershipCheckOutcome.Available));
             var semanticsResolver = new FileSystemSemanticsResolver();
             var importer = new ManualImportCompanionImporter(
                 Mock.Of<IMetadataService>(),
@@ -48,7 +62,8 @@ public sealed class ManualImportCompanionImporterTests : BaseTests
                 new LocalFileSystem(),
                 semanticsResolver,
                 ownershipStore.Object,
-                NullLogger<ManualImportCompanionImporter>.Instance);
+                NullLogger<ManualImportCompanionImporter>.Instance,
+                fileService.Object);
             var tracker = new ManualImportDestinationTracker(
                 new LocalFileSystem(),
                 semanticsResolver);
@@ -58,7 +73,7 @@ public sealed class ManualImportCompanionImporterTests : BaseTests
                 new ManualImportItemDto
                 {
                     FullPath = audioSource,
-                    MatchedAudiobookId = 42
+                    MatchedAudiobookId = audiobook.Id
                 }
             };
             var results = new[]
@@ -67,7 +82,8 @@ public sealed class ManualImportCompanionImporterTests : BaseTests
                 {
                     Success = true,
                     SourcePath = audioSource,
-                    DestinationPath = audioDestination
+                    DestinationPath = audioDestination,
+                    Audiobook = audiobook
                 }
             };
 
@@ -90,6 +106,7 @@ public sealed class ManualImportCompanionImporterTests : BaseTests
                     It.IsAny<string>(),
                     It.IsAny<string>()),
                 Times.Never);
+            fileService.VerifyAll();
             ownershipStore.VerifyAll();
         }
         finally
@@ -131,6 +148,20 @@ public sealed class ManualImportCompanionImporterTests : BaseTests
                 .Callback<FileAction, string, string?>((_, _, destination) =>
                     capturedDestination = destination)
                 .ReturnsAsync(true);
+            var audiobook = new Audiobook
+            {
+                Id = 42,
+                BasePath = destinationDirectory
+            };
+            var fileService = new Mock<IAudiobookFileService>(MockBehavior.Strict);
+            fileService
+                .Setup(service => service.CheckPathOwnershipAsync(
+                    audiobook,
+                    It.IsAny<string>(),
+                    It.IsAny<string>(),
+                    It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new AudiobookFileOwnershipCheckResult(
+                    AudiobookFileOwnershipCheckOutcome.Available));
             var semanticsResolver = new FileSystemSemanticsResolver();
             var directoryOwnershipStore = new Mock<ILibraryDirectoryOwnershipStore>();
             directoryOwnershipStore
@@ -149,7 +180,8 @@ public sealed class ManualImportCompanionImporterTests : BaseTests
                 new LocalFileSystem(),
                 semanticsResolver,
                 directoryOwnershipStore.Object,
-                NullLogger<ManualImportCompanionImporter>.Instance);
+                NullLogger<ManualImportCompanionImporter>.Instance,
+                fileService.Object);
             var tracker = new ManualImportDestinationTracker(
                 new LocalFileSystem(),
                 semanticsResolver);
@@ -160,7 +192,7 @@ public sealed class ManualImportCompanionImporterTests : BaseTests
                 new ManualImportItemDto
                 {
                     FullPath = audioSource,
-                    MatchedAudiobookId = 42
+                    MatchedAudiobookId = audiobook.Id
                 }
             };
             var results = new[]
@@ -169,7 +201,8 @@ public sealed class ManualImportCompanionImporterTests : BaseTests
                 {
                     Success = true,
                     SourcePath = audioSource,
-                    DestinationPath = audioDestination
+                    DestinationPath = audioDestination,
+                    Audiobook = audiobook
                 }
             };
 
@@ -191,6 +224,7 @@ public sealed class ManualImportCompanionImporterTests : BaseTests
                 capturedDestination!,
                 destinationDirectory,
                 FileSystemPathSemantics.CurrentHostDefault));
+            fileService.VerifyAll();
         }
         finally
         {
