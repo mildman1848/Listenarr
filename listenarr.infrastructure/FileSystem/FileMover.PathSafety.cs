@@ -14,6 +14,18 @@ namespace Listenarr.Infrastructure.FileSystem;
 
 public partial class FileMover
 {
+    private enum PhysicalPathEntryKind
+    {
+        Missing,
+        File,
+        Directory
+    }
+
+    private readonly record struct PhysicalPathResolution(
+        string ResolvedPath,
+        bool EncounteredLink,
+        PhysicalPathEntryKind EntryKind);
+
     private async Task<bool> IsSameFilesystemPathAsync(string source, string destination) =>
         await TryDetermineFilesystemPathEquivalenceAsync(source, destination) == true;
 
@@ -25,9 +37,21 @@ public partial class FileMover
             FileSystemPathIdentity.ResolveNativeAbsolutePath(source));
         var destinationPath = Path.GetFullPath(
             FileSystemPathIdentity.ResolveNativeAbsolutePath(destination));
-        if (_semanticsResolver == null
-            || !TryResolvePhysicalPath(sourcePath, out var resolvedSourcePath)
-            || !TryResolvePhysicalPath(destinationPath, out var resolvedDestinationPath))
+        if (!TryResolvePhysicalPath(sourcePath, out var sourceResolution)
+            || !TryResolvePhysicalPath(destinationPath, out var destinationResolution))
+        {
+            return null;
+        }
+
+        if (string.Equals(
+                sourceResolution.ResolvedPath,
+                destinationResolution.ResolvedPath,
+                StringComparison.Ordinal))
+        {
+            return true;
+        }
+
+        if (_semanticsResolver == null)
         {
             return null;
         }
@@ -41,12 +65,12 @@ public partial class FileMover
             }
 
             return FileSystemPathIdentity.IsSameOrInside(
-                    resolvedDestinationPath,
-                    resolvedSourcePath,
+                    destinationResolution.ResolvedPath,
+                    sourceResolution.ResolvedPath,
                     resolution.Semantics)
                 || FileSystemPathIdentity.IsSameOrInside(
-                    resolvedSourcePath,
-                    resolvedDestinationPath,
+                    sourceResolution.ResolvedPath,
+                    destinationResolution.ResolvedPath,
                     resolution.Semantics);
         }
         catch (Exception exception) when (exception is
@@ -75,44 +99,75 @@ public partial class FileMover
             return true;
         }
 
-        if (_semanticsResolver == null
-            || !TryResolvePhysicalPath(sourcePath, out var resolvedSourcePath)
-            || !TryResolvePhysicalPath(destinationPath, out var resolvedDestinationPath))
+        if (!TryResolvePhysicalPath(sourcePath, out var sourceResolution)
+            || !TryResolvePhysicalPath(destinationPath, out var destinationResolution))
         {
             return null;
         }
 
-        if (string.Equals(resolvedSourcePath, resolvedDestinationPath, StringComparison.Ordinal))
+        var pathsAreEquivalent = string.Equals(
+            sourceResolution.ResolvedPath,
+            destinationResolution.ResolvedPath,
+            StringComparison.Ordinal);
+        if (!pathsAreEquivalent)
+        {
+            if (_semanticsResolver == null)
+            {
+                return null;
+            }
+
+            try
+            {
+                var resolution = await _semanticsResolver.ResolveAsync(sourcePath);
+                if (resolution.State != PathIdentityState.Valid)
+                {
+                    return null;
+                }
+
+                pathsAreEquivalent = FileSystemPathIdentity.AreEquivalent(
+                    sourceResolution.ResolvedPath,
+                    destinationResolution.ResolvedPath,
+                    resolution.Semantics);
+            }
+            catch (Exception exception) when (exception is
+                IOException or UnauthorizedAccessException or ArgumentException or
+                InvalidOperationException or NotSupportedException or PathTooLongException)
+            {
+                _logger.LogDebug(
+                    exception,
+                    "Filesystem identity resolution failed while comparing {Source} and {Destination}; destructive idempotent cleanup will be disabled",
+                    LogRedaction.SanitizeFilePath(sourcePath),
+                    LogRedaction.SanitizeFilePath(destinationPath));
+                return null;
+            }
+        }
+
+        if (!pathsAreEquivalent)
+        {
+            return false;
+        }
+
+        if (!sourceResolution.EncounteredLink
+            && !destinationResolution.EncounteredLink)
         {
             return true;
         }
 
-        try
-        {
-            var resolution = await _semanticsResolver.ResolveAsync(sourcePath);
-            return resolution.State == PathIdentityState.Valid
-                ? FileSystemPathIdentity.AreEquivalent(
-                    resolvedSourcePath,
-                    resolvedDestinationPath,
-                    resolution.Semantics)
-                : null;
-        }
-        catch (Exception exception) when (exception is
-            IOException or UnauthorizedAccessException or ArgumentException or
-            InvalidOperationException or NotSupportedException or PathTooLongException)
-        {
-            _logger.LogDebug(
-                exception,
-                "Filesystem identity resolution failed while comparing {Source} and {Destination}; destructive idempotent cleanup will be disabled",
-                LogRedaction.SanitizeFilePath(sourcePath),
-                LogRedaction.SanitizeFilePath(destinationPath));
-            return null;
-        }
+        // Existing file operations historically treat two aliases of the same
+        // regular file as an idempotent no-op. Directory aliases must instead
+        // fall through to the overlap check, where physical equality blocks the
+        // move before Directory.Move or copy/delete fallback can run.
+        return sourceResolution.EntryKind == PhysicalPathEntryKind.File
+            && destinationResolution.EntryKind == PhysicalPathEntryKind.File
+            ? true
+            : null;
     }
 
-    private static bool TryResolvePhysicalPath(string path, out string resolvedPath)
+    private static bool TryResolvePhysicalPath(
+        string path,
+        out PhysicalPathResolution resolution)
     {
-        resolvedPath = string.Empty;
+        resolution = default;
         try
         {
             var fullPath = Path.GetFullPath(path);
@@ -124,6 +179,8 @@ public partial class FileMover
 
             var currentLexicalPath = root;
             var currentResolvedPath = Path.GetFullPath(root);
+            var encounteredLink = false;
+            var entryKind = PhysicalPathEntryKind.Directory;
             var segments = Path.GetRelativePath(root, fullPath).Split(
                 [Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar],
                 StringSplitOptions.RemoveEmptyEntries);
@@ -131,35 +188,94 @@ public partial class FileMover
             {
                 var segment = segments[index];
                 var candidatePath = Path.Join(currentLexicalPath, segment);
-                if (!File.Exists(candidatePath) && !Directory.Exists(candidatePath))
+                if (!TryGetPathAttributes(
+                        candidatePath,
+                        out var exists,
+                        out var attributes))
+                {
+                    return false;
+                }
+
+                if (!exists)
                 {
                     for (var remainingIndex = index; remainingIndex < segments.Length; remainingIndex++)
                     {
-                        currentResolvedPath = Path.Join(currentResolvedPath, segments[remainingIndex]);
+                        currentResolvedPath = Path.Join(
+                            currentResolvedPath,
+                            segments[remainingIndex]);
                     }
 
-                    resolvedPath = Path.GetFullPath(currentResolvedPath);
+                    resolution = new PhysicalPathResolution(
+                        Path.GetFullPath(currentResolvedPath),
+                        encounteredLink,
+                        PhysicalPathEntryKind.Missing);
                     return true;
                 }
 
-                var attributes = File.GetAttributes(candidatePath);
-                var info = (attributes & FileAttributes.Directory) != 0
-                    ? (FileSystemInfo)new DirectoryInfo(candidatePath)
-                    : new FileInfo(candidatePath);
-                var target = (attributes & FileAttributes.ReparsePoint) != 0
-                    ? info.ResolveLinkTarget(returnFinalTarget: true)
-                    : null;
-                currentResolvedPath = Path.GetFullPath(
-                    target?.FullName ?? Path.Join(currentResolvedPath, segment));
+                entryKind = (attributes & FileAttributes.Directory) != 0
+                    ? PhysicalPathEntryKind.Directory
+                    : PhysicalPathEntryKind.File;
+                if ((attributes & FileAttributes.ReparsePoint) != 0)
+                {
+                    var info = entryKind == PhysicalPathEntryKind.Directory
+                        ? (FileSystemInfo)new DirectoryInfo(candidatePath)
+                        : new FileInfo(candidatePath);
+                    var target = info.ResolveLinkTarget(returnFinalTarget: true);
+                    if (target == null)
+                    {
+                        return false;
+                    }
+
+                    encounteredLink = true;
+                    currentResolvedPath = Path.GetFullPath(target.FullName);
+                }
+                else
+                {
+                    currentResolvedPath = Path.GetFullPath(
+                        Path.Join(currentResolvedPath, segment));
+                }
+
                 currentLexicalPath = candidatePath;
             }
 
-            resolvedPath = Path.GetFullPath(currentResolvedPath);
+            resolution = new PhysicalPathResolution(
+                Path.GetFullPath(currentResolvedPath),
+                encounteredLink,
+                entryKind);
             return true;
         }
         catch (Exception exception) when (exception is
             IOException or UnauthorizedAccessException or ArgumentException or
             InvalidOperationException or NotSupportedException or PathTooLongException)
+        {
+            return false;
+        }
+    }
+
+    private static bool TryGetPathAttributes(
+        string path,
+        out bool exists,
+        out FileAttributes attributes)
+    {
+        exists = false;
+        attributes = default;
+        try
+        {
+            attributes = File.GetAttributes(path);
+            exists = true;
+            return true;
+        }
+        catch (FileNotFoundException)
+        {
+            return true;
+        }
+        catch (DirectoryNotFoundException)
+        {
+            return true;
+        }
+        catch (Exception exception) when (exception is
+            IOException or UnauthorizedAccessException or ArgumentException or
+            NotSupportedException or PathTooLongException)
         {
             return false;
         }
