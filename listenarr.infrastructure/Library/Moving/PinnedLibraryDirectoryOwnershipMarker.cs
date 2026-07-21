@@ -42,10 +42,6 @@ internal static class PinnedLibraryDirectoryOwnershipMarker
             throw new InvalidOperationException(
                 "The newly created directory pathname changed during ownership publication.");
         }
-
-        LibraryDirectoryOwnershipMarker.Validate(
-            ownership,
-            ownership.CanonicalPath);
     }
 
     private sealed record MarkerPayload(
