@@ -29,7 +29,7 @@ public partial class DownloadImportService
             return false;
         }
 
-        var ownership = await audiobookFileService.CheckPathOwnershipAsync(
+        var ownership = await audiobookFileService.CheckAudiobookFileOwnershipAsync(
             audiobook,
             destination,
             destinationDirectory,
