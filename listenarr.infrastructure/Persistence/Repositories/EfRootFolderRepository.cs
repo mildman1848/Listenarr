@@ -99,9 +99,6 @@ namespace Listenarr.Infrastructure.Persistence.Repositories
                 .Where(a => a.BasePath != null)
                 .Select(a => a.BasePath!)
                 .ToListAsync(ct);
-
-            // Keep path containment in memory. EF string-prefix translation cannot model
-            // filesystem boundaries correctly for roots like /, C:\, or \\server\share.
             return basePaths.Any(path => FileSystemPathIdentity.IsSameOrInside(path, rootPath, semantics));
         }
 
@@ -114,7 +111,6 @@ namespace Listenarr.Infrastructure.Persistence.Repositories
             var audiobooks = await ctx.Audiobooks
                 .Where(a => a.BasePath != null)
                 .ToListAsync(ct);
-
             return audiobooks
                 .Where(a => FileSystemPathIdentity.IsSameOrInside(a.BasePath!, rootPath, semantics))
                 .ToList();
@@ -162,18 +158,15 @@ namespace Listenarr.Infrastructure.Persistence.Repositories
                     "Root folder reassignment is blocked while a relocation is active.");
             }
 
-            var activeMovePaths = await ctx.MoveJobs
+            var activeMoveJobs = await ctx.MoveJobs
                 .AsNoTracking()
                 .Where(job => job.Status == MoveJobStatus.Queued
                     || job.Status == MoveJobStatus.Running
                     || job.Status == MoveJobStatus.RetryScheduled)
-                .Select(job => new { job.SourcePath, job.RequestedPath })
                 .ToListAsync(ct);
-            if (activeMovePaths.Any(job =>
-                    MoveTouchesRoot(job.SourcePath, sourceRoot.Path, sourceSemantics)
-                    || MoveTouchesRoot(job.RequestedPath, sourceRoot.Path, sourceSemantics)
-                    || MoveTouchesRoot(job.SourcePath, targetRoot.Path, targetSemantics)
-                    || MoveTouchesRoot(job.RequestedPath, targetRoot.Path, targetSemantics)))
+            if (activeMoveJobs.Any(job =>
+                    MoveJobBoundaryConflict.TouchesBoundary(job, sourceRoot.Path, sourceSemantics)
+                    || MoveJobBoundaryConflict.TouchesBoundary(job, targetRoot.Path, targetSemantics)))
             {
                 throw new InvalidOperationException(
                     "Root folder reassignment is blocked while an active move touches either root.");
@@ -247,28 +240,6 @@ namespace Listenarr.Infrastructure.Persistence.Repositories
             if (transaction != null)
             {
                 await transaction.CommitAsync(ct);
-            }
-        }
-
-        private static bool MoveTouchesRoot(
-            string? path,
-            string rootPath,
-            FileSystemPathSemantics semantics)
-        {
-            if (string.IsNullOrWhiteSpace(path))
-            {
-                return false;
-            }
-
-            try
-            {
-                return FileSystemPathIdentity.IsSameOrInside(path, rootPath, semantics);
-            }
-            catch (ArgumentException)
-            {
-                // Fail closed for malformed active-job paths while deciding whether a
-                // destructive root-folder reassignment can proceed.
-                return true;
             }
         }
 
