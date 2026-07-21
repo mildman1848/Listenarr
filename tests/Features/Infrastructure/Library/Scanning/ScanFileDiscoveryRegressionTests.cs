@@ -94,6 +94,51 @@ public sealed class ScanFileDiscoveryRegressionTests : BaseTests, IDisposable
     }
 
     [Fact]
+    public void Discover_MiddleDecoratedComponentMatchingAnotherTitle_IsNotClaimed()
+    {
+        _ = CreateAudioFile(
+            "Jules Verne",
+            "Jules Verne - Captain Nemo - Twenty Thousand Leagues Under the Sea",
+            "book.m4b");
+        var semantics = FileSystemPathSemantics.CurrentHostDefault;
+
+        var discovery = DiscoverResult(Book("Captain Nemo", "Jules Verne"), semantics);
+
+        Assert.Empty(discovery.AttributedFiles);
+        Assert.Null(discovery.CommonProvenBookBoundary(semantics));
+    }
+
+    [Theory]
+    [InlineData(" - ")]
+    [InlineData(" – ")]
+    [InlineData(" — ")]
+    public void Discover_TitleContainingDelimiter_MatchesTrailingComponentSequence(
+        string separator)
+    {
+        var expected = CreateAudioFile(
+            "Story Author",
+            $"Story Author{separator}Story Cycle{separator}Love{separator}A Story",
+            "book.m4b");
+
+        var found = Discover(Book("Love - A Story", "Story Author"));
+
+        Assert.Equal([expected], found);
+    }
+
+    [Fact]
+    public void Discover_TitleBeforeTrailingUnrelatedComponent_IsNotClaimed()
+    {
+        _ = CreateAudioFile(
+            "Story Author",
+            "Love - A Story - Bonus",
+            "book.m4b");
+
+        var found = Discover(Book("Love - A Story", "Story Author"));
+
+        Assert.Empty(found);
+    }
+
+    [Fact]
     public void Discover_TitleInFileName_MatchesWhenFolderDoesNotCarryIt()
     {
         var expected = CreateAudioFile(
