@@ -133,7 +133,7 @@ internal sealed partial class AudiobookScanService
             return null;
         }
 
-        var relativeFirstSegments = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var relativeFirstSegments = new HashSet<string>(semantics.Comparer);
         var hasDirectFile = false;
         foreach (var directory in directories)
         {
