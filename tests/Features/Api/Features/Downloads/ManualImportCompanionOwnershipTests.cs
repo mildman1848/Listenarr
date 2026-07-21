@@ -9,8 +9,11 @@ namespace Listenarr.Tests.Features.Api.Features.Downloads;
 [Trait("Category", "Integration")]
 public sealed class ManualImportCompanionOwnershipTests : BaseTests
 {
-    [Fact]
-    public async Task ImportAsync_DestinationOwnedByAnotherAudiobook_DoesNotWriteCompanion()
+    [Theory]
+    [InlineData("bonus.m4b")]
+    [InlineData("cover.jpg")]
+    public async Task ImportAsync_DestinationOwnedByAnotherAudiobook_DoesNotWriteCompanion(
+        string companionFileName)
     {
         Init();
         var testRoot = FileService.GetTempDirectory(
@@ -20,12 +23,11 @@ public sealed class ManualImportCompanionOwnershipTests : BaseTests
         Directory.CreateDirectory(sourceDirectory);
         Directory.CreateDirectory(destinationDirectory);
         var selectedSource = Path.Join(sourceDirectory, "book.m4b");
-        var companionSource = Path.Join(sourceDirectory, "bonus.m4b");
+        var companionSource = Path.Join(sourceDirectory, companionFileName);
         var selectedDestination = Path.Join(destinationDirectory, "book.m4b");
-        var companionDestination = Path.Join(destinationDirectory, "bonus.m4b");
+        var companionDestination = Path.Join(destinationDirectory, companionFileName);
         await File.WriteAllTextAsync(selectedSource, "selected audio");
-        await File.WriteAllTextAsync(companionSource, "companion audio");
-        await File.WriteAllTextAsync(companionDestination, "previous audio");
+        await File.WriteAllTextAsync(companionSource, "companion content");
 
         var targetAudiobook = await _audiobookRepository.AddAsync(
             new AudiobookBuilder()
@@ -39,12 +41,17 @@ public sealed class ManualImportCompanionOwnershipTests : BaseTests
                 .WithAuthor("Other Author")
                 .WithBasePath(destinationDirectory)
                 .Build());
-        var fileService = _provider.GetRequiredService<IAudiobookFileService>();
-        Assert.True(await fileService.EnsureAudiobookFileAsync(
+        var identityResolver = _provider
+            .GetRequiredService<IAudiobookFilePathIdentityResolver>();
+        var identity = await identityResolver.ResolveAsync(
             otherAudiobook,
-            companionDestination,
-            "test"));
-        File.Delete(companionDestination);
+            companionDestination);
+        Assert.Equal(PathIdentityState.Valid, identity.State);
+        var ownedFile = AudiobookFile.CreateUnresolved(companionDestination);
+        ownedFile.AudiobookId = otherAudiobook.Id;
+        ownedFile.ApplyPathIdentity(companionDestination, identity);
+        var claim = await _audiobookFileRepository.ClaimAsync(ownedFile);
+        Assert.Equal(AudiobookFileClaimOutcome.Created, claim.Outcome);
 
         var metadata = new AudioMetadata
         {
@@ -54,9 +61,13 @@ public sealed class ManualImportCompanionOwnershipTests : BaseTests
             Format = "m4b"
         };
         var metadataService = new Mock<IMetadataService>(MockBehavior.Strict);
-        metadataService
-            .Setup(service => service.ExtractFileMetadataAsync(companionSource))
-            .ReturnsAsync(metadata);
+        if (FileUtils.IsAudioFile(companionSource))
+        {
+            metadataService
+                .Setup(service => service.ExtractFileMetadataAsync(companionSource))
+                .ReturnsAsync(metadata);
+        }
+
         var mover = new Mock<IFileMover>(MockBehavior.Strict);
         var ownershipStore = new Mock<ILibraryDirectoryOwnershipStore>(MockBehavior.Strict);
         ownershipStore
@@ -70,6 +81,7 @@ public sealed class ManualImportCompanionOwnershipTests : BaseTests
                 It.IsAny<CancellationToken>()))
             .ReturnsAsync([]);
         var semanticsResolver = _provider.GetRequiredService<IFileSystemSemanticsResolver>();
+        var fileService = _provider.GetRequiredService<IAudiobookFileService>();
         var importer = new ManualImportCompanionImporter(
             metadataService.Object,
             mover.Object,
