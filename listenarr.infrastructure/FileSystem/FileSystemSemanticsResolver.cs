@@ -9,6 +9,8 @@ public sealed class FileSystemSemanticsResolver : IFileSystemSemanticsResolver
     private readonly ConcurrentDictionary<string, FileSystemSemanticsResolution> _cache = new(
         OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
 
+    internal Action<string>? BeforeProbeForTest { get; init; }
+
     public ValueTask<FileSystemSemanticsResolution> ResolveAsync(
         string path,
         FileSystemCaseSensitivityMode mode = FileSystemCaseSensitivityMode.Auto,
@@ -49,9 +51,7 @@ public sealed class FileSystemSemanticsResolver : IFileSystemSemanticsResolver
             return ValueTask.FromResult(cached with { CanonicalPath = fullPath });
         }
 
-        // Probe inside the boundary whose semantics were requested. Looking up the
-        // boundary name with alternate casing tests its parent directory instead,
-        // which is incorrect on filesystems with per-directory case sensitivity.
+        BeforeProbeForTest?.Invoke(boundary);
         var resolved = Probe(boundary, syntax);
         if (resolved.State == PathIdentityState.Valid)
         {
@@ -101,10 +101,6 @@ public sealed class FileSystemSemanticsResolver : IFileSystemSemanticsResolver
 
     private static string? FindExistingBoundary(string path)
     {
-        // Callers provide validated, absolute administrative filesystem paths. Probing the
-        // nearest existing ancestor is intentional: automatic case-sensitivity detection must
-        // work before a configured library destination exists. This must not be exposed as a
-        // general-purpose path-existence oracle for unauthenticated input.
         var current = path;
         while (!string.IsNullOrEmpty(current))
         {
