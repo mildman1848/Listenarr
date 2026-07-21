@@ -82,10 +82,7 @@ public partial class FileMover
     {
         if (await IsLinkedFilesystemAliasAsync(sourceFile, destinationFile))
         {
-            _logger.LogWarning(
-                "Blocked file move because source and destination are linked aliases: {Source} -> {Destination}",
-                LogRedaction.SanitizeFilePath(sourceFile),
-                LogRedaction.SanitizeFilePath(destinationFile));
+            LogBlockedAlias(sourceFile, destinationFile);
             return null;
         }
 
@@ -98,6 +95,12 @@ public partial class FileMover
                 "Blocked file move because endpoint identity could not be resolved: {Source} -> {Destination}",
                 LogRedaction.SanitizeFilePath(sourceFile),
                 LogRedaction.SanitizeFilePath(destinationFile));
+            return null;
+        }
+
+        if (await IsLinkedFilesystemAliasAsync(sourceFile, destinationFile))
+        {
+            LogBlockedAlias(sourceFile, destinationFile);
             return null;
         }
 
@@ -149,12 +152,20 @@ public partial class FileMover
                 stripeLocks.Add(stream);
             }
 
-            return new FileMoveGateLease(
+            var lease = new FileMoveGateLease(
                 key,
                 entry,
                 stripeLocks,
                 sourceIdentity,
                 destinationIdentity);
+            if (await IsLinkedFilesystemAliasAsync(sourceFile, destinationFile))
+            {
+                lease.Dispose();
+                LogBlockedAlias(sourceFile, destinationFile);
+                return null;
+            }
+
+            return lease;
         }
         catch (Exception exception) when (exception is not (
             OperationCanceledException or OutOfMemoryException or StackOverflowException))
@@ -173,6 +184,12 @@ public partial class FileMover
             return null;
         }
     }
+
+    private void LogBlockedAlias(string sourceFile, string destinationFile) =>
+        _logger.LogWarning(
+            "Blocked file move because source and destination are linked aliases: {Source} -> {Destination}",
+            LogRedaction.SanitizeFilePath(sourceFile),
+            LogRedaction.SanitizeFilePath(destinationFile));
 
     private async ValueTask<string?> ResolveFileMoveLockIdentityAsync(
         string path)
