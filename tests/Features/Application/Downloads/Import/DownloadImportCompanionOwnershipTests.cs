@@ -27,8 +27,6 @@ public sealed class DownloadImportCompanionOwnershipTests : BaseTests
             new ApplicationSettingsBuilder()
                 .WithCopyFileOnCompleted()
                 .WithoutMetadataProcessing()
-                .WithFileNamingPattern("{OriginalFilename}")
-                .WithMultiFileNamingPattern("{OriginalFilename}")
                 .Build());
 
         var targetAudiobook = await _audiobookRepository.AddAsync(
