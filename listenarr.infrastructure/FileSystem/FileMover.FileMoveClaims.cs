@@ -274,7 +274,6 @@ public partial class FileMover
                     }
 
                     File.Delete(state.SourceClaim);
-                    sourceClaimExists = false;
                 }
                 else
                 {
@@ -295,7 +294,6 @@ public partial class FileMover
             if (destinationStageExists)
             {
                 File.Move(state.DestinationStage, destinationFile, overwrite: true);
-                destinationStageExists = false;
             }
 
             if (generationFenceExists)
@@ -335,5 +333,4 @@ public partial class FileMover
             return FileMoveClaimRecoveryOutcome.Blocked;
         }
     }
-
 }
