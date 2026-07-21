@@ -8,32 +8,7 @@ public partial class AudiobookFileService
         Audiobook audiobook,
         string plannedPhysicalPath,
         string? plannedBasePath = null,
-        CancellationToken cancellationToken = default) =>
-        CheckPlannedPathOwnershipAsync(
-            audiobook,
-            plannedPhysicalPath,
-            plannedBasePath,
-            requireAudioFile: true,
-            cancellationToken: cancellationToken);
-
-    public Task<AudiobookFileOwnershipCheckResult> CheckPathOwnershipAsync(
-        Audiobook audiobook,
-        string plannedPhysicalPath,
-        string? plannedBasePath = null,
-        CancellationToken cancellationToken = default) =>
-        CheckPlannedPathOwnershipAsync(
-            audiobook,
-            plannedPhysicalPath,
-            plannedBasePath,
-            requireAudioFile: false,
-            cancellationToken: cancellationToken);
-
-    private Task<AudiobookFileOwnershipCheckResult> CheckPlannedPathOwnershipAsync(
-        Audiobook audiobook,
-        string plannedPhysicalPath,
-        string? plannedBasePath,
-        bool requireAudioFile,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(audiobook);
         ArgumentException.ThrowIfNullOrWhiteSpace(plannedPhysicalPath);
@@ -64,7 +39,7 @@ public partial class AudiobookFileService
                         plannedPhysicalPath,
                         token,
                         requireExistingFile: false,
-                        requireAudioFile: requireAudioFile);
+                        requireAudioFile: false);
                     if (authorization.Path == null)
                     {
                         return new AudiobookFileOwnershipCheckResult(
