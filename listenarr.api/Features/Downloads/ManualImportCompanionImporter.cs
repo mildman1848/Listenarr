@@ -198,10 +198,10 @@ public sealed class ManualImportCompanionImporter
                         continue;
                     }
                 }
-                else if (FileUtils.IsAudioFile(companionFile))
+                else
                 {
                     _logger.LogWarning(
-                        "Skipping audio companion file {FilePath} because destination ownership cannot be verified",
+                        "Skipping companion file {FilePath} because destination ownership cannot be verified",
                         companionFile);
                     continue;
                 }
