@@ -145,12 +145,26 @@ internal static partial class ScanFileDiscovery
             return true;
         }
 
-        return segment
+        var components = segment
             .Split(
                 [" - ", " – ", " — "],
                 StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
             .Select(NormalizeMetadataToken)
-            .Any(titleTokens.Contains);
+            .Where(component => !string.IsNullOrWhiteSpace(component))
+            .ToArray();
+        var normalizedSuffix = string.Empty;
+        for (var index = components.Length - 1; index >= 0; index--)
+        {
+            normalizedSuffix = string.IsNullOrEmpty(normalizedSuffix)
+                ? components[index]
+                : $"{components[index]} {normalizedSuffix}";
+            if (titleTokens.Contains(normalizedSuffix))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private static string? TryFindIdentifierBoundary(
