@@ -21,7 +21,11 @@ public sealed class FileSystemSemanticsResolverTests : BaseTests
     [Fact]
     public async Task ExplicitOverride_ResolvesWithoutExistingPath()
     {
-        var resolver = new FileSystemSemanticsResolver();
+        var probes = 0;
+        var resolver = new FileSystemSemanticsResolver
+        {
+            BeforeProbeForTest = _ => probes++
+        };
         var missingPath = Path.Join(Path.GetTempPath(), Guid.NewGuid().ToString("N"), "books");
 
         var resolution = await resolver.ResolveAsync(
@@ -30,6 +34,37 @@ public sealed class FileSystemSemanticsResolverTests : BaseTests
 
         Assert.Equal(FileSystemCaseSensitivity.Sensitive, resolution.Semantics.CaseSensitivity);
         Assert.Equal(PathIdentityState.Valid, resolution.State);
+        Assert.Equal(0, probes);
+    }
+
+    [Fact]
+    public async Task AutoProbe_RepeatedBoundary_IsProbedIndependently()
+    {
+        var root = Path.Join(Path.GetTempPath(), "filesystem-semantics-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        var probes = 0;
+        var resolver = new FileSystemSemanticsResolver
+        {
+            BeforeProbeForTest = boundary =>
+            {
+                Assert.Equal(Path.GetFullPath(root), Path.GetFullPath(boundary));
+                probes++;
+            }
+        };
+        try
+        {
+            var first = await resolver.ResolveAsync(root, FileSystemCaseSensitivityMode.Auto);
+            var second = await resolver.ResolveAsync(root, FileSystemCaseSensitivityMode.Auto);
+
+            Assert.Equal(PathIdentityState.Valid, first.State);
+            Assert.Equal(PathIdentityState.Valid, second.State);
+            Assert.Equal(2, probes);
+            Assert.Empty(Directory.EnumerateFileSystemEntries(root, ".listenarr-case-probe-*"));
+        }
+        finally
+        {
+            Directory.Delete(root, true);
+        }
     }
 
     [Fact]
