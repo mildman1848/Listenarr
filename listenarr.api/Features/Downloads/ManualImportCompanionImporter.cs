@@ -6,6 +6,11 @@
  * it under the terms of the GNU Affero General Public License as published
  * by the Free Software Foundation, either version 3 of the License, or
  * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU Affero General Public License for more details.
  */
 
 using Listenarr.Api.Dtos.ManualImport;
@@ -21,6 +26,7 @@ public sealed class ManualImportCompanionImporter
     private readonly IFileSystemSemanticsResolver _semanticsResolver;
     private readonly ILibraryDirectoryOwnershipStore _directoryOwnershipStore;
     private readonly ILogger<ManualImportCompanionImporter> _logger;
+    private readonly IAudiobookFileService? _audiobookFileService;
 
     public ManualImportCompanionImporter(
         IMetadataService metadataService,
@@ -28,7 +34,8 @@ public sealed class ManualImportCompanionImporter
         IFileSystem fileSystem,
         IFileSystemSemanticsResolver semanticsResolver,
         ILibraryDirectoryOwnershipStore directoryOwnershipStore,
-        ILogger<ManualImportCompanionImporter> logger)
+        ILogger<ManualImportCompanionImporter> logger,
+        IAudiobookFileService? audiobookFileService = null)
     {
         _metadataService = metadataService;
         _fileMover = fileMover;
@@ -36,6 +43,7 @@ public sealed class ManualImportCompanionImporter
         _semanticsResolver = semanticsResolver;
         _directoryOwnershipStore = directoryOwnershipStore;
         _logger = logger;
+        _audiobookFileService = audiobookFileService;
     }
 
     public async Task<IReadOnlyCollection<FileUtils.AudioMatchProfile>> BuildAudioMatchProfilesAsync(
@@ -80,6 +88,10 @@ public sealed class ManualImportCompanionImporter
             return 0;
         }
 
+        var targetAudiobook = results
+            .Where(result => result.Success && result.Audiobook?.Id == audiobookIds[0])
+            .Select(result => result.Audiobook)
+            .FirstOrDefault();
         var destinationRoot = ManualImportPathPlanner.DetermineScanPath(results
             .Where(r => r.Success && !string.IsNullOrWhiteSpace(r.DestinationPath))
             .Select(r => r.DestinationPath!)
@@ -166,6 +178,35 @@ public sealed class ManualImportCompanionImporter
                 var destinationDirectory = Path.GetDirectoryName(destinationPath)
                     ?? throw new InvalidOperationException(
                         "The companion import destination has no parent directory.");
+                if (FileUtils.IsAudioFile(companionFile))
+                {
+                    if (_audiobookFileService == null || targetAudiobook == null)
+                    {
+                        _logger.LogWarning(
+                            "Skipping audio companion file {FilePath} because destination ownership cannot be verified",
+                            companionFile);
+                        continue;
+                    }
+
+                    var ownership = await _audiobookFileService.CheckAudiobookFileOwnershipAsync(
+                        targetAudiobook,
+                        destinationPath,
+                        destinationDirectory,
+                        cancellationToken);
+                    if (ownership.Outcome is not (
+                            AudiobookFileOwnershipCheckOutcome.Available or
+                            AudiobookFileOwnershipCheckOutcome.AlreadyOwnedByAudiobook))
+                    {
+                        _logger.LogWarning(
+                            "Skipping audio companion file {FilePath} because destination {DestinationPath} is not available: {Outcome}. {Reason}",
+                            companionFile,
+                            destinationPath,
+                            ownership.Outcome,
+                            ownership.Reason);
+                        continue;
+                    }
+                }
+
                 await _directoryOwnershipStore.EnsureCreatedHierarchyAsync(
                     destinationDirectory,
                     destinationRoot,
