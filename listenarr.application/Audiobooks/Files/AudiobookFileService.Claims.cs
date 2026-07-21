@@ -14,7 +14,7 @@ public partial class AudiobookFileService
             plannedPhysicalPath,
             plannedBasePath,
             requireAudioFile: true,
-            cancellationToken);
+            cancellationToken: cancellationToken);
 
     public Task<AudiobookFileOwnershipCheckResult> CheckPathOwnershipAsync(
         Audiobook audiobook,
@@ -26,7 +26,7 @@ public partial class AudiobookFileService
             plannedPhysicalPath,
             plannedBasePath,
             requireAudioFile: false,
-            cancellationToken);
+            cancellationToken: cancellationToken);
 
     private Task<AudiobookFileOwnershipCheckResult> CheckPlannedPathOwnershipAsync(
         Audiobook audiobook,
@@ -64,7 +64,7 @@ public partial class AudiobookFileService
                         plannedPhysicalPath,
                         token,
                         requireExistingFile: false,
-                        requireAudioFile);
+                        requireAudioFile: requireAudioFile);
                     if (authorization.Path == null)
                     {
                         return new AudiobookFileOwnershipCheckResult(
