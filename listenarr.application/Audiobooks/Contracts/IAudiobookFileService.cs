@@ -26,6 +26,12 @@ namespace Listenarr.Application.Audiobooks.Contracts
             string? plannedBasePath = null,
             CancellationToken cancellationToken = default);
 
+        Task<AudiobookFileOwnershipCheckResult> CheckPathOwnershipAsync(
+            Audiobook audiobook,
+            string plannedPhysicalPath,
+            string? plannedBasePath = null,
+            CancellationToken cancellationToken = default);
+
         Task<AudiobookFileClaimResult> ClaimAudiobookFileAsync(
             Audiobook audiobook,
             AudiobookFile file,
