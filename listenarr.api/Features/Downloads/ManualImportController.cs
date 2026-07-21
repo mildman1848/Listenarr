@@ -86,7 +86,8 @@ public partial class ManualImportController : ControllerBase
             fileSystem,
             semanticsResolver,
             directoryOwnershipStore,
-            Microsoft.Extensions.Logging.Abstractions.NullLogger<ManualImportCompanionImporter>.Instance);
+            Microsoft.Extensions.Logging.Abstractions.NullLogger<ManualImportCompanionImporter>.Instance,
+            audiobookFileService);
     }
 
     /// <summary>
