@@ -9,7 +9,8 @@ public partial class AudiobookFileService
         Audiobook audiobook,
         string physicalPath,
         CancellationToken cancellationToken,
-        bool requireExistingFile = true)
+        bool requireExistingFile = true,
+        bool requireAudioFile = true)
     {
         try
         {
@@ -21,7 +22,7 @@ public partial class AudiobookFileService
                     "The audiobook file does not exist or is a linked filesystem entry.");
             }
 
-            if (!FileUtils.IsAudioFile(physicalPath))
+            if (requireAudioFile && !FileUtils.IsAudioFile(physicalPath))
             {
                 return AuthorizedClaimPath.Failed(
                     "The claimed audiobook file is not a supported audio file.");
