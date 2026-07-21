@@ -1,4 +1,5 @@
 using Listenarr.Domain.Common;
+using Microsoft.Extensions.Logging;
 
 namespace Listenarr.Application.Downloads.Import;
 
