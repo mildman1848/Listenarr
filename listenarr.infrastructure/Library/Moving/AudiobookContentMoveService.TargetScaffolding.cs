@@ -125,6 +125,7 @@ internal sealed partial class AudiobookContentMoveService
             target,
             publishedRoot,
             request.TargetSemantics);
+        InvokeBeforeTargetScaffoldPublication(request.JobId);
         Directory.Move(temporaryRoot, publishedRoot);
         ValidateExistingMoveDirectory(publishedRoot, "published target scaffolding");
         ValidatePublishedScaffoldTree(

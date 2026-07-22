@@ -65,6 +65,11 @@ internal enum CompletedArtifactCleanupFaultPoint
     BeforeFinalDestinationOwnershipValidation
 }
 
+internal enum TargetScaffoldPreparationFaultPoint
+{
+    BeforePublication
+}
+
 internal enum TargetScaffoldCleanupFaultPoint
 {
     BeforeQuarantineRename,
@@ -141,6 +146,12 @@ internal interface IMoveFaultInjector
     void OnCompletedArtifactCleanup(
         Guid jobId,
         CompletedArtifactCleanupFaultPoint faultPoint)
+    {
+    }
+
+    void OnTargetScaffoldPreparation(
+        Guid jobId,
+        TargetScaffoldPreparationFaultPoint faultPoint)
     {
     }
 
