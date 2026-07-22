@@ -67,7 +67,8 @@ internal enum CompletedArtifactCleanupFaultPoint
 
 internal enum TargetScaffoldPreparationFaultPoint
 {
-    BeforePublication
+    BeforePublication,
+    AfterPublication
 }
 
 internal enum TargetScaffoldCleanupFaultPoint
