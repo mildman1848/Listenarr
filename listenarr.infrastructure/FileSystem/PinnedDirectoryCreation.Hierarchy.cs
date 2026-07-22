@@ -62,18 +62,24 @@ internal sealed partial class PinnedDirectoryCreation
 
         internal string FullPath { get; }
 
-        internal bool VisiblePathMatches()
+        internal bool VisiblePathMatches() =>
+            VisiblePathMatches(FullPath, _followVisibleFinalLink);
+
+        internal bool VisiblePathMatches(
+            string visiblePath,
+            bool followVisibleFinalLink = false)
         {
             ThrowIfDisposed();
+            ArgumentException.ThrowIfNullOrWhiteSpace(visiblePath);
             try
             {
                 using var visible = OperatingSystem.IsWindows()
                     ? OpenDirectoryWindows(
-                        FullPath,
-                        openReparsePoint: !_followVisibleFinalLink)
+                        visiblePath,
+                        openReparsePoint: !followVisibleFinalLink)
                     : OpenDirectoryUnix(
-                        FullPath,
-                        noFollow: !_followVisibleFinalLink);
+                        visiblePath,
+                        noFollow: !followVisibleFinalLink);
                 return HandlesIdentifySameDirectory(_handle, visible);
             }
             catch (Exception exception) when (exception is
@@ -135,7 +141,7 @@ internal sealed partial class PinnedDirectoryCreation
                 FileShare.Read,
                 bufferSize: 81920,
                 FileOptions.Asynchronous | FileOptions.SequentialScan);
-            var fileHandle = OperatingSystem.IsWindows()
+            using var fileHandle = OperatingSystem.IsWindows()
                 ? CreateRelativeFileWindows(_handle, childName)
                 : CreateRelativeFileUnix(_handle, childName);
             await using var destination = new FileStream(

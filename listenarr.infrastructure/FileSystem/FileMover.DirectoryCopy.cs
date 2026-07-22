@@ -116,12 +116,32 @@ public partial class FileMover
                     "Directory copy staging or source changed before publication.");
             }
 
+            if (!stagingAnchor.VisiblePathMatches())
+            {
+                throw new IOException(
+                    "Directory copy staging identity changed before publication.");
+            }
+            if (BeforeDirectoryCopyPublicationForTestAsync != null)
+            {
+                await BeforeDirectoryCopyPublicationForTestAsync(stagingRoot);
+            }
+            if (!stagingAnchor.VisiblePathMatches())
+            {
+                throw new IOException(
+                    "Directory copy staging identity changed at the publication boundary.");
+            }
+
             try
             {
                 Directory.Move(stagingRoot, destinationRoot);
                 published = true;
+                if (!stagingAnchor.VisiblePathMatches(destinationRoot))
+                {
+                    throw new IOException(
+                        "The published destination does not identify the pinned staging directory.");
+                }
             }
-            catch (IOException) when (Directory.Exists(destinationRoot))
+            catch (IOException) when (!published && Directory.Exists(destinationRoot))
             {
                 if (await DirectoryCopySnapshotExactlyMatchesAsync(snapshot, destinationRoot))
                 {
@@ -132,7 +152,8 @@ public partial class FileMover
                     "Directory copy destination appeared with conflicting or unexpected content before publication.");
             }
 
-            if (!await DirectoryCopySnapshotExactlyMatchesAsync(snapshot, destinationRoot)
+            if (!stagingAnchor.VisiblePathMatches(destinationRoot)
+                || !await DirectoryCopySnapshotExactlyMatchesAsync(snapshot, destinationRoot)
                 || !await SourceSnapshotStillMatchesAsync(snapshot))
             {
                 throw new IOException(
