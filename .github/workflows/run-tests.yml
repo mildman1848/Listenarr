@@ -15,6 +15,57 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  linux-test-diagnostics:
+    runs-on: ubuntu-latest
+    env:
+      ASPNETCORE_ENVIRONMENT: Test
+      Playwright__Enabled: 'false'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - name: Restore and build
+        run: |
+          dotnet restore listenarr.slnx
+          dotnet build listenarr.slnx --no-restore --configuration Release
+      - name: Capture Linux TRX
+        run: |
+          set +e
+          dotnet test listenarr.slnx -c Release --no-build --logger "trx;LogFileName=linux-tests.trx" --results-directory test-results-linux
+          echo "EXIT_CODE=$?" > test-results-linux/exit.txt
+          exit 0
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-test-diagnostics
+          path: test-results-linux
+
+  windows-test-diagnostics:
+    runs-on: windows-latest
+    env:
+      ASPNETCORE_ENVIRONMENT: Test
+      Playwright__Enabled: 'false'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - name: Restore and build
+        run: |
+          dotnet restore listenarr.slnx
+          dotnet build listenarr.slnx --no-restore --configuration Release
+      - name: Capture Windows TRX
+        shell: pwsh
+        run: |
+          dotnet test listenarr.slnx -c Release --no-build --logger "trx;LogFileName=windows-tests.trx" --results-directory test-results-windows
+          $exitCode = $LASTEXITCODE
+          "EXIT_CODE=$exitCode" | Out-File -FilePath test-results-windows/exit.txt -Encoding utf8
+          exit 0
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-test-diagnostics
+          path: test-results-windows
+
   unit-tests:
     runs-on: ubuntu-latest
     env:
