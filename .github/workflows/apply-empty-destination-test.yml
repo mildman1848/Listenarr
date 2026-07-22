@@ -1,0 +1,27 @@
+name: Apply Empty Destination Test
+
+on:
+  pull_request:
+    branches: [ canary ]
+    types: [ synchronize, reopened ]
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: github.repository == 'Listenarrs/Listenarr' && github.head_ref == 'bugfix/unix-folder-name-space'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: bugfix/unix-folder-name-space
+      - name: Apply exact reviewed regression
+        run: python .github/scripts/lock-empty-destination-contract.py
+      - name: Commit exact regression
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add tests/Features/Api/Services/FileMoverFallbackTests.cs
+          git commit -m "test(filesystem): reject unowned empty move destinations"
+          git push origin HEAD:bugfix/unix-folder-name-space
