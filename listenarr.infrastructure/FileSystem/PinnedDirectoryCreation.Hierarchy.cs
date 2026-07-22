@@ -387,7 +387,7 @@ internal sealed partial class PinnedDirectoryCreation
     [DllImport("kernel32.dll")]
     private static extern IntPtr GetCurrentProcess();
 
-    [DllImport("kernel32.dll", SetLastError = true)]
+    [DllImport("kernel32.dll", EntryPoint = "DuplicateHandle", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool DuplicateHandleWindows(
         IntPtr sourceProcessHandle,
