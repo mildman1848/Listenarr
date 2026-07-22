@@ -1531,6 +1531,8 @@ namespace Listenarr.Tests.Features.Api.Services
                 }),
                 new FileSystemSemanticsResolver())
             {
+                BeforeDirectoryMoveAttemptForTest = () =>
+                    throw new IOException("Force the verified directory fallback."),
                 BeforeDirectoryCopyPublicationForTestAsync = _ =>
                 {
                     publicationHookRan = true;
