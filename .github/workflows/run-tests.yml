@@ -8,13 +8,30 @@ on:
     types: [ opened, synchronize, reopened ]
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: run-tests-${{ github.head_ref || github.ref }}
   cancel-in-progress: true
 
 jobs:
+  apply-explicit-tracked-path-test:
+    if: github.repository == 'Listenarrs/Listenarr' && github.head_ref == 'bugfix/unix-folder-name-space'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: bugfix/unix-folder-name-space
+      - name: Apply exact reviewed test call patch
+        run: python .github/scripts/fix-explicit-tracked-path-test.py
+      - name: Commit exact test call patch
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add tests/Features/Application/Downloads/Import/DownloadImportServiceTests.cs
+          git commit -m "test(paths): pass explicit tracked path semantics"
+          git push origin HEAD:bugfix/unix-folder-name-space
+
   unit-tests:
     runs-on: ubuntu-latest
     env:
