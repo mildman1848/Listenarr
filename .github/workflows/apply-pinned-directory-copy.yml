@@ -2,9 +2,9 @@ name: Apply Pinned Directory Copy
 
 # Temporary exact-patch workflow; removed immediately after generated diff review.
 on:
-  push:
+  pull_request:
     branches:
-      - bugfix/unix-folder-name-space
+      - canary
     paths:
       - .github/workflows/apply-pinned-directory-copy.yml
 
