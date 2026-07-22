@@ -2,15 +2,27 @@ namespace Listenarr.Infrastructure.FileSystem;
 
 internal static class ExclusiveDirectoryCreator
 {
+    private static readonly AsyncLocal<Action<string>?> BeforeOpenParentHook = new();
     private static readonly AsyncLocal<Action<string>?> BeforeCreateHook = new();
+
+    internal static IDisposable PushBeforeOpenParentHook(Action<string> hook)
+    {
+        ArgumentNullException.ThrowIfNull(hook);
+        var previous = BeforeOpenParentHook.Value;
+        BeforeOpenParentHook.Value = hook;
+        return new HookScope(() => BeforeOpenParentHook.Value = previous);
+    }
 
     internal static IDisposable PushBeforeCreateHook(Action<string> hook)
     {
         ArgumentNullException.ThrowIfNull(hook);
         var previous = BeforeCreateHook.Value;
         BeforeCreateHook.Value = hook;
-        return new HookScope(previous);
+        return new HookScope(() => BeforeCreateHook.Value = previous);
     }
+
+    internal static void InvokeBeforeOpenParentHook(string path) =>
+        BeforeOpenParentHook.Value?.Invoke(path);
 
     internal static void InvokeBeforeCreateHook(string path) =>
         BeforeCreateHook.Value?.Invoke(path);
@@ -33,7 +45,7 @@ internal static class ExclusiveDirectoryCreator
         string childName) =>
         PinnedDirectoryCreation.TryCreate(parentPath, childName);
 
-    private sealed class HookScope(Action<string>? previous) : IDisposable
+    private sealed class HookScope(Action restore) : IDisposable
     {
         private bool _disposed;
 
@@ -44,7 +56,7 @@ internal static class ExclusiveDirectoryCreator
                 return;
             }
 
-            BeforeCreateHook.Value = previous;
+            restore();
             _disposed = true;
         }
     }
