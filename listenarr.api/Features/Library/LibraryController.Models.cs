@@ -22,10 +22,25 @@ public partial class LibraryController
         public List<int> Ids { get; set; } = [];
     }
 
+    public enum BulkPathChangeMode
+    {
+        None,
+        MetadataOnly,
+        Physical
+    }
+
+    public class BulkPathChangeRequest
+    {
+        public BulkPathChangeMode Mode { get; set; }
+        public string? DestinationRootOrPath { get; set; }
+        public bool DeleteEmptySource { get; set; } = true;
+    }
+
     public class BulkUpdateRequest
     {
         public List<int> Ids { get; set; } = [];
         public Dictionary<string, object> Updates { get; set; } = [];
+        public BulkPathChangeRequest? PathChange { get; set; }
     }
 
     public class AddToLibraryRequest
