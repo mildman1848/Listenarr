@@ -263,7 +263,7 @@ internal sealed partial class PinnedDirectoryCreation : IDisposable
             fileHandle,
             FileAccess.Write,
             bufferSize: 4096,
-            isAsync: true);
+            isAsync: false);
         var bytes = Encoding.UTF8.GetBytes(contents);
         await stream.WriteAsync(bytes, cancellationToken);
         await stream.FlushAsync(cancellationToken);
