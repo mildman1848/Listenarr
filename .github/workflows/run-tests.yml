@@ -8,13 +8,30 @@ on:
     types: [ opened, synchronize, reopened ]
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: run-tests-${{ github.head_ref || github.ref }}
   cancel-in-progress: true
 
 jobs:
+  apply-empty-destination-regressions:
+    if: github.repository == 'Listenarrs/Listenarr' && github.head_ref == 'bugfix/unix-folder-name-space'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: bugfix/unix-folder-name-space
+      - name: Apply exact reviewed regression patch
+        run: python .github/scripts/update-filemover-empty-destination-tests.py
+      - name: Commit exact regression patch
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add tests/Features/Api/Services/FileMoverFallbackTests.cs
+          git commit -m "test(filesystem): lock empty destination handoff contract"
+          git push origin HEAD:bugfix/unix-folder-name-space
+
   unit-tests:
     runs-on: ubuntu-latest
     env:
