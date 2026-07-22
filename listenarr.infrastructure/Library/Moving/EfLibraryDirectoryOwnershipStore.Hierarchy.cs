@@ -57,92 +57,117 @@ internal sealed partial class EfLibraryDirectoryOwnershipStore
         hierarchy.Reverse();
 
         var createdOwnerships = new List<LibraryDirectoryOwnership>();
-        foreach (var directory in hierarchy)
+        var currentAnchor = PinnedDirectoryCreation.OpenPinnedBoundary(boundary);
+        try
         {
-            cancellationToken.ThrowIfCancellationRequested();
-            var parent = Path.GetDirectoryName(directory)
-                ?? throw new InvalidOperationException(
-                    "The directory creation target has no parent.");
-            ValidateExistingDirectory(
-                parent,
-                "directory creation parent",
-                allowReparsePoint: FileSystemPathIdentity.AreEquivalent(
-                    parent,
-                    boundary,
-                    semantics));
-            if (File.Exists(directory))
+            foreach (var directory in hierarchy)
             {
-                throw new InvalidOperationException(
-                    "The directory creation target is occupied by a file.");
-            }
-
-            using var creation = ExclusiveDirectoryCreator.TryCreatePinned(
-                parent,
-                Path.GetFileName(directory));
-            if (!creation.Created)
-            {
-                ValidateExistingDirectory(
-                    directory,
-                    "existing directory creation target",
-                    allowReparsePoint: false);
-                var existingResolution = await ResolveOwnedAsync(
-                    directory,
-                    semantics,
-                    cancellationToken);
-                if (existingResolution.State == LibraryDirectoryOwnershipResolutionState.Owned)
-                {
-                    await RecordCreatedAsync(
-                        new LibraryDirectoryOwnershipClaim(
-                            directory,
-                            semantics,
-                            creationWorkflow,
-                            creationOperationId,
-                            audiobookId),
-                        cancellationToken);
-                }
-                else if (existingResolution.State is
-                    LibraryDirectoryOwnershipResolutionState.Conflict
-                    or LibraryDirectoryOwnershipResolutionState.Unavailable)
+                cancellationToken.ThrowIfCancellationRequested();
+                if (!currentAnchor.VisiblePathMatches())
                 {
                     throw new InvalidOperationException(
-                        existingResolution.Reason
-                            ?? "Existing directory ownership is conflicting or unavailable.");
+                        "The visible directory hierarchy changed after its boundary was pinned.");
                 }
-                continue;
-            }
 
-            // The pinned parent and child handles stay alive through database persistence and
-            // marker publication. External pathname replacement therefore cannot redirect the
-            // creation or either ownership proof outside the validated parent directory.
-            try
-            {
-                createdOwnerships.Add(await RecordPinnedCreatedAsync(
-                    new LibraryDirectoryOwnershipClaim(
-                        directory,
-                        semantics,
-                        creationWorkflow,
-                        creationOperationId,
-                        audiobookId),
-                    creation,
-                    CancellationToken.None));
-            }
-            catch (Exception exception) when (exception is not (
-                OutOfMemoryException or StackOverflowException))
-            {
-                // Path-based compensation is allowed only while the visible path still
-                // identifies the pinned generation. A replaced pathname is preserved.
-                if (creation.VisiblePathMatches())
+                var childName = Path.GetFileName(directory);
+                using var creation = currentAnchor.TryCreateChild(childName);
+                PinnedDirectoryCreation.PinnedDirectoryAnchor nextAnchor;
+                if (!creation.Created)
                 {
-                    await TryCompensateFailedExclusiveCreationAsync(
-                        directory,
-                        parent,
-                        semantics);
+                    nextAnchor = currentAnchor.OpenExistingChild(childName);
+                    try
+                    {
+                        EnsureVisibleAnchor(nextAnchor);
+                        var existingResolution = await ResolveOwnedAsync(
+                            directory,
+                            semantics,
+                            cancellationToken);
+                        EnsureVisibleAnchor(nextAnchor);
+                        if (existingResolution.State == LibraryDirectoryOwnershipResolutionState.Owned)
+                        {
+                            await RecordCreatedAsync(
+                                new LibraryDirectoryOwnershipClaim(
+                                    directory,
+                                    semantics,
+                                    creationWorkflow,
+                                    creationOperationId,
+                                    audiobookId),
+                                cancellationToken);
+                            EnsureVisibleAnchor(nextAnchor);
+                        }
+                        else if (existingResolution.State is
+                            LibraryDirectoryOwnershipResolutionState.Conflict
+                            or LibraryDirectoryOwnershipResolutionState.Unavailable)
+                        {
+                            throw new InvalidOperationException(
+                                existingResolution.Reason
+                                    ?? "Existing directory ownership is conflicting or unavailable.");
+                        }
+                    }
+                    catch
+                    {
+                        nextAnchor.Dispose();
+                        throw;
+                    }
                 }
-                throw;
-            }
-        }
+                else
+                {
+                    try
+                    {
+                        createdOwnerships.Add(await RecordPinnedCreatedAsync(
+                            new LibraryDirectoryOwnershipClaim(
+                                directory,
+                                semantics,
+                                creationWorkflow,
+                                creationOperationId,
+                                audiobookId),
+                            creation,
+                            CancellationToken.None));
+                        if (!creation.VisiblePathMatches())
+                        {
+                            throw new InvalidOperationException(
+                                "The visible created directory changed before hierarchy continuation.");
+                        }
 
-        return createdOwnerships;
+                        nextAnchor = creation.OpenCreatedDirectoryAnchor();
+                        EnsureVisibleAnchor(nextAnchor);
+                    }
+                    catch (Exception exception) when (exception is not (
+                        OutOfMemoryException or StackOverflowException))
+                    {
+                        // Path-based compensation is allowed only while the visible path still
+                        // identifies the pinned generation. A replaced pathname is preserved.
+                        if (creation.VisiblePathMatches())
+                        {
+                            await TryCompensateFailedExclusiveCreationAsync(
+                                directory,
+                                currentAnchor.FullPath,
+                                semantics);
+                        }
+                        throw;
+                    }
+                }
+
+                currentAnchor.Dispose();
+                currentAnchor = nextAnchor;
+            }
+
+            return createdOwnerships;
+        }
+        finally
+        {
+            currentAnchor.Dispose();
+        }
+    }
+
+    private static void EnsureVisibleAnchor(
+        PinnedDirectoryCreation.PinnedDirectoryAnchor anchor)
+    {
+        if (!anchor.VisiblePathMatches())
+        {
+            throw new InvalidOperationException(
+                "The visible directory hierarchy changed while a component was pinned.");
+        }
     }
 
     private async Task TryCompensateFailedExclusiveCreationAsync(
