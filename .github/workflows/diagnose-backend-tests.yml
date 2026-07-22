@@ -1,0 +1,68 @@
+name: Diagnose Backend Tests
+
+on:
+  pull_request:
+    branches: [ canary ]
+    types: [ synchronize, reopened ]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: diagnose-backend-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - run: dotnet restore listenarr.slnx
+      - id: tests
+        shell: bash
+        run: |
+          set +e
+          mkdir -p TestResults/linux
+          dotnet test listenarr.slnx -c Release --no-restore \
+            --logger "trx;LogFileName=linux.trx" \
+            --results-directory TestResults/linux
+          status=$?
+          echo "status=$status" >> "$GITHUB_OUTPUT"
+          exit 0
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-tests-linux-trx
+          path: TestResults/linux
+      - if: steps.tests.outputs.status != '0'
+        run: exit 1
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - run: dotnet restore listenarr.slnx
+      - id: tests
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path TestResults/windows | Out-Null
+          dotnet test listenarr.slnx -c Release --no-restore `
+            --logger "trx;LogFileName=windows.trx" `
+            --results-directory TestResults/windows
+          $status = $LASTEXITCODE
+          "status=$status" >> $env:GITHUB_OUTPUT
+          exit 0
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-tests-windows-trx
+          path: TestResults/windows
+      - if: steps.tests.outputs.status != '0'
+        shell: pwsh
+        run: exit 1
