@@ -13,11 +13,21 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Print compiler errors
+      - name: Capture compiler errors
+        id: build
         shell: bash
+        continue-on-error: true
         run: |
           dotnet restore listenarr.slnx --verbosity quiet > /tmp/restore.log 2>&1
-          if ! dotnet build listenarr.slnx --no-restore --configuration Release --consoleLoggerParameters:ErrorsOnly > /tmp/build.log 2>&1; then
-            grep -E "error (CS|NETSDK)|: error " /tmp/build.log | head -n 40
-            exit 1
-          fi
+          dotnet build listenarr.slnx --no-restore --configuration Release --consoleLoggerParameters:ErrorsOnly > /tmp/build.log 2>&1
+          status=$?
+          grep -E "error (CS|NETSDK)|: error " /tmp/build.log | head -n 80 > /tmp/compiler-errors.txt || true
+          echo "status=$status" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: compiler-errors
+          path: /tmp/compiler-errors.txt
+          if-no-files-found: error
+      - name: Fail when build failed
+        if: steps.build.outputs.status != '0'
+        run: exit 1
