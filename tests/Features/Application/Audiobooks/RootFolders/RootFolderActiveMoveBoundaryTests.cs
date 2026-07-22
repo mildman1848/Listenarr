@@ -1,5 +1,5 @@
-using Microsoft.EntityFrameworkCore;
 using Listenarr.Infrastructure.Persistence.Repositories;
+using Microsoft.EntityFrameworkCore;
 
 namespace Listenarr.Tests.Features.Application.Audiobooks.RootFolders;
 
@@ -20,11 +20,12 @@ public sealed class RootFolderActiveMoveBoundaryTests
             Mock.Of<ILogger<EfRootFolderRepository>>());
         var moveParent = Path.GetFullPath(Path.Join(Path.GetTempPath(), $"move-parent-{Guid.NewGuid():N}"));
         var rootPath = Path.Join(moveParent, "nested-root");
-        var root = await repository.AddAsync(new RootFolder
+        var root = new RootFolder
         {
             Name = "Nested",
             Path = rootPath
-        });
+        };
+        await repository.AddAsync(root);
         var moveQueue = new Mock<IMoveQueueService>();
         moveQueue.Setup(service => service.GetActiveJobsAsync(It.IsAny<CancellationToken>()))
             .ReturnsAsync([
@@ -80,16 +81,18 @@ public sealed class RootFolderActiveMoveBoundaryTests
             factory,
             Mock.Of<ILogger<EfRootFolderRepository>>());
         var moveParent = Path.GetFullPath(Path.Join(Path.GetTempPath(), $"move-parent-{Guid.NewGuid():N}"));
-        var source = await repository.AddAsync(new RootFolder
+        var source = new RootFolder
         {
             Name = "Source",
             Path = Path.Join(moveParent, "nested-source")
-        });
-        var target = await repository.AddAsync(new RootFolder
+        };
+        var target = new RootFolder
         {
             Name = "Target",
             Path = Path.GetFullPath(Path.Join(Path.GetTempPath(), $"target-{Guid.NewGuid():N}"))
-        });
+        };
+        await repository.AddAsync(source);
+        await repository.AddAsync(target);
         await using (var db = await factory.CreateDbContextAsync())
         {
             db.MoveJobs.Add(new MoveJob
