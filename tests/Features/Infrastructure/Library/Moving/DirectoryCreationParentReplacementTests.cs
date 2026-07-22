@@ -15,6 +15,50 @@ public sealed class DirectoryCreationParentReplacementTests : BaseTests
     public Task EnsureCreatedHierarchyAsync_ParentReplacedAfterHandleOpen_DoesNotCreateOutsideBoundary() =>
         AssertParentReplacementBlockedAsync(replaceBeforeOpen: false);
 
+    [Fact]
+    public async Task EnsureCreatedHierarchyAsync_LinkedManagedBoundary_CreatesInsidePinnedTarget()
+    {
+        var root = FileService.GetTempDirectory("directory-create-linked-boundary");
+        var physicalBoundary = Path.Join(root, "physical");
+        var linkedBoundary = Path.Join(root, "linked");
+        Directory.CreateDirectory(physicalBoundary);
+        if (!TryCreateDirectoryLink(linkedBoundary, physicalBoundary))
+        {
+            return;
+        }
+
+        var destination = Path.Join(linkedBoundary, "Author", "Book");
+        var semantics = FileSystemPathSemantics.CurrentHostDefault;
+        var store = _provider.GetRequiredService<ILibraryDirectoryOwnershipStore>();
+        try
+        {
+            var created = await store.EnsureCreatedHierarchyAsync(
+                destination,
+                linkedBoundary,
+                semantics,
+                "linked-boundary-regression");
+
+            Assert.Equal(2, created.Count);
+            Assert.True(Directory.Exists(Path.Join(physicalBoundary, "Author", "Book")));
+            Assert.True(File.Exists(Path.Join(
+                physicalBoundary,
+                "Author",
+                "Book",
+                ".listenarr-directory-owner.json")));
+            var resolution = await store.ResolveOwnedAsync(
+                destination,
+                semantics,
+                CancellationToken.None);
+            Assert.Equal(
+                LibraryDirectoryOwnershipResolutionState.Owned,
+                resolution.State);
+        }
+        finally
+        {
+            TryDeleteDirectoryLink(linkedBoundary);
+        }
+    }
+
     private async Task AssertParentReplacementBlockedAsync(bool replaceBeforeOpen)
     {
         var suffix = replaceBeforeOpen ? "before-open" : "after-open";
