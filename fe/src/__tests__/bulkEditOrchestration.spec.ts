@@ -80,6 +80,15 @@ describe('bulk edit orchestration', () => {
       expect.objectContaining({ title: 'Book One', authors: ['Author One'] }),
       '/library-new',
     )
+    expect(
+      Math.max(...dependencies.getAudiobook.mock.invocationCallOrder),
+    ).toBeLessThan(dependencies.bulkUpdateAudiobooks.mock.invocationCallOrder[0])
+    expect(
+      Math.max(...dependencies.previewLibraryPath.mock.invocationCallOrder),
+    ).toBeLessThan(dependencies.bulkUpdateAudiobooks.mock.invocationCallOrder[0])
+    expect(dependencies.bulkUpdateAudiobooks.mock.invocationCallOrder[0]).toBeLessThan(
+      dependencies.moveAudiobook.mock.invocationCallOrder[0],
+    )
     expect(dependencies.moveAudiobook).toHaveBeenNthCalledWith(
       1,
       1,
