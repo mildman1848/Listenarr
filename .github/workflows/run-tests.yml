@@ -15,56 +15,6 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  backend-format-diagnostics:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: 10.0.x
-      - name: Restore
-        run: dotnet restore listenarr.slnx
-      - name: Generate formatter patch
-        run: |
-          dotnet format listenarr.slnx --no-restore --verbosity minimal
-          git diff --binary > backend-format.patch
-          git diff --name-only > backend-format-files.txt
-      - uses: actions/upload-artifact@v4
-        with:
-          name: backend-format-diagnostics
-          path: |
-            backend-format.patch
-            backend-format-files.txt
-          if-no-files-found: error
-
-  backend-tests-windows-diagnostics:
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: 10.0.x
-      - name: Restore
-        run: dotnet restore listenarr.slnx
-      - name: Build backend
-        run: dotnet build listenarr.slnx --no-restore --configuration Release
-      - name: Run backend tests with TRX
-        id: tests
-        shell: pwsh
-        run: |
-          dotnet test listenarr.slnx -c Release --no-build --logger "trx;LogFileName=windows-tests.trx" --results-directory TestResults
-          "status=$LASTEXITCODE" >> $env:GITHUB_OUTPUT
-          exit 0
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: windows-test-diagnostics
-          path: TestResults/**/*.trx
-          if-no-files-found: error
-      - name: Fail when tests failed
-        if: steps.tests.outputs.status != '0'
-        run: exit 1
-
   unit-tests:
     runs-on: ubuntu-latest
     env:
