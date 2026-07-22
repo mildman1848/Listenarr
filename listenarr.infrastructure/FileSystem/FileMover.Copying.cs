@@ -16,6 +16,13 @@ namespace Listenarr.Infrastructure.FileSystem
         SourcePathRecreated
     }
 
+    internal enum SameContentShortcutOutcome
+    {
+        NotApplicable,
+        Completed,
+        Blocked
+    }
+
     public partial class FileMover : IFileMover
     {
         public async Task<bool> CopyDirectoryAsync(string sourceDir, string destDir)
@@ -137,9 +144,21 @@ namespace Listenarr.Infrastructure.FileSystem
                     return true;
                 }
 
-                if (await TrySkipSameContentAsync(FileAction.Copy, sourceFile, destFile))
+                if (BeforeFileSameContentShortcutForTestAsync != null)
                 {
-                    return true;
+                    await BeforeFileSameContentShortcutForTestAsync(
+                        FileAction.Copy,
+                        sourceFile,
+                        destFile);
+                }
+
+                var shortcutOutcome = await TrySkipSameContentAsync(
+                    FileAction.Copy,
+                    sourceFile,
+                    destFile);
+                if (shortcutOutcome != SameContentShortcutOutcome.NotApplicable)
+                {
+                    return shortcutOutcome == SameContentShortcutOutcome.Completed;
                 }
 
                 File.Copy(sourceFile, destFile, true);
@@ -185,9 +204,21 @@ namespace Listenarr.Infrastructure.FileSystem
                     Directory.CreateDirectory(destDir);
                 }
 
-                if (await TrySkipSameContentAsync(FileAction.HardlinkCopy, sourceFile, destFile))
+                if (BeforeFileSameContentShortcutForTestAsync != null)
                 {
-                    return true;
+                    await BeforeFileSameContentShortcutForTestAsync(
+                        FileAction.HardlinkCopy,
+                        sourceFile,
+                        destFile);
+                }
+
+                var shortcutOutcome = await TrySkipSameContentAsync(
+                    FileAction.HardlinkCopy,
+                    sourceFile,
+                    destFile);
+                if (shortcutOutcome != SameContentShortcutOutcome.NotApplicable)
+                {
+                    return shortcutOutcome == SameContentShortcutOutcome.Completed;
                 }
 
                 var tempDestName = Path.GetFileName(Path.GetRandomFileName()) + ".tmp";
@@ -394,20 +425,55 @@ namespace Listenarr.Infrastructure.FileSystem
             return IdempotentFileMoveOutcome.Completed;
         }
 
-        private async Task<bool> TrySkipSameContentAsync(FileAction action, string sourceFile, string destFile)
+        private async Task<SameContentShortcutOutcome> TrySkipSameContentAsync(
+            FileAction action,
+            string sourceFile,
+            string destFile)
         {
             if (!File.Exists(sourceFile) || !File.Exists(destFile))
             {
-                return false;
+                return SameContentShortcutOutcome.NotApplicable;
+            }
+
+            if (await IsFilesystemAliasAsync(sourceFile, destFile))
+            {
+                LogMutation(
+                    FileMutationOutcome.Blocked,
+                    action,
+                    sourceFile,
+                    destFile,
+                    "Source and destination became linked aliases before the same-content shortcut");
+                return SameContentShortcutOutcome.Blocked;
             }
 
             if (!await FileSystemSafety.FilesHaveSameContentAsync(sourceFile, destFile))
             {
-                return false;
+                return SameContentShortcutOutcome.NotApplicable;
             }
 
-            LogMutation(FileMutationOutcome.Skipped, action, sourceFile, destFile, "Destination already has identical content");
-            return true;
+            if (await IsFilesystemAliasAsync(sourceFile, destFile))
+            {
+                LogMutation(
+                    FileMutationOutcome.Blocked,
+                    action,
+                    sourceFile,
+                    destFile,
+                    "Source and destination became linked aliases before the same-content shortcut");
+                return SameContentShortcutOutcome.Blocked;
+            }
+
+            if (!await FileSystemSafety.FilesHaveSameContentAsync(sourceFile, destFile))
+            {
+                return SameContentShortcutOutcome.NotApplicable;
+            }
+
+            LogMutation(
+                FileMutationOutcome.Skipped,
+                action,
+                sourceFile,
+                destFile,
+                "Destination already has identical content");
+            return SameContentShortcutOutcome.Completed;
         }
 
         private void LogMutation(FileMutationOutcome outcome, FileAction action, string source, string? destination, string? reason = null)
