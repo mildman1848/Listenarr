@@ -13,8 +13,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: 10.0.x
-      - run: dotnet restore listenarr.slnx
-      - run: dotnet build listenarr.slnx --no-restore --configuration Release --consoleLoggerParameters:ErrorsOnly
+      - name: Print compiler errors
+        shell: bash
+        run: |
+          dotnet restore listenarr.slnx --verbosity quiet > /tmp/restore.log 2>&1
+          if ! dotnet build listenarr.slnx --no-restore --configuration Release --consoleLoggerParameters:ErrorsOnly > /tmp/build.log 2>&1; then
+            grep -E "error (CS|NETSDK)|: error " /tmp/build.log | head -n 40
+            exit 1
+          fi
