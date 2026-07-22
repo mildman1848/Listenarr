@@ -16,17 +16,18 @@ jobs:
       - name: Capture compiler errors
         id: build
         shell: bash
-        continue-on-error: true
         run: |
           dotnet restore listenarr.slnx --verbosity quiet > /tmp/restore.log 2>&1
+          set +e
           dotnet build listenarr.slnx --no-restore --configuration Release --consoleLoggerParameters:ErrorsOnly > /tmp/build.log 2>&1
           status=$?
-          grep -E "error (CS|NETSDK)|: error " /tmp/build.log | head -n 80 > /tmp/compiler-errors.txt || true
+          set -e
+          tail -n 200 /tmp/build.log > /tmp/build-tail.txt
           echo "status=$status" >> "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@v4
         with:
           name: compiler-errors
-          path: /tmp/compiler-errors.txt
+          path: /tmp/build-tail.txt
           if-no-files-found: error
       - name: Fail when build failed
         if: steps.build.outputs.status != '0'
