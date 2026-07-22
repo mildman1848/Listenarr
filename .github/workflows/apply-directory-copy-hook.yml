@@ -18,6 +18,7 @@ jobs:
         with:
           ref: bugfix/unix-folder-name-space
           fetch-depth: 0
+      # This workflow applies one exact, reviewed test-hook invocation and is removed afterward.
       - name: Apply exact staging hook patch
         shell: python
         run: |
