@@ -122,10 +122,7 @@ public partial class AudiobookContentMoveServiceTests
             Assert.False(File.Exists(Path.Join(
                 externalQuarantine,
                 ".listenarr-quarantine-owner.json")));
-            Assert.True(File.Exists(Path.Join(
-                displacedParent,
-                Path.GetFileName(source),
-                "book.m4b")));
+            Assert.Equal("audio", await File.ReadAllTextAsync(Path.Join(target, "book.m4b")));
         }
         finally
         {

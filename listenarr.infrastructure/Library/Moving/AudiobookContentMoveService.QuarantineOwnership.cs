@@ -98,6 +98,19 @@ internal sealed partial class AudiobookContentMoveService
         }
 
         ValidateMoveRootPath(quarantineRoot, mustExist: false, "quarantine");
+        var normalizedSourceParent = Path.GetFullPath(sourceParent);
+        var normalizedQuarantineRoot = Path.GetFullPath(quarantineRoot);
+        var quarantineParent = Path.GetDirectoryName(normalizedQuarantineRoot);
+        if (string.IsNullOrWhiteSpace(quarantineParent)
+            || !FileSystemPathIdentity.AreEquivalent(
+                normalizedSourceParent,
+                quarantineParent,
+                sourceSemantics))
+        {
+            throw new MoveNeedsAttentionException(
+                "The move quarantine directory escaped its validated source parent.");
+        }
+
         await EnsureMutationAuthorizedAsync(
             jobId,
             leaseToken,
@@ -107,7 +120,27 @@ internal sealed partial class AudiobookContentMoveService
             targetSemantics,
             cancellationToken);
         ValidateMoveRootPath(quarantineRoot, mustExist: false, "quarantine");
-        Directory.CreateDirectory(quarantineRoot);
+        using var quarantineCreation = PinnedDirectoryCreation.TryCreate(
+            normalizedSourceParent,
+            Path.GetFileName(normalizedQuarantineRoot));
+        if (!quarantineCreation.Created)
+        {
+            throw new MoveNeedsAttentionException(
+                "The move quarantine directory appeared before Listenarr could claim it exclusively.");
+        }
+        if (!quarantineCreation.VisiblePathMatches())
+        {
+            throw new MoveNeedsAttentionException(
+                "The move quarantine parent changed during exclusive creation.");
+        }
+
+        using var quarantineAnchor = quarantineCreation.OpenCreatedDirectoryAnchor();
+        if (!quarantineAnchor.VisiblePathMatches())
+        {
+            throw new MoveNeedsAttentionException(
+                "The move quarantine directory identity changed after exclusive creation.");
+        }
+
         ValidateExistingMoveDirectory(quarantineRoot, "quarantine directory");
         var marker = CreateOwnershipMarker(
             QuarantineDirectoryArtifactType,
@@ -137,7 +170,8 @@ internal sealed partial class AudiobookContentMoveService
                     target,
                     sourceSemantics,
                     targetSemantics,
-                    cancellationToken));
+                    cancellationToken),
+                quarantineAnchor);
             return await ValidateOwnedQuarantineDirectoryAsync(
                 quarantineRoot,
                 sourceParent,

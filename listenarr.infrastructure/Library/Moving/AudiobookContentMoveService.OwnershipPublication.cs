@@ -211,6 +211,18 @@ internal sealed partial class AudiobookContentMoveService
                     OwnershipMarkerWriteFaultPoint.BeforePublication);
                 await authorizeMutation();
             },
-            exception => exception is MoveLeaseLostException or PersistenceException);
+            exception =>
+            {
+                if (exception is MoveLeaseLostException or PersistenceException)
+                {
+                    return true;
+                }
+
+                faultInjector?.OnOwnershipMarkerWrite(
+                    marker.JobId,
+                    markerKind,
+                    OwnershipMarkerWriteFaultPoint.BeforeTemporaryFileDeletion);
+                return false;
+            });
     }
 }
