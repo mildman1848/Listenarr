@@ -12,6 +12,7 @@ internal sealed partial class PinnedDirectoryCreation
     internal static PinnedDirectoryAnchor OpenPinnedBoundary(string boundaryPath)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(boundaryPath);
+        ExclusiveDirectoryCreator.InvokeBeforeOpenParentHook(boundaryPath);
         var handle = OperatingSystem.IsWindows()
             ? OpenDirectoryWindows(boundaryPath, openReparsePoint: false)
             : OpenDirectoryUnix(boundaryPath, noFollow: false);

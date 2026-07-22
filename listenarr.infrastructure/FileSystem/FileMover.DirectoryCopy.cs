@@ -83,21 +83,27 @@ public partial class FileMover
 
         var destinationParent = Path.GetDirectoryName(destinationRoot);
         if (string.IsNullOrWhiteSpace(destinationParent)
-            || !Directory.Exists(destinationParent)
+            || !Directory.Exists(destinationParent))
+        {
+            throw new IOException(
+                "Directory copy requires an existing destination parent.");
+        }
+
+        using var destinationParentAnchor =
+            PinnedDirectoryCreation.OpenPinnedBoundary(destinationParent);
+        if (!destinationParentAnchor.VisiblePathMatches()
             || IsLinkedOrUnverifiableEntry(destinationParent)
             || !TryResolvePhysicalPath(destinationParent, out var parentResolution)
             || parentResolution.EntryKind != PhysicalPathEntryKind.Directory
             || parentResolution.EncounteredLink)
         {
             throw new IOException(
-                "Directory copy requires an existing destination parent with no linked path components.");
+                "Directory copy requires a pinned destination parent with no linked path components.");
         }
 
         var stagingName = $".{Path.GetFileName(destinationRoot)}.listenarr-copy-{Guid.NewGuid():N}";
         var stagingRoot = Path.Join(destinationParent, stagingName);
-        using var stagingCreation = ExclusiveDirectoryCreator.TryCreatePinned(
-            destinationParent,
-            stagingName);
+        using var stagingCreation = destinationParentAnchor.TryCreateChild(stagingName);
         if (!stagingCreation.Created || !stagingCreation.VisiblePathMatches())
         {
             throw new IOException(
