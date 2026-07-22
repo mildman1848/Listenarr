@@ -1,3 +1,4 @@
+using System.Runtime.InteropServices;
 using Listenarr.Tests.Common;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
@@ -52,8 +53,9 @@ public sealed class FileMoverHardlinkAliasRegressionTests : BaseTests
     {
         try
         {
-            File.CreateHardLink(linkPath, existingPath);
-            return true;
+            return OperatingSystem.IsWindows()
+                ? CreateHardLinkWindows(linkPath, existingPath, IntPtr.Zero)
+                : LinkUnix(existingPath, linkPath) == 0;
         }
         catch (Exception exception) when (exception is
             IOException or UnauthorizedAccessException or PlatformNotSupportedException)
@@ -61,4 +63,16 @@ public sealed class FileMoverHardlinkAliasRegressionTests : BaseTests
             return false;
         }
     }
+
+    [DllImport("kernel32.dll", EntryPoint = "CreateHardLinkW", CharSet = CharSet.Unicode, SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool CreateHardLinkWindows(
+        string fileName,
+        string existingFileName,
+        IntPtr securityAttributes);
+
+    [DllImport("libc", EntryPoint = "link", SetLastError = true)]
+    private static extern int LinkUnix(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string existingPath,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string newPath);
 }
