@@ -1,3 +1,5 @@
+using Listenarr.Tests.Common;
+
 namespace Listenarr.Tests.Features.Infrastructure.Library.Moving;
 
 [Trait("Area", "Library")]
