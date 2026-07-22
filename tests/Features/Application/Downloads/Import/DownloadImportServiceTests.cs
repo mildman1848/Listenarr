@@ -200,7 +200,8 @@ namespace Listenarr.Tests.Features.Application.Downloads.Import
             Assert.Equal(expectedPath, file.Path);
 
             // Also assert there's no AudiobookFile under an "unknown author" path
-            var filepaths = await _audiobookFileRepository.GetAllFilePathsAsync();
+            var filepaths = await _audiobookFileRepository.GetAllFilePathsAsync(
+                FileSystemPathSemantics.CurrentHostDefault);
             Assert.Empty(filepaths.FindAll(path => path.Contains("unknown author", StringComparison.OrdinalIgnoreCase)));
         }
 
