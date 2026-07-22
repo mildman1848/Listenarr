@@ -8,39 +8,13 @@ on:
     types: [ opened, synchronize, reopened ]
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: run-tests-${{ github.head_ref || github.ref }}
   cancel-in-progress: true
 
 jobs:
-  apply-backend-format:
-    if: github.repository == 'Listenarrs/Listenarr' && github.head_ref == 'bugfix/unix-folder-name-space'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: bugfix/unix-folder-name-space
-      - uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: 10.0.x
-      - name: Restore
-        run: dotnet restore listenarr.slnx
-      - name: Apply repository backend formatting
-        run: dotnet format listenarr.slnx --no-restore --verbosity minimal
-      - name: Commit formatter output
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -- ':(glob)**/*.cs'
-          if git diff --cached --quiet; then
-            echo "No formatter changes"
-          else
-            git commit -m "style: apply backend formatter"
-            git push origin HEAD:bugfix/unix-folder-name-space
-          fi
-
   unit-tests:
     runs-on: ubuntu-latest
     env:
