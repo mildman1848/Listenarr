@@ -129,8 +129,17 @@ internal sealed partial class EfLibraryDirectoryOwnershipStore
                                 "The visible created directory changed before hierarchy continuation.");
                         }
 
-                        nextAnchor = creation.OpenCreatedDirectoryAnchor();
-                        EnsureVisibleAnchor(nextAnchor);
+                        var createdAnchor = creation.OpenCreatedDirectoryAnchor();
+                        try
+                        {
+                            EnsureVisibleAnchor(createdAnchor);
+                            nextAnchor = createdAnchor;
+                        }
+                        catch
+                        {
+                            createdAnchor.Dispose();
+                            throw;
+                        }
                     }
                     catch (Exception exception) when (exception is not (
                         OutOfMemoryException or StackOverflowException))
