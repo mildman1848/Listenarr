@@ -115,7 +115,7 @@ namespace Listenarr.Infrastructure.FileSystem
         {
             try
             {
-                if (await IsLinkedFilesystemAliasAsync(sourceFile, destFile))
+                if (await IsFilesystemAliasAsync(sourceFile, destFile))
                 {
                     LogMutation(
                         FileMutationOutcome.Blocked,
@@ -157,7 +157,7 @@ namespace Listenarr.Infrastructure.FileSystem
         {
             try
             {
-                if (await IsLinkedFilesystemAliasAsync(sourceFile, destFile))
+                if (await IsFilesystemAliasAsync(sourceFile, destFile))
                 {
                     LogMutation(
                         FileMutationOutcome.Blocked,
@@ -290,7 +290,7 @@ namespace Listenarr.Infrastructure.FileSystem
         public async Task<bool> PerformActionOn(FileAction action, string source, string? destination = null)
         {
             if (action == FileAction.None || destination == null) return true;
-            if (await IsLinkedFilesystemAliasAsync(source, destination))
+            if (await IsFilesystemAliasAsync(source, destination))
             {
                 LogMutation(
                     FileMutationOutcome.Blocked,

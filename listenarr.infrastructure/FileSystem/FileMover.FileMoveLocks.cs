@@ -80,7 +80,7 @@ public partial class FileMover
         string sourceFile,
         string destinationFile)
     {
-        if (await IsLinkedFilesystemAliasAsync(sourceFile, destinationFile))
+        if (await IsFilesystemAliasAsync(sourceFile, destinationFile))
         {
             LogBlockedAlias(sourceFile, destinationFile);
             return null;
@@ -98,7 +98,7 @@ public partial class FileMover
             return null;
         }
 
-        if (await IsLinkedFilesystemAliasAsync(sourceFile, destinationFile))
+        if (await IsFilesystemAliasAsync(sourceFile, destinationFile))
         {
             LogBlockedAlias(sourceFile, destinationFile);
             return null;
@@ -158,7 +158,7 @@ public partial class FileMover
                 stripeLocks,
                 sourceIdentity,
                 destinationIdentity);
-            if (await IsLinkedFilesystemAliasAsync(sourceFile, destinationFile))
+            if (await IsFilesystemAliasAsync(sourceFile, destinationFile))
             {
                 lease.Dispose();
                 LogBlockedAlias(sourceFile, destinationFile);
@@ -187,7 +187,7 @@ public partial class FileMover
 
     private void LogBlockedAlias(string sourceFile, string destinationFile) =>
         _logger.LogWarning(
-            "Blocked file move because source and destination are linked aliases: {Source} -> {Destination}",
+            "Blocked file move because source and destination are filesystem aliases: {Source} -> {Destination}",
             LogRedaction.SanitizeFilePath(sourceFile),
             LogRedaction.SanitizeFilePath(destinationFile));
 
