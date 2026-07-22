@@ -8,13 +8,35 @@ on:
     types: [ opened, synchronize, reopened ]
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: run-tests-${{ github.head_ref || github.ref }}
   cancel-in-progress: true
 
 jobs:
+  apply-tracked-path-semantics:
+    if: github.repository == 'Listenarrs/Listenarr' && github.head_ref == 'bugfix/unix-folder-name-space'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: bugfix/unix-folder-name-space
+      - name: Apply exact reviewed semantics patch
+        run: python .github/scripts/apply-tracked-path-semantics.py
+      - name: Commit exact semantics patch
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add \
+            listenarr.application/Audiobooks/Contracts/Repositories/IAudiobookFileRepository.cs \
+            listenarr.infrastructure/Persistence/Repositories/EfAudiobookFileRepository.cs \
+            listenarr.infrastructure/Library/Scanning/UnmatchedScanBackgroundService.cs \
+            listenarr.api/Features/Library/RootFoldersController.cs \
+            tests/Features/Infrastructure/Repositories/EfAudiobookFileTrackedPathTests.cs
+          git commit -m "fix(paths): require explicit tracked path semantics"
+          git push origin HEAD:bugfix/unix-folder-name-space
+
   unit-tests:
     runs-on: ubuntu-latest
     env:
