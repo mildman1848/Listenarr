@@ -15,6 +15,47 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  merge-format-diagnostics:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - name: Restore
+        run: dotnet restore listenarr.slnx
+      - name: Generate merge-ref formatter patch
+        run: |
+          dotnet format listenarr.slnx --no-restore --verbosity minimal
+          git diff --binary > backend-format.patch
+      - uses: actions/upload-artifact@v4
+        with:
+          name: merge-format-diagnostics
+          path: backend-format.patch
+
+  windows-build-diagnostics:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - name: Restore
+        run: dotnet restore listenarr.slnx
+      - name: Capture Windows build output
+        shell: pwsh
+        run: |
+          dotnet build listenarr.slnx --no-restore --configuration Release *> windows-build.log
+          $exitCode = $LASTEXITCODE
+          "EXIT_CODE=$exitCode" | Out-File -FilePath windows-build-exit.txt -Encoding utf8
+          exit 0
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-build-diagnostics
+          path: |
+            windows-build.log
+            windows-build-exit.txt
+
   unit-tests:
     runs-on: ubuntu-latest
     env:
