@@ -63,6 +63,18 @@ public sealed class FileMoverDirectoryParentLinkRegressionTests : BaseTests
         Directory.CreateDirectory(lexicalParent);
         Directory.CreateDirectory(externalParent);
         await File.WriteAllTextAsync(Path.Join(source, "book.m4b"), "audio");
+        var probeLink = Path.Join(root, "symlink-probe");
+        try
+        {
+            Directory.CreateSymbolicLink(probeLink, externalRoot);
+            Directory.Delete(probeLink);
+        }
+        catch (Exception exception) when (exception is
+            IOException or UnauthorizedAccessException or PlatformNotSupportedException)
+        {
+            return;
+        }
+
         var destination = Path.Join(lexicalParent, "book");
         var externalDestination = Path.Join(externalParent, "book");
         var hookRan = false;
