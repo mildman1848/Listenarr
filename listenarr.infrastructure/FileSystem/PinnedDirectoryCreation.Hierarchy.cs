@@ -119,6 +119,36 @@ internal sealed partial class PinnedDirectoryCreation
             return TryCreateRelative(_handle, FullPath, childName);
         }
 
+        internal async Task CopyNewFileFromAsync(
+            string sourcePath,
+            string childName,
+            CancellationToken cancellationToken)
+        {
+            ThrowIfDisposed();
+            ValidateLeafName(childName);
+            EnsureVisiblePathMatches();
+
+            await using var source = new FileStream(
+                sourcePath,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.Read,
+                bufferSize: 81920,
+                FileOptions.Asynchronous | FileOptions.SequentialScan);
+            var fileHandle = OperatingSystem.IsWindows()
+                ? CreateRelativeFileWindows(_handle, childName)
+                : CreateRelativeFileUnix(_handle, childName);
+            await using var destination = new FileStream(
+                fileHandle,
+                FileAccess.Write,
+                bufferSize: 81920,
+                isAsync: false);
+            await source.CopyToAsync(destination, cancellationToken);
+            await destination.FlushAsync(cancellationToken);
+            destination.Flush(flushToDisk: true);
+            EnsureVisiblePathMatches();
+        }
+
         public void Dispose()
         {
             if (_disposed)

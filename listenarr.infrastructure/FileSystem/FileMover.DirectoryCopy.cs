@@ -105,8 +105,10 @@ public partial class FileMover
         var published = false;
         try
         {
-            await PopulateDirectoryCopyStagingAsync(snapshot, stagingRoot);
+            using var stagingAnchor = stagingCreation.OpenCreatedDirectoryAnchor();
+            await PopulateDirectoryCopyStagingAsync(snapshot, stagingAnchor);
             if (!stagingCreation.VisiblePathMatches()
+                || !stagingAnchor.VisiblePathMatches()
                 || !await DirectoryCopySnapshotExactlyMatchesAsync(snapshot, stagingRoot)
                 || !await SourceSnapshotStillMatchesAsync(snapshot))
             {
@@ -148,75 +150,122 @@ public partial class FileMover
 
     private async Task PopulateDirectoryCopyStagingAsync(
         DirectoryCopySnapshot snapshot,
-        string stagingRoot)
+        PinnedDirectoryCreation.PinnedDirectoryAnchor stagingAnchor)
     {
-        foreach (var relativeDirectory in snapshot.RelativeDirectories)
+        var comparer = OperatingSystem.IsWindows()
+            ? StringComparer.OrdinalIgnoreCase
+            : StringComparer.Ordinal;
+        var anchors = new Dictionary<string, PinnedDirectoryCreation.PinnedDirectoryAnchor>(comparer)
         {
-            var sourceDirectory = ResolveSnapshotPath(
-                snapshot.SourceRoot,
-                relativeDirectory,
-                "source directory");
-            if (!Directory.Exists(sourceDirectory)
-                || IsLinkedOrUnverifiableEntry(sourceDirectory))
+            [string.Empty] = stagingAnchor
+        };
+        var ownedAnchors = new List<PinnedDirectoryCreation.PinnedDirectoryAnchor>();
+        try
+        {
+            foreach (var relativeDirectory in snapshot.RelativeDirectories)
             {
-                throw new IOException(
-                    $"Directory copy source changed after verification: {relativeDirectory}");
+                var sourceDirectory = ResolveSnapshotPath(
+                    snapshot.SourceRoot,
+                    relativeDirectory,
+                    "source directory");
+                if (!Directory.Exists(sourceDirectory)
+                    || IsLinkedOrUnverifiableEntry(sourceDirectory))
+                {
+                    throw new IOException(
+                        $"Directory copy source changed after verification: {relativeDirectory}");
+                }
+
+                var parentKey = NormalizeRelativeDirectoryKey(
+                    Path.GetDirectoryName(relativeDirectory));
+                if (!anchors.TryGetValue(parentKey, out var parentAnchor))
+                {
+                    throw new IOException(
+                        $"Directory copy staging parent was not pinned: {relativeDirectory}");
+                }
+
+                using var creation = parentAnchor.TryCreateChild(
+                    Path.GetFileName(relativeDirectory));
+                if (!creation.Created || !creation.VisiblePathMatches())
+                {
+                    throw new IOException(
+                        $"Directory copy staging was unexpectedly occupied: {relativeDirectory}");
+                }
+
+                var childAnchor = creation.OpenCreatedDirectoryAnchor();
+                if (!childAnchor.VisiblePathMatches())
+                {
+                    childAnchor.Dispose();
+                    throw new IOException(
+                        $"Directory copy staging identity changed: {relativeDirectory}");
+                }
+
+                anchors.Add(relativeDirectory, childAnchor);
+                ownedAnchors.Add(childAnchor);
             }
 
-            var stagingDirectory = ResolveSnapshotPath(
-                stagingRoot,
-                relativeDirectory,
-                "staging directory");
-            if (File.Exists(stagingDirectory)
-                || Directory.Exists(stagingDirectory))
+            if (AfterDirectoryCopyStagingDirectoriesCreatedForTestAsync != null)
             {
-                throw new IOException(
-                    $"Directory copy staging was unexpectedly occupied: {relativeDirectory}");
+                await AfterDirectoryCopyStagingDirectoriesCreatedForTestAsync(stagingAnchor.FullPath);
             }
 
-            Directory.CreateDirectory(stagingDirectory);
+            foreach (var relativeFile in snapshot.RelativeFiles)
+            {
+                var sourceFile = ResolveSnapshotPath(
+                    snapshot.SourceRoot,
+                    relativeFile,
+                    "source file");
+                if (!File.Exists(sourceFile)
+                    || Directory.Exists(sourceFile)
+                    || IsLinkedOrUnverifiableEntry(sourceFile))
+                {
+                    throw new IOException(
+                        $"Directory copy source changed after verification: {relativeFile}");
+                }
+
+                var parentKey = NormalizeRelativeDirectoryKey(
+                    Path.GetDirectoryName(relativeFile));
+                if (!anchors.TryGetValue(parentKey, out var parentAnchor))
+                {
+                    throw new IOException(
+                        $"Directory copy staging file parent was not pinned: {relativeFile}");
+                }
+
+                var childName = Path.GetFileName(relativeFile);
+                await parentAnchor.CopyNewFileFromAsync(
+                    sourceFile,
+                    childName,
+                    CancellationToken.None);
+                var stagingFile = ResolveSnapshotPath(
+                    stagingAnchor.FullPath,
+                    relativeFile,
+                    "staging file");
+                if (IsLinkedOrUnverifiableEntry(stagingFile)
+                    || !await FileSystemSafety.FilesHaveSameContentAsync(sourceFile, stagingFile))
+                {
+                    throw new IOException(
+                        $"Directory copy staging content could not be verified: {relativeFile}");
+                }
+                LogMutation(
+                    FileMutationOutcome.Success,
+                    FileAction.Copy,
+                    sourceFile,
+                    stagingFile,
+                    "Copied into an isolated pinned staging snapshot");
+            }
         }
-
-        foreach (var relativeFile in snapshot.RelativeFiles)
+        finally
         {
-            var sourceFile = ResolveSnapshotPath(
-                snapshot.SourceRoot,
-                relativeFile,
-                "source file");
-            if (!File.Exists(sourceFile)
-                || Directory.Exists(sourceFile)
-                || IsLinkedOrUnverifiableEntry(sourceFile))
+            for (var index = ownedAnchors.Count - 1; index >= 0; index--)
             {
-                throw new IOException(
-                    $"Directory copy source changed after verification: {relativeFile}");
+                ownedAnchors[index].Dispose();
             }
-
-            var stagingFile = ResolveSnapshotPath(
-                stagingRoot,
-                relativeFile,
-                "staging file");
-            if (File.Exists(stagingFile)
-                || Directory.Exists(stagingFile))
-            {
-                throw new IOException(
-                    $"Directory copy staging was unexpectedly occupied: {relativeFile}");
-            }
-
-            File.Copy(sourceFile, stagingFile, overwrite: false);
-            if (IsLinkedOrUnverifiableEntry(stagingFile)
-                || !await FileSystemSafety.FilesHaveSameContentAsync(sourceFile, stagingFile))
-            {
-                throw new IOException(
-                    $"Directory copy staging content could not be verified: {relativeFile}");
-            }
-            LogMutation(
-                FileMutationOutcome.Success,
-                FileAction.Copy,
-                sourceFile,
-                stagingFile,
-                "Copied into an isolated staging snapshot");
         }
     }
+
+    private static string NormalizeRelativeDirectoryKey(string? path) =>
+        string.IsNullOrEmpty(path) || path == "."
+            ? string.Empty
+            : path;
 
     private async Task<bool> SourceSnapshotStillMatchesAsync(
         DirectoryCopySnapshot snapshot)
