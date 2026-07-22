@@ -1,5 +1,4 @@
 using System.Text.Json;
-using Listenarr.Infrastructure.FileSystem;
 
 namespace Listenarr.Infrastructure.Library.Moving;
 

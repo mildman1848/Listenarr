@@ -179,11 +179,11 @@ public sealed class FileMoverDirectoryPublicationRaceTests : BaseTests
         new NullLogger<FileMover>(),
         options: Options.Create(new FileMoverOptions { MaxRetries = 1 }),
         semanticsResolver: new FileSystemSemanticsResolver())
-    {
-        AfterDirectoryCopyPreflightForTestAsync = afterPreflight,
-        AfterDirectoryCopyStagingDirectoriesCreatedForTestAsync = afterStagingDirectoriesCreated,
-        BeforeDirectoryCopyPublicationForTestAsync = beforePublication
-    };
+        {
+            AfterDirectoryCopyPreflightForTestAsync = afterPreflight,
+            AfterDirectoryCopyStagingDirectoriesCreatedForTestAsync = afterStagingDirectoriesCreated,
+            BeforeDirectoryCopyPublicationForTestAsync = beforePublication
+        };
 
     private static bool TryCreateDirectoryLink(string linkPath, string targetPath)
     {
