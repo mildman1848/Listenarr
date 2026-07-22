@@ -1,9 +1,9 @@
 name: Apply Pinned Parent Hardening
 
 on:
-  push:
+  pull_request:
     branches:
-      - bugfix/unix-folder-name-space
+      - canary
     paths:
       - .github/workflows/apply-pinned-parent-hardening.yml
 
