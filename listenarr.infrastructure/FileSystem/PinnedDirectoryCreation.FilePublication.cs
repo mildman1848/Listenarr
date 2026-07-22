@@ -1,0 +1,188 @@
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+using System.Text;
+using Microsoft.Win32.SafeHandles;
+
+namespace Listenarr.Infrastructure.FileSystem;
+
+internal sealed partial class PinnedDirectoryCreation
+{
+    internal sealed partial class PinnedDirectoryAnchor
+    {
+        internal async Task PublishNewFileAsync(
+            string temporaryFileName,
+            string finalFileName,
+            Func<Task> beforeCreateAsync,
+            Func<FileStream, Task> writeAndFlushAsync,
+            Func<Task> beforePublicationAsync,
+            Func<Exception, bool> preserveTemporaryFileOnFailure)
+        {
+            ThrowIfDisposed();
+            ValidateLeafName(temporaryFileName);
+            ValidateLeafName(finalFileName);
+            ArgumentNullException.ThrowIfNull(beforeCreateAsync);
+            ArgumentNullException.ThrowIfNull(writeAndFlushAsync);
+            ArgumentNullException.ThrowIfNull(beforePublicationAsync);
+            ArgumentNullException.ThrowIfNull(preserveTemporaryFileOnFailure);
+
+            EnsureVisiblePathMatches();
+            await beforeCreateAsync();
+            EnsureVisiblePathMatches();
+
+            using var fileHandle = OperatingSystem.IsWindows()
+                ? CreateRelativeFileWindows(_handle, temporaryFileName)
+                : CreateRelativeFileUnix(_handle, temporaryFileName);
+            var published = false;
+            try
+            {
+                await using (var stream = new FileStream(
+                    DuplicateSafeHandle(fileHandle),
+                    FileAccess.Write,
+                    bufferSize: 4096,
+                    isAsync: false))
+                {
+                    await writeAndFlushAsync(stream);
+                }
+
+                await beforePublicationAsync();
+                EnsureVisiblePathMatches();
+                RenameRelativeFile(
+                    _handle,
+                    fileHandle,
+                    temporaryFileName,
+                    finalFileName);
+                published = true;
+                EnsureVisiblePathMatches();
+            }
+            catch (Exception exception)
+            {
+                if (!published && !preserveTemporaryFileOnFailure(exception))
+                {
+                    TryDeleteRelativeFile(_handle, fileHandle, temporaryFileName);
+                }
+
+                throw;
+            }
+        }
+    }
+
+    private static void RenameRelativeFile(
+        SafeFileHandle directoryHandle,
+        SafeFileHandle fileHandle,
+        string temporaryFileName,
+        string finalFileName)
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            RenameRelativeFileWindows(directoryHandle, fileHandle, finalFileName);
+            return;
+        }
+
+        var directoryFileDescriptor = directoryHandle.DangerousGetHandle().ToInt32();
+        var result = OperatingSystem.IsMacOS()
+            ? RenameAtExclusiveMac(
+                directoryFileDescriptor,
+                temporaryFileName,
+                directoryFileDescriptor,
+                finalFileName,
+                RenameExclusiveMac)
+            : RenameAtNoReplaceLinux(
+                directoryFileDescriptor,
+                temporaryFileName,
+                directoryFileDescriptor,
+                finalFileName,
+                RenameNoReplace);
+        if (result != 0)
+        {
+            throw new Win32Exception(
+                Marshal.GetLastWin32Error(),
+                "Could not publish a pinned file relative to its owned directory.");
+        }
+    }
+
+    private static void RenameRelativeFileWindows(
+        SafeFileHandle directoryHandle,
+        SafeFileHandle fileHandle,
+        string finalFileName)
+    {
+        var fileNameBytes = Encoding.Unicode.GetBytes(finalFileName);
+        var rootDirectoryOffset = IntPtr.Size == 8 ? 8 : 4;
+        var fileNameLengthOffset = rootDirectoryOffset + IntPtr.Size;
+        var fileNameOffset = fileNameLengthOffset + sizeof(uint);
+        var bufferSize = checked(fileNameOffset + fileNameBytes.Length);
+        var buffer = Marshal.AllocHGlobal(bufferSize);
+        try
+        {
+            for (var index = 0; index < bufferSize; index++)
+            {
+                Marshal.WriteByte(buffer, index, 0);
+            }
+
+            Marshal.WriteByte(buffer, 0, 0);
+            Marshal.WriteIntPtr(
+                buffer,
+                rootDirectoryOffset,
+                directoryHandle.DangerousGetHandle());
+            Marshal.WriteInt32(buffer, fileNameLengthOffset, fileNameBytes.Length);
+            Marshal.Copy(fileNameBytes, 0, buffer + fileNameOffset, fileNameBytes.Length);
+            const int fileRenameInformation = 10;
+            var status = NtSetInformationFile(
+                fileHandle,
+                out _,
+                buffer,
+                checked((uint)bufferSize),
+                fileRenameInformation);
+            if (status < 0)
+            {
+                var error = unchecked((int)RtlNtStatusToDosError(status));
+                throw new Win32Exception(
+                    error,
+                    $"Could not publish a pinned file relative to its owned directory (Windows error {error}).");
+            }
+        }
+        finally
+        {
+            Marshal.FreeHGlobal(buffer);
+        }
+    }
+
+    private static void TryDeleteRelativeFile(
+        SafeFileHandle directoryHandle,
+        SafeFileHandle fileHandle,
+        string fileName)
+    {
+        try
+        {
+            if (OperatingSystem.IsWindows())
+            {
+                var deleteInformation = Marshal.AllocHGlobal(sizeof(int));
+                try
+                {
+                    Marshal.WriteInt32(deleteInformation, 1);
+                    _ = SetFileInformationByHandle(
+                        fileHandle,
+                        FileInformationClass.FileDispositionInfo,
+                        deleteInformation,
+                        sizeof(int));
+                }
+                finally
+                {
+                    Marshal.FreeHGlobal(deleteInformation);
+                }
+
+                return;
+            }
+
+            _ = UnlinkAt(
+                directoryHandle.DangerousGetHandle().ToInt32(),
+                fileName,
+                flags: 0);
+        }
+        catch (Exception exception) when (exception is
+            IOException or UnauthorizedAccessException or Win32Exception
+                or PlatformNotSupportedException)
+        {
+            // Preserve an uncertain temporary file rather than deleting through a pathname.
+        }
+    }
+}

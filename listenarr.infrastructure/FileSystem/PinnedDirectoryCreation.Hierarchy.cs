@@ -45,7 +45,7 @@ internal sealed partial class PinnedDirectoryCreation
             followVisibleFinalLink: false);
     }
 
-    internal sealed class PinnedDirectoryAnchor : IDisposable
+    internal sealed partial class PinnedDirectoryAnchor : IDisposable
     {
         private readonly SafeFileHandle _handle;
         private readonly bool _followVisibleFinalLink;

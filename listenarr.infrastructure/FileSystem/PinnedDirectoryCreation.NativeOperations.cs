@@ -200,7 +200,7 @@ internal sealed partial class PinnedDirectoryCreation
             };
             var desiredAccess = directory
                 ? FileListDirectory | FileReadAttributes | Synchronize
-                : GenericRead | GenericWrite | Synchronize;
+                : GenericRead | GenericWrite | DeleteAccess | Synchronize;
             var createOptions = (directory ? FileDirectoryFile : FileNonDirectoryFile)
                 | FileSynchronousIoNonAlert
                 | FileOpenReparsePoint;

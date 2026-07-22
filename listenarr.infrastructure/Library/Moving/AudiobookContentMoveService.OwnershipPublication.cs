@@ -9,7 +9,8 @@ internal sealed partial class AudiobookContentMoveService
         MoveOwnershipMarker marker,
         OwnershipMarkerKind markerKind,
         MoveLeaseToken leaseToken,
-        Func<Task> authorizeMutation)
+        Func<Task> authorizeMutation,
+        PinnedDirectoryCreation.PinnedDirectoryAnchor? pinnedDirectory = null)
     {
         var markerDirectory = Path.GetDirectoryName(Path.GetFullPath(markerPath))
             ?? throw new MoveNeedsAttentionException("The ownership marker directory is unavailable.");
@@ -34,15 +35,27 @@ internal sealed partial class AudiobookContentMoveService
             markerPath,
             marker.JobId,
             leaseToken.Generation);
-        faultInjector?.OnOwnershipMarkerWrite(
-            marker.JobId,
-            markerKind,
-            OwnershipMarkerWriteFaultPoint.BeforeTemporaryFileCreation);
+        if (pinnedDirectory != null)
+        {
+            await PublishPinnedOwnershipMarkerAsync(
+                pinnedDirectory,
+                markerPath,
+                writePath,
+                payload,
+                marker,
+                markerKind,
+                authorizeMutation);
+            return;
+        }
 
         try
         {
             await authorizeMutation();
             ValidateNewOwnershipMarkerWritePath(writePath, markerDirectory);
+            faultInjector?.OnOwnershipMarkerWrite(
+                marker.JobId,
+                markerKind,
+                OwnershipMarkerWriteFaultPoint.BeforeTemporaryFileCreation);
             using (var stream = new FileStream(
                 writePath,
                 FileMode.CreateNew,
@@ -148,5 +161,56 @@ internal sealed partial class AudiobookContentMoveService
 
             throw;
         }
+    }
+
+    private async Task PublishPinnedOwnershipMarkerAsync(
+        PinnedDirectoryCreation.PinnedDirectoryAnchor pinnedDirectory,
+        string markerPath,
+        string writePath,
+        byte[] payload,
+        MoveOwnershipMarker marker,
+        OwnershipMarkerKind markerKind,
+        Func<Task> authorizeMutation)
+    {
+        await pinnedDirectory.PublishNewFileAsync(
+            Path.GetFileName(writePath),
+            Path.GetFileName(markerPath),
+            async () =>
+            {
+                faultInjector?.OnOwnershipMarkerWrite(
+                    marker.JobId,
+                    markerKind,
+                    OwnershipMarkerWriteFaultPoint.BeforeTemporaryFileCreation);
+                await authorizeMutation();
+            },
+            async stream =>
+            {
+                var split = Math.Max(1, payload.Length / 2);
+                stream.Write(payload.AsSpan(0, split));
+                faultInjector?.OnOwnershipMarkerWrite(
+                    marker.JobId,
+                    markerKind,
+                    OwnershipMarkerWriteFaultPoint.DuringJsonWrite);
+                stream.Write(payload.AsSpan(split));
+                faultInjector?.OnOwnershipMarkerWrite(
+                    marker.JobId,
+                    markerKind,
+                    OwnershipMarkerWriteFaultPoint.DuringFlush);
+                await authorizeMutation();
+                stream.Flush(flushToDisk: true);
+            },
+            async () =>
+            {
+                faultInjector?.OnOwnershipMarkerWrite(
+                    marker.JobId,
+                    markerKind,
+                    OwnershipMarkerWriteFaultPoint.AfterTemporaryFileWritten);
+                faultInjector?.OnOwnershipMarkerWrite(
+                    marker.JobId,
+                    markerKind,
+                    OwnershipMarkerWriteFaultPoint.BeforePublication);
+                await authorizeMutation();
+            },
+            exception => exception is MoveLeaseLostException or PersistenceException);
     }
 }

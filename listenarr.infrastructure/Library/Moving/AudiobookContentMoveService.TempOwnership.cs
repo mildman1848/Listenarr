@@ -1,3 +1,4 @@
+using Listenarr.Domain.Common;
 using Microsoft.Extensions.Logging;
 
 namespace Listenarr.Infrastructure.Library.Moving;
@@ -74,9 +75,42 @@ internal sealed partial class AudiobookContentMoveService
         }
 
         ValidateMoveRootPath(tempDirectory, mustExist: false, "temporary directory");
+        var normalizedTargetParent = Path.GetFullPath(targetParent);
+        var normalizedTempDirectory = Path.GetFullPath(tempDirectory);
+        var tempParent = Path.GetDirectoryName(normalizedTempDirectory);
+        if (string.IsNullOrWhiteSpace(tempParent)
+            || !FileSystemPathIdentity.AreEquivalent(
+                normalizedTargetParent,
+                tempParent,
+                request.TargetSemantics))
+        {
+            throw new MoveNeedsAttentionException(
+                "The move temporary directory escaped its validated target parent.");
+        }
+
         await EnsureMutationAuthorizedAsync(request, source, target, cancellationToken);
         ValidateMoveRootPath(tempDirectory, mustExist: false, "temporary directory");
-        Directory.CreateDirectory(tempDirectory);
+        using var tempCreation = PinnedDirectoryCreation.TryCreate(
+            normalizedTargetParent,
+            Path.GetFileName(normalizedTempDirectory));
+        if (!tempCreation.Created)
+        {
+            throw new MoveNeedsAttentionException(
+                "The move temporary directory appeared before Listenarr could claim it exclusively.");
+        }
+        if (!tempCreation.VisiblePathMatches())
+        {
+            throw new MoveNeedsAttentionException(
+                "The move temporary directory parent changed during exclusive creation.");
+        }
+
+        using var tempAnchor = tempCreation.OpenCreatedDirectoryAnchor();
+        if (!tempAnchor.VisiblePathMatches())
+        {
+            throw new MoveNeedsAttentionException(
+                "The move temporary directory identity changed after exclusive creation.");
+        }
+
         ValidateExistingMoveDirectory(tempDirectory, "temporary directory");
         var marker = CreateOwnershipMarker(
             TemporaryDirectoryArtifactType,
@@ -92,7 +126,8 @@ internal sealed partial class AudiobookContentMoveService
                 marker,
                 OwnershipMarkerKind.TemporaryDirectory,
                 request.LeaseToken,
-                () => EnsureMutationAuthorizedAsync(request, source, target, cancellationToken));
+                () => EnsureMutationAuthorizedAsync(request, source, target, cancellationToken),
+                tempAnchor);
             return await ValidateOwnedTempDirectoryAsync(
                 tempDirectory,
                 targetParent,

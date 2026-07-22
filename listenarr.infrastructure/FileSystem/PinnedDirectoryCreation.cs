@@ -21,6 +21,7 @@ internal sealed partial class PinnedDirectoryCreation : IDisposable
     private const uint Synchronize = 0x00100000;
     private const uint GenericRead = 0x80000000;
     private const uint GenericWrite = 0x40000000;
+    private const uint DeleteAccess = 0x00010000;
     private const uint FileShareAll = 0x00000007;
     private const uint OpenExisting = 3;
     private const uint FileFlagBackupSemantics = 0x02000000;

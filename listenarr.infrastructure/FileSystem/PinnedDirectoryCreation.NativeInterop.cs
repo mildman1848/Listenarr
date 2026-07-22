@@ -18,6 +18,8 @@ internal sealed partial class PinnedDirectoryCreation
 
     private enum FileInformationClass
     {
+        FileRenameInfo = 3,
+        FileDispositionInfo = 4,
         FileAttributeTagInfo = 9,
         FileIdInfo = 18
     }
@@ -137,11 +139,27 @@ internal sealed partial class PinnedDirectoryCreation
 
     [DllImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool SetFileInformationByHandle(
+        SafeFileHandle fileHandle,
+        FileInformationClass fileInformationClass,
+        IntPtr fileInformation,
+        uint bufferSize);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool GetFileInformationByHandleEx(
         SafeFileHandle fileHandle,
         FileInformationClass fileInformationClass,
         out FileIdInformation fileInformation,
         uint bufferSize);
+
+    [DllImport("ntdll.dll")]
+    private static extern int NtSetInformationFile(
+        SafeFileHandle fileHandle,
+        out IoStatusBlock ioStatusBlock,
+        IntPtr fileInformation,
+        uint length,
+        int fileInformationClass);
 
     [DllImport("ntdll.dll")]
     private static extern int NtCreateFile(
