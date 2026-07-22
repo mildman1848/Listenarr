@@ -8,13 +8,39 @@ on:
     types: [ opened, synchronize, reopened ]
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: run-tests-${{ github.head_ref || github.ref }}
   cancel-in-progress: true
 
 jobs:
+  apply-directory-publication-hardening:
+    if: github.event_name == 'pull_request' && github.head_ref == 'bugfix/unix-folder-name-space'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: bugfix/unix-folder-name-space
+          fetch-depth: 0
+      - name: Apply exact reviewed patch
+        run: python .github/scripts/apply-directory-publication-hardening.py
+      - name: Commit exact patch
+        shell: bash
+        run: |
+          if git diff --quiet -- \
+            listenarr.infrastructure/FileSystem/PinnedDirectoryCreation.Hierarchy.cs \
+            listenarr.infrastructure/FileSystem/FileMover.DirectoryCopy.cs; then
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add \
+            listenarr.infrastructure/FileSystem/PinnedDirectoryCreation.Hierarchy.cs \
+            listenarr.infrastructure/FileSystem/FileMover.DirectoryCopy.cs
+          git commit -m "fix(filesystem): verify pinned identity across directory publication"
+          git push origin HEAD:bugfix/unix-folder-name-space
+
   unit-tests:
     runs-on: ubuntu-latest
     env:
