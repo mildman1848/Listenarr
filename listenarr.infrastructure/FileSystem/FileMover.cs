@@ -67,7 +67,6 @@ namespace Listenarr.Infrastructure.FileSystem
         internal Func<Task>? AfterSourceClaimDeletedForTestAsync { get; init; }
         internal Func<Task>? AfterFileMoveStateCleanedForTestAsync { get; init; }
         internal Func<Task>? AfterDirectoryCopyPreflightForTestAsync { get; init; }
-        internal Func<string, Task>? AfterDirectoryCopyStagingDirectoriesCreatedForTestAsync { get; init; }
         internal Action? BeforeDirectoryTreePreflightForTest { get; init; }
 
         public FileMover(
@@ -120,151 +119,218 @@ namespace Listenarr.Infrastructure.FileSystem
                 return false;
             }
 
-            var targetExistsBeforeAttempt = Directory.Exists(destDir);
-            var fallbackRequired = false;
-            Exception? directMoveFailure = null;
+            // Try move with retries
+            var attempt = 0;
+            var delay = 1000;
 
-            try
+            for (; attempt < _options.MaxRetries; attempt++)
             {
-                BeforeDirectoryTreePreflightForTest?.Invoke();
-                await EnsureDirectoryMoveTargetSafeAsync(sourceDir, destDir, destDir);
-                Directory.Move(sourceDir, destDir);
-                if (!Directory.Exists(destDir) || Directory.Exists(sourceDir))
+                try
                 {
-                    throw new IOException(
-                        "Directory move completed without establishing the expected source and destination state.");
+                    Directory.Move(sourceDir, destDir);
+                    LogMutation(FileMutationOutcome.Success, FileAction.Move, sourceDir, destDir);
+                    return true;
                 }
-                return true;
-            }
-            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-            {
-                directMoveFailure = ex;
-                fallbackRequired = true;
+                catch (Exception ex) when (ex is not OperationCanceledException && ex is not OutOfMemoryException && ex is not StackOverflowException)
+                {
+                    _logger.LogWarning(ex, "Directory.Move attempt {Attempt} failed: {Source} -> {Dest}", attempt + 1, sourceDir, destDir);
+                    try
+                    {
+                        var files = Directory.GetFiles(sourceDir, "*.*", SearchOption.AllDirectories);
+                        _logger.LogWarning("Directory listing sample: {Sample}", string.Join(", ", files.Take(5).Select(f => Path.GetFileName(f))));
+                    }
+                    catch (Exception diagEx) when (diagEx is not OperationCanceledException && diagEx is not OutOfMemoryException && diagEx is not StackOverflowException)
+                    {
+                        _logger.LogDebug(diagEx, "Failed to collect directory listing diagnostics for {Source}", sourceDir);
+                    }
+
+                    try
+                    {
+                        if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+                        {
+                            var dirSec = new DirectoryInfo(sourceDir).GetAccessControl();
+                            var owner = dirSec.GetOwner(typeof(NTAccount))?.ToString() ?? "unknown";
+                            _logger.LogWarning("Directory owner: {Owner}", owner);
+                        }
+                    }
+                    catch (Exception ownerEx) when (ownerEx is not OperationCanceledException && ownerEx is not OutOfMemoryException && ownerEx is not StackOverflowException)
+                    {
+                        _logger.LogDebug(ownerEx, "Failed to resolve directory owner diagnostics for {Source}", sourceDir);
+                    }
+
+                    if (attempt < _options.MaxRetries - 1)
+                    {
+                        await Task.Delay(Math.Min(delay, _options.MaxBackoffMs));
+                        delay = Math.Min(delay * 2, _options.MaxBackoffMs);
+                    }
+                }
             }
 
-            if (!fallbackRequired)
+            if (pathEquivalence == null || pathsOverlap != false)
             {
+                _logger.LogWarning(
+                    "Blocked copy-and-delete directory fallback because filesystem identity could not prove distinct, non-overlapping paths: {Source} -> {Destination}",
+                    LogRedaction.SanitizeFilePath(sourceDir),
+                    LogRedaction.SanitizeFilePath(destDir));
                 return false;
             }
 
+            if (!TryCaptureDirectoryCopySnapshot(
+                    sourceDir,
+                    out var copySnapshot,
+                    out var sourceTraversalReason)
+                || copySnapshot == null
+                || (Directory.Exists(destDir)
+                    && !FileSystemSafety.TryEnumerateTreeWithoutLinks(
+                        destDir,
+                        out _,
+                        out _,
+                        out sourceTraversalReason)))
+            {
+                _logger.LogWarning(
+                    "Blocked copy-and-delete directory fallback because a filesystem tree could not be traversed safely: {Reason}",
+                    sourceTraversalReason);
+                return false;
+            }
+
+            // Fallback to copy plus verified, non-recursive source cleanup. New or
+            // changed source content is preserved instead of being recursively deleted.
             try
             {
-                await CopyDirectoryAsync(sourceDir, destDir);
-                if (!Directory.Exists(sourceDir))
+                await CopyDirectorySnapshotAsync(copySnapshot, destDir);
+                var cleanup = await CleanupCopiedSourceTreeAsync(sourceDir, destDir);
+                if (!cleanup.DestinationVerified)
                 {
-                    return Directory.Exists(destDir);
+                    _logger.LogWarning(
+                        "Directory copy fallback preserved the source because destination verification failed: {Reason}",
+                        cleanup.Reason);
+                    return false;
                 }
 
-                if (!targetExistsBeforeAttempt)
+                if (!cleanup.SourceRemoved)
                 {
-                    return TryRetireCopiedSourceDirectory(
+                    _logger.LogWarning(
+                        "Directory move copied the destination but preserved changed source content at {Source}: {Reason}",
+                        LogRedaction.SanitizeFilePath(sourceDir),
+                        cleanup.Reason);
+                    LogMutation(
+                        FileMutationOutcome.Failed,
+                        FileAction.Move,
                         sourceDir,
                         destDir,
-                        out _);
+                        cleanup.Reason);
+                    return false;
                 }
 
-                _logger.LogWarning(
-                    directMoveFailure,
-                    "Directory move fell back to copy, but source retirement is blocked because the destination existed before the operation");
-                return false;
+                LogMutation(FileMutationOutcome.Success, FileAction.Move, sourceDir, destDir);
+                return true;
             }
-            catch (Exception fallbackFailure) when (fallbackFailure is IOException or UnauthorizedAccessException)
+            catch (Exception ex) when (ex is not OperationCanceledException && ex is not OutOfMemoryException && ex is not StackOverflowException)
             {
-                _logger.LogError(
-                    fallbackFailure,
-                    "Directory move fallback failed after direct move failure");
-                return false;
-            }
-        }
+                _logger.LogError(ex, "Copy+delete fallback failed for directory {Source} -> {Dest}", sourceDir, destDir);
 
-        public async Task<bool> CopyDirectoryAsync(string sourceDir, string destDir)
-        {
-            try
-            {
-                BeforeDirectoryTreePreflightForTest?.Invoke();
-                await EnsureDirectoryCopyTargetSafeAsync(sourceDir, destDir, destDir);
-                if (!TryCaptureDirectoryCopySnapshot(sourceDir, out var snapshot, out var snapshotReason)
-                    || snapshot == null)
+                // On Windows attempt robocopy as a final-resort atomic-ish fallback
+                try
                 {
-                    throw new IOException(snapshotReason);
-                }
+                    if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows) && _options.EnableRobocopy && _processRunner != null)
+                    {
+                        _logger.LogWarning("Attempting robocopy fallback for directory move: {Source} -> {Dest}", sourceDir, destDir);
+                        var startInfo = CreateRobocopyStartInfo(
+                            sourceDir,
+                            destDir,
+                            "/E",
+                            "/NFL",
+                            "/NDL",
+                            "/NJH",
+                            "/NJS",
+                            "/NP");
 
-                if (AfterDirectoryCopyPreflightForTestAsync != null)
+                        var pr = await _processRunner.RunAsync(startInfo, _options.RobocopyTimeoutMs);
+                        if (!pr.TimedOut && pr.ExitCode <= 7 && pr.ExitCode >= 0)
+                        {
+                            var cleanup = await CleanupCopiedSourceTreeAsync(
+                                sourceDir,
+                                destDir);
+                            if (!cleanup.DestinationVerified)
+                            {
+                                _logger.LogWarning(
+                                    "Robocopy completed, but source cleanup was blocked because the destination could not be verified: {Reason}",
+                                    cleanup.Reason);
+                                return false;
+                            }
+
+                            if (!cleanup.SourceRemoved)
+                            {
+                                _logger.LogWarning(
+                                    "Robocopy completed and preserved changed source content at {Source}: {Reason}",
+                                    LogRedaction.SanitizeFilePath(sourceDir),
+                                    cleanup.Reason);
+                                return false;
+                            }
+
+                            _logger.LogInformation("Robocopy fallback succeeded with exit code {Code}", pr.ExitCode);
+                            _logger.LogDebug("Robocopy stdout: {Out}", LogRedaction.RedactText(Truncate(pr.Stdout, 2000), LogRedaction.GetSensitiveValuesFromEnvironment()));
+                            return true;
+                        }
+
+                        _logger.LogWarning("Robocopy fallback failed or returned non-success code: {Code}. Stderr: {Err}", pr.ExitCode, LogRedaction.RedactText(Truncate(pr.Stderr, 2000), LogRedaction.GetSensitiveValuesFromEnvironment()));
+                    }
+                }
+                catch (Exception rex) when (rex is not OperationCanceledException && rex is not OutOfMemoryException && rex is not StackOverflowException)
                 {
-                    await AfterDirectoryCopyPreflightForTestAsync();
+                    _logger.LogWarning(rex, "Robocopy fallback threw an exception");
                 }
 
-                await CopyDirectorySnapshotAsync(snapshot, destDir);
-                return await DirectoryCopySnapshotStillMatchesAsync(snapshot, destDir);
-            }
-            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-            {
-                _logger.LogError(ex, "Failed to copy directory {SourceDir} to {DestDir}", sourceDir, destDir);
                 return false;
             }
         }
 
         public async Task<bool> MoveFileAsync(string sourceFile, string destFile)
         {
-            if (string.Equals(sourceFile, destFile, StringComparison.Ordinal))
+            if (string.Equals(
+                    Path.GetFullPath(sourceFile),
+                    Path.GetFullPath(destFile),
+                    StringComparison.Ordinal))
             {
-                LogMutation(
-                    FileMutationOutcome.Skipped,
-                    FileAction.Move,
-                    sourceFile,
-                    destFile,
-                    "Source and destination are the same literal path");
                 return true;
             }
 
-            if (await IsFileAliasOperationBlockedAsync(sourceFile, destFile))
+            using var pathLock = await TryAcquireFileMoveGateAsync(
+                sourceFile,
+                destFile);
+            if (pathLock == null)
             {
-                LogMutation(
-                    FileMutationOutcome.Blocked,
-                    FileAction.Move,
-                    sourceFile,
-                    destFile,
-                    "Source and destination are linked aliases");
                 return false;
             }
 
-            if (!File.Exists(sourceFile))
+            var recoveryOutcome = await TryRecoverInterruptedFileMoveClaimsAsync(
+                sourceFile,
+                destFile,
+                pathLock.SourceIdentity,
+                pathLock.DestinationIdentity);
+            if (recoveryOutcome == FileMoveClaimRecoveryOutcome.Completed)
             {
-                LogMutation(
-                    FileMutationOutcome.Failed,
-                    FileAction.Move,
-                    sourceFile,
-                    destFile,
-                    "Source file does not exist");
-                return false;
-            }
-
-            var sourceIdentity = TryResolveFileEndpointIdentity(sourceFile);
-            var destinationIdentity = TryResolveFileEndpointIdentity(destFile);
-            if (await IsFileAliasOperationBlockedAsync(sourceFile, destFile))
-            {
-                LogMutation(
-                    FileMutationOutcome.Blocked,
-                    FileAction.Move,
-                    sourceFile,
-                    destFile,
-                    "Source or destination became a linked alias while resolving endpoint identity");
-                return false;
-            }
-
-            if (destinationIdentity is { Exists: true }
-                && sourceIdentity is { Exists: true }
-                && destinationIdentity.Value.Equals(sourceIdentity.Value))
-            {
-                LogMutation(
-                    FileMutationOutcome.Skipped,
-                    FileAction.Move,
-                    sourceFile,
-                    destFile,
-                    "Source and destination identify the same unlinked file");
                 return true;
             }
 
+            if (recoveryOutcome == FileMoveClaimRecoveryOutcome.Blocked)
+            {
+                return false;
+            }
+
+            return await MoveFileWithLocksAsync(
+                sourceFile,
+                destFile,
+                pathLock.SourceIdentity,
+                pathLock.DestinationIdentity);
+        }
+
+        private async Task<bool> MoveFileWithLocksAsync(
+            string sourceFile,
+            string destFile,
+            string sourceIdentity,
+            string destinationIdentity)
+        {
             var pathEquivalence = await TryDetermineFilesystemPathEquivalenceAsync(
                 sourceFile,
                 destFile);
@@ -279,53 +345,137 @@ namespace Listenarr.Infrastructure.FileSystem
                 return true;
             }
 
-            try
+            var attempt = 0;
+            var delay = 1000;
+
+            var idempotentOutcome = await TryCompleteIdempotentFileMoveAsync(
+                sourceFile,
+                destFile,
+                sourceIdentity,
+                destinationIdentity);
+            if (idempotentOutcome == IdempotentFileMoveOutcome.Completed)
             {
-                var destinationDirectory = Path.GetDirectoryName(destFile);
-                if (!string.IsNullOrEmpty(destinationDirectory))
-                {
-                    Directory.CreateDirectory(destinationDirectory);
-                }
+                return true;
+            }
 
-                using var lease = await TryAcquireFileMoveLeaseAsync(sourceFile, destFile);
-                if (lease == null)
-                {
-                    LogMutation(
-                        FileMutationOutcome.Blocked,
-                        FileAction.Move,
-                        sourceFile,
-                        destFile,
-                        "Cross-process move lease could not be acquired");
-                    return false;
-                }
+            if (idempotentOutcome == IdempotentFileMoveOutcome.SourcePathRecreated)
+            {
+                LogMutation(
+                    FileMutationOutcome.Blocked,
+                    FileAction.Move,
+                    sourceFile,
+                    destFile,
+                    "Source path was recreated while completing an idempotent move");
+                return false;
+            }
 
-                if (await IsFileAliasOperationBlockedAsync(sourceFile, destFile))
+            for (; attempt < _options.MaxRetries; attempt++)
+            {
+                try
                 {
-                    LogMutation(
-                        FileMutationOutcome.Blocked,
-                        FileAction.Move,
-                        sourceFile,
-                        destFile,
-                        "Source or destination became a linked alias while acquiring the move lease");
-                    return false;
-                }
-
-                if (await TryMoveFileWithRecoveryAsync(sourceFile, destFile, lease))
-                {
+                    File.Move(sourceFile, destFile, true);
+                    LogMutation(FileMutationOutcome.Success, FileAction.Move, sourceFile, destFile);
                     return true;
                 }
+                catch (Exception ex) when (ex is not OperationCanceledException && ex is not OutOfMemoryException && ex is not StackOverflowException)
+                {
+                    _logger.LogWarning(ex, "File.Move attempt {Attempt} failed: {Source} -> {Dest}", attempt + 1, sourceFile, destFile);
+                    try
+                    {
+                        using var stream = File.Open(sourceFile, FileMode.Open, FileAccess.Read, FileShare.Read);
+                        _logger.LogDebug("Able to open source file for read during diagnostic: {File}", sourceFile);
+                    }
+                    catch (Exception diagEx) when (diagEx is not OperationCanceledException && diagEx is not OutOfMemoryException && diagEx is not StackOverflowException)
+                    {
+                        _logger.LogDebug(diagEx, "Failed to collect file diagnostics for {Source}", sourceFile);
+                    }
 
+                    if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+                    {
+                        try
+                        {
+                            var fileSec = new FileInfo(sourceFile).GetAccessControl();
+                            var owner = fileSec.GetOwner(typeof(NTAccount))?.ToString() ?? "unknown";
+                            _logger.LogWarning("File owner for {File}: {Owner}", sourceFile, owner);
+                        }
+                        catch (Exception ownerEx) when (ownerEx is not OperationCanceledException && ownerEx is not OutOfMemoryException && ownerEx is not StackOverflowException)
+                        {
+                            _logger.LogDebug(ownerEx, "Failed to resolve file owner diagnostics for {Source}", sourceFile);
+                        }
+                    }
+
+                    if (attempt < _options.MaxRetries - 1)
+                    {
+                        await Task.Delay(Math.Min(delay, _options.MaxBackoffMs));
+                        delay = Math.Min(delay * 2, _options.MaxBackoffMs);
+                    }
+                }
+            }
+
+            if (pathEquivalence == null
+                || IsLinkedOrUnverifiableEntry(sourceFile)
+                || IsLinkedOrUnverifiableEntry(destFile))
+            {
+                _logger.LogWarning(
+                    "Blocked copy-and-delete file fallback because filesystem identity or link safety could not prove distinct regular files: {Source} -> {Destination}",
+                    LogRedaction.SanitizeFilePath(sourceFile),
+                    LogRedaction.SanitizeFilePath(destFile));
+                return false;
+            }
+
+            var managedFallback = await TryManagedFileMoveFallbackAsync(
+                sourceFile,
+                destFile,
+                sourceIdentity,
+                destinationIdentity);
+            if (managedFallback == FileMoveFallbackOutcome.Success)
+            {
+                LogMutation(
+                    FileMutationOutcome.Success,
+                    FileAction.Move,
+                    sourceFile,
+                    destFile,
+                    "Verified copy fallback");
+                return true;
+            }
+
+            if (managedFallback == FileMoveFallbackOutcome.SourceRetained)
+            {
                 LogMutation(
                     FileMutationOutcome.Failed,
                     FileAction.Move,
                     sourceFile,
                     destFile,
-                    "The durable file move workflow did not complete successfully");
+                    "Destination was published but the verified source could not be removed");
                 return false;
             }
-            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+
+            var robocopyFallback = await TryRobocopyFileMoveFallbackAsync(
+                sourceFile,
+                destFile,
+                sourceIdentity,
+                destinationIdentity);
+            if (robocopyFallback == FileMoveFallbackOutcome.Success)
             {
-                _logger.LogError(ex, "Failed to move file {SourceFile} to {DestFile}", sourceFile, destFile);
-                return false;
+                LogMutation(
+                    FileMutationOutcome.Success,
+                    FileAction.Move,
+                    sourceFile,
+                    destFile,
+                    "Verified robocopy fallback");
+                return true;
             }
+
+            LogMutation(
+                FileMutationOutcome.Failed,
+                FileAction.Move,
+                sourceFile,
+                destFile,
+                robocopyFallback == FileMoveFallbackOutcome.SourceRetained
+                    ? "Robocopy published the destination but the verified source could not be removed"
+                    : "No verified file move fallback completed");
+            return false;
         }
+
+    }
+}
