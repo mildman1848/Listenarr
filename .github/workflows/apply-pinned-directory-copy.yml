@@ -1,5 +1,6 @@
 name: Apply Pinned Directory Copy
 
+# Temporary exact-patch workflow; removed immediately after generated diff review.
 on:
   push:
     branches:
