@@ -8,13 +8,35 @@ on:
     types: [ opened, synchronize, reopened ]
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: run-tests-${{ github.head_ref || github.ref }}
   cancel-in-progress: true
 
 jobs:
+  apply-filesystem-source-splits:
+    if: github.repository == 'Listenarrs/Listenarr' && github.head_ref == 'bugfix/unix-folder-name-space'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: bugfix/unix-folder-name-space
+      - name: Apply exact reviewed source splits
+        run: python .github/scripts/split-filesystem-sources.py
+      - name: Commit exact source splits
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add \
+            listenarr.infrastructure/FileSystem/FileMover.DirectoryCopy.cs \
+            listenarr.infrastructure/FileSystem/FileMover.DirectoryCopy.Validation.cs \
+            listenarr.infrastructure/FileSystem/PinnedDirectoryCreation.cs \
+            listenarr.infrastructure/FileSystem/PinnedDirectoryCreation.NativeOperations.cs \
+            listenarr.infrastructure/FileSystem/PinnedDirectoryCreation.NativeInterop.cs
+          git commit -m "refactor(filesystem): split focused native and copy helpers"
+          git push origin HEAD:bugfix/unix-folder-name-space
+
   unit-tests:
     runs-on: ubuntu-latest
     env:
