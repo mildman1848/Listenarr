@@ -1,0 +1,27 @@
+name: Apply Linked Directory Copy Parent Fix
+
+on:
+  pull_request:
+    branches: [ canary ]
+    types: [ synchronize, reopened ]
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: github.repository == 'Listenarrs/Listenarr' && github.head_ref == 'bugfix/unix-folder-name-space'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: bugfix/unix-folder-name-space
+      - name: Apply exact reviewed parent safety fix
+        run: python .github/scripts/reject-linked-directory-copy-parent.py
+      - name: Commit exact parent safety fix
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add listenarr.infrastructure/FileSystem/FileMover.DirectoryCopy.cs
+          git commit -m "fix(filesystem): reject linked directory-copy parent chains"
+          git push origin HEAD:bugfix/unix-folder-name-space
