@@ -1,12 +1,13 @@
-using Microsoft.EntityFrameworkCore;
 using Listenarr.Infrastructure.Persistence.Repositories;
+using Listenarr.Tests.Common;
+using Microsoft.EntityFrameworkCore;
 
 namespace Listenarr.Tests.Features.Infrastructure.Repositories;
 
 [Trait("Area", "Persistence")]
 [Trait("Name", "EfAudiobookFileTrackedPathTests")]
 [Trait("Category", "Infrastructure")]
-public sealed class EfAudiobookFileTrackedPathTests
+public sealed class EfAudiobookFileTrackedPathTests : BaseTests
 {
     [Fact]
     public async Task GetAllFilePathsAsync_ResolvesRelativeFileAndLegacyFilePath()
