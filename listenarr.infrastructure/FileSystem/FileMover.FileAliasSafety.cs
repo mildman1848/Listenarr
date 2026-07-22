@@ -49,7 +49,8 @@ public partial class FileMover
                     IOException or UnauthorizedAccessException or ArgumentException
                         or InvalidOperationException or NotSupportedException or PathTooLongException)
                 {
-                    return false;
+                    // Fall through to object identity instead of declaring uncertain linked
+                    // paths distinct.
                 }
             }
         }
