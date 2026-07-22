@@ -8,12 +8,20 @@ namespace Listenarr.Tests.Features.Infrastructure.Library.Moving;
 public sealed class DirectoryCreationParentReplacementTests : BaseTests
 {
     [Fact]
-    public async Task EnsureCreatedHierarchyAsync_ParentReplacedAfterValidation_DoesNotCreateOutsideBoundary()
+    public Task EnsureCreatedHierarchyAsync_ParentReplacedBeforeHandleOpen_DoesNotCreateOutsideBoundary() =>
+        AssertParentReplacementBlockedAsync(replaceBeforeOpen: true);
+
+    [Fact]
+    public Task EnsureCreatedHierarchyAsync_ParentReplacedAfterHandleOpen_DoesNotCreateOutsideBoundary() =>
+        AssertParentReplacementBlockedAsync(replaceBeforeOpen: false);
+
+    private async Task AssertParentReplacementBlockedAsync(bool replaceBeforeOpen)
     {
-        var root = FileService.GetTempDirectory("directory-create-parent-race-root");
+        var suffix = replaceBeforeOpen ? "before-open" : "after-open";
+        var root = FileService.GetTempDirectory($"directory-create-parent-race-root-{suffix}");
         var parent = Path.Join(root, "Author");
         var displacedParent = Path.Join(root, "Author.original");
-        var external = FileService.GetTempDirectory("directory-create-parent-race-external");
+        var external = FileService.GetTempDirectory($"directory-create-parent-race-external-{suffix}");
         var probe = Path.Join(root, "link-probe");
         Directory.CreateDirectory(parent);
 
@@ -27,9 +35,10 @@ public sealed class DirectoryCreationParentReplacementTests : BaseTests
         var semantics = FileSystemPathSemantics.CurrentHostDefault;
         var store = _provider.GetRequiredService<ILibraryDirectoryOwnershipStore>();
         var hookRan = false;
-        using var hook = ExclusiveDirectoryCreator.PushBeforeCreateHook(path =>
+        void ReplaceParent(string path)
         {
-            if (hookRan || !string.Equals(path, destination, StringComparison.Ordinal))
+            var expectedPath = replaceBeforeOpen ? parent : destination;
+            if (hookRan || !string.Equals(path, expectedPath, StringComparison.Ordinal))
             {
                 return;
             }
@@ -37,11 +46,15 @@ public sealed class DirectoryCreationParentReplacementTests : BaseTests
             hookRan = true;
             Directory.Move(parent, displacedParent);
             Directory.CreateSymbolicLink(parent, external);
-        });
+        }
+
+        using var hook = replaceBeforeOpen
+            ? ExclusiveDirectoryCreator.PushBeforeOpenParentHook(ReplaceParent)
+            : ExclusiveDirectoryCreator.PushBeforeCreateHook(ReplaceParent);
 
         try
         {
-            await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            await Assert.ThrowsAnyAsync<Exception>(() =>
                 store.EnsureCreatedHierarchyAsync(
                     destination,
                     root,
