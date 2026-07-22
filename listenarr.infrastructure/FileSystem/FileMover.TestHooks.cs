@@ -1,3 +1,5 @@
+using Listenarr.Domain.Audiobooks.Enumerations;
+
 namespace Listenarr.Infrastructure.FileSystem;
 
 public partial class FileMover
