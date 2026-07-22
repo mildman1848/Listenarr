@@ -48,4 +48,49 @@ public sealed class FileMoverDirectoryParentLinkRegressionTests : BaseTests
         Assert.False(Directory.Exists(destination));
         Assert.False(Directory.Exists(physicalDestination));
     }
+
+    [Fact]
+    public async Task MoveDirectoryAsync_DestinationAncestorReplacedBeforeParentOpen_IsRejected()
+    {
+        var root = FileService.GetTempDirectory("directory-parent-open-race");
+        var source = Path.Join(root, "source");
+        var lexicalRoot = Path.Join(root, "lexical-root");
+        var lexicalParent = Path.Join(lexicalRoot, "parent");
+        var displacedRoot = Path.Join(root, "displaced-root");
+        var externalRoot = Path.Join(root, "external-root");
+        var externalParent = Path.Join(externalRoot, "parent");
+        Directory.CreateDirectory(source);
+        Directory.CreateDirectory(lexicalParent);
+        Directory.CreateDirectory(externalParent);
+        await File.WriteAllTextAsync(Path.Join(source, "book.m4b"), "audio");
+        var destination = Path.Join(lexicalParent, "book");
+        var externalDestination = Path.Join(externalParent, "book");
+        var hookRan = false;
+        using var hook = ExclusiveDirectoryCreator.PushBeforeOpenParentHook(path =>
+        {
+            if (!string.Equals(path, lexicalParent, StringComparison.Ordinal))
+            {
+                return;
+            }
+
+            Directory.Move(lexicalRoot, displacedRoot);
+            Directory.CreateSymbolicLink(lexicalRoot, externalRoot);
+            hookRan = true;
+        });
+        var mover = new FileMover(
+            new NullLogger<FileMover>(),
+            options: Options.Create(new FileMoverOptions { MaxRetries = 1 }),
+            semanticsResolver: new FileSystemSemanticsResolver())
+        {
+            BeforeDirectoryMoveAttemptForTest = () =>
+                throw new IOException("Force the verified directory fallback.")
+        };
+
+        var result = await mover.MoveDirectoryAsync(source, destination);
+
+        Assert.True(hookRan);
+        Assert.False(result);
+        Assert.Equal("audio", await File.ReadAllTextAsync(Path.Join(source, "book.m4b")));
+        Assert.False(Directory.Exists(externalDestination));
+    }
 }
