@@ -288,7 +288,7 @@ namespace Listenarr.Infrastructure.FileSystem
                         _logger.LogWarning("Attempting robocopy fallback for directory move: {Source} -> {Dest}", sourceDir, destDir);
                         var startInfo = CreateRobocopyStartInfo(
                             sourceDir,
-                            destDir,
+                            destinationRoot,
                             "/E",
                             "/NFL",
                             "/NDL",
@@ -301,7 +301,7 @@ namespace Listenarr.Infrastructure.FileSystem
                         {
                             var cleanup = await CleanupCopiedSourceTreeAsync(
                                 sourceDir,
-                                destDir);
+                                destinationRoot);
                             if (!cleanup.DestinationVerified)
                             {
                                 _logger.LogWarning(
