@@ -28,111 +28,110 @@ jobs:
           if 'EnsureWindowsParentIsNotReparsePoint' in text:
               raise SystemExit(0)
 
-          text = text.replace(
+          def replace_once(old: str, new: str, description: str) -> None:
+              global text
+              if old not in text:
+                  raise RuntimeError(f'{description} anchor not found')
+              text = text.replace(old, new, 1)
+
+          replace_once(
               '    private const uint FileAttributeHidden = 0x00000002;\n',
               '    private const uint FileAttributeHidden = 0x00000002;\n'
               '    private const uint FileAttributeReparsePoint = 0x00000400;\n',
-              1,
+              'reparse attribute constant',
           )
-          text = text.replace(
-              '        ValidateLeafName(childName);\n\n        return OperatingSystem.IsWindows()\n',
+          replace_once(
+              '        ValidateLeafName(childName);\n\n'
+              '        return OperatingSystem.IsWindows()\n',
               '        ValidateLeafName(childName);\n'
               '        ExclusiveDirectoryCreator.InvokeBeforeOpenParentHook(parentPath);\n\n'
               '        return OperatingSystem.IsWindows()\n',
-              1,
+              'pre-open hook',
           )
-          text = text.replace(
-              '        var parentHandle = OpenDirectoryWindows(parentPath, openReparsePoint: false);\n        try\n        {\n',
+          replace_once(
+              '        var parentHandle = OpenDirectoryWindows(parentPath, openReparsePoint: false);\n'
+              '        try\n'
+              '        {\n',
               '        var parentHandle = OpenDirectoryWindows(parentPath, openReparsePoint: true);\n'
               '        try\n'
               '        {\n'
               '            EnsureWindowsParentIsNotReparsePoint(parentHandle, parentPath);\n',
-              1,
+              'Windows parent open',
           )
-          text = text.replace(
+          replace_once(
               '        var parentHandle = OpenDirectoryUnix(parentPath, noFollow: false);\n',
               '        var parentHandle = OpenDirectoryUnix(parentPath, noFollow: true);\n',
-              1,
+              'Unix parent open',
           )
-          anchor = '''    private static SafeFileHandle OpenDirectoryWindows(
-              string path,
-              bool openReparsePoint)
-          {
-          '''
-          method = '''    private static void EnsureWindowsParentIsNotReparsePoint(
-              SafeFileHandle handle,
-              string path)
-          {
-              if (!GetFileAttributeTagInformationByHandleEx(
-                      handle,
-                      FileInformationClass.FileAttributeTagInfo,
-                      out var information,
-                      (uint)Marshal.SizeOf<FileAttributeTagInformation>()))
-              {
-                  throw new Win32Exception(
-                      Marshal.GetLastWin32Error(),
-                      $"Could not inspect directory '{path}'.");
-              }
-
-              if ((information.FileAttributes & FileAttributeReparsePoint) != 0)
-              {
-                  throw new InvalidOperationException(
-                      "A pinned directory parent cannot be a symbolic link or reparse point.");
-              }
-          }
-
-          '''
-          if anchor not in text:
-              raise RuntimeError('OpenDirectoryWindows anchor not found')
-          text = text.replace(anchor, method + anchor, 1)
-          text = text.replace(
-              '''    private enum FileInformationClass
-              {
-                  FileIdInfo = 18
-              }
-          ''',
-              '''    private enum FileInformationClass
-              {
-                  FileAttributeTagInfo = 9,
-                  FileIdInfo = 18
-              }
-          ''',
-              1,
+          open_method = (
+              '    private static SafeFileHandle OpenDirectoryWindows(\n'
+              '        string path,\n'
+              '        bool openReparsePoint)\n'
+              '    {\n'
           )
-          text = text.replace(
-              '''    [StructLayout(LayoutKind.Sequential)]
-              private struct FileId128
-          ''',
-              '''    [StructLayout(LayoutKind.Sequential)]
-              private struct FileAttributeTagInformation
-              {
-                  public uint FileAttributes;
-                  public uint ReparseTag;
-              }
-
-              [StructLayout(LayoutKind.Sequential)]
-              private struct FileId128
-          ''',
-              1,
+          guard_method = (
+              '    private static void EnsureWindowsParentIsNotReparsePoint(\n'
+              '        SafeFileHandle handle,\n'
+              '        string path)\n'
+              '    {\n'
+              '        if (!GetFileAttributeTagInformationByHandleEx(\n'
+              '                handle,\n'
+              '                FileInformationClass.FileAttributeTagInfo,\n'
+              '                out var information,\n'
+              '                (uint)Marshal.SizeOf<FileAttributeTagInformation>()))\n'
+              '        {\n'
+              '            throw new Win32Exception(\n'
+              '                Marshal.GetLastWin32Error(),\n'
+              '                $"Could not inspect directory \'{path}\'.");\n'
+              '        }\n\n'
+              '        if ((information.FileAttributes & FileAttributeReparsePoint) != 0)\n'
+              '        {\n'
+              '            throw new InvalidOperationException(\n'
+              '                "A pinned directory parent cannot be a symbolic link or reparse point.");\n'
+              '        }\n'
+              '    }\n\n'
           )
-          text = text.replace(
-              '''    [DllImport("kernel32.dll", SetLastError = true)]
-              [return: MarshalAs(UnmanagedType.Bool)]
-              private static extern bool GetFileInformationByHandleEx(
-          ''',
-              '''    [DllImport("kernel32.dll", EntryPoint = "GetFileInformationByHandleEx", SetLastError = true)]
-              [return: MarshalAs(UnmanagedType.Bool)]
-              private static extern bool GetFileAttributeTagInformationByHandleEx(
-                  SafeFileHandle fileHandle,
-                  FileInformationClass fileInformationClass,
-                  out FileAttributeTagInformation fileInformation,
-                  uint bufferSize);
-
-              [DllImport("kernel32.dll", SetLastError = true)]
-              [return: MarshalAs(UnmanagedType.Bool)]
-              private static extern bool GetFileInformationByHandleEx(
-          ''',
-              1,
+          replace_once(open_method, guard_method + open_method, 'Windows parent guard method')
+          replace_once(
+              '    private enum FileInformationClass\n'
+              '    {\n'
+              '        FileIdInfo = 18\n'
+              '    }\n',
+              '    private enum FileInformationClass\n'
+              '    {\n'
+              '        FileAttributeTagInfo = 9,\n'
+              '        FileIdInfo = 18\n'
+              '    }\n',
+              'file information enum',
+          )
+          replace_once(
+              '    [StructLayout(LayoutKind.Sequential)]\n'
+              '    private struct FileId128\n',
+              '    [StructLayout(LayoutKind.Sequential)]\n'
+              '    private struct FileAttributeTagInformation\n'
+              '    {\n'
+              '        public uint FileAttributes;\n'
+              '        public uint ReparseTag;\n'
+              '    }\n\n'
+              '    [StructLayout(LayoutKind.Sequential)]\n'
+              '    private struct FileId128\n',
+              'file attribute tag structure',
+          )
+          replace_once(
+              '    [DllImport("kernel32.dll", SetLastError = true)]\n'
+              '    [return: MarshalAs(UnmanagedType.Bool)]\n'
+              '    private static extern bool GetFileInformationByHandleEx(\n',
+              '    [DllImport("kernel32.dll", EntryPoint = "GetFileInformationByHandleEx", SetLastError = true)]\n'
+              '    [return: MarshalAs(UnmanagedType.Bool)]\n'
+              '    private static extern bool GetFileAttributeTagInformationByHandleEx(\n'
+              '        SafeFileHandle fileHandle,\n'
+              '        FileInformationClass fileInformationClass,\n'
+              '        out FileAttributeTagInformation fileInformation,\n'
+              '        uint bufferSize);\n\n'
+              '    [DllImport("kernel32.dll", SetLastError = true)]\n'
+              '    [return: MarshalAs(UnmanagedType.Bool)]\n'
+              '    private static extern bool GetFileInformationByHandleEx(\n',
+              'attribute tag P/Invoke',
           )
           path.write_text(text, encoding='utf-8')
       - name: Commit native hardening
