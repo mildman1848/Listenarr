@@ -5,7 +5,7 @@ using Microsoft.Win32.SafeHandles;
 
 namespace Listenarr.Infrastructure.FileSystem;
 
-internal sealed class PinnedDirectoryCreation : IDisposable
+internal sealed partial class PinnedDirectoryCreation : IDisposable
 {
     private const int UnixAlreadyExists = 17;
     private const int UnixNoEntry = 2;
