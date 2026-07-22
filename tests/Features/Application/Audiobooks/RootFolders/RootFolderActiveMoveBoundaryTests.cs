@@ -1,4 +1,5 @@
 using Listenarr.Infrastructure.Persistence.Repositories;
+using Listenarr.Tests.Common;
 using Microsoft.EntityFrameworkCore;
 
 namespace Listenarr.Tests.Features.Application.Audiobooks.RootFolders;
@@ -6,7 +7,7 @@ namespace Listenarr.Tests.Features.Application.Audiobooks.RootFolders;
 [Trait("Area", "RootFolders")]
 [Trait("Name", "RootFolderActiveMoveBoundaryTests")]
 [Trait("Category", "Application")]
-public sealed class RootFolderActiveMoveBoundaryTests
+public sealed class RootFolderActiveMoveBoundaryTests : BaseTests
 {
     [Fact]
     public async Task DeleteAsync_ActiveMoveEndpointContainsRoot_IsBlocked()
