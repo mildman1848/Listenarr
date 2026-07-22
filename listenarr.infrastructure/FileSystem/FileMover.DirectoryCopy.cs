@@ -84,10 +84,13 @@ public partial class FileMover
         var destinationParent = Path.GetDirectoryName(destinationRoot);
         if (string.IsNullOrWhiteSpace(destinationParent)
             || !Directory.Exists(destinationParent)
-            || IsLinkedOrUnverifiableEntry(destinationParent))
+            || IsLinkedOrUnverifiableEntry(destinationParent)
+            || !TryResolvePhysicalPath(destinationParent, out var parentResolution)
+            || parentResolution.EntryKind != PhysicalPathEntryKind.Directory
+            || parentResolution.EncounteredLink)
         {
             throw new IOException(
-                "Directory copy requires an existing, non-linked destination parent.");
+                "Directory copy requires an existing destination parent with no linked path components.");
         }
 
         var stagingName = $".{Path.GetFileName(destinationRoot)}.listenarr-copy-{Guid.NewGuid():N}";
