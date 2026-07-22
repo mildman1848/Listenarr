@@ -183,12 +183,17 @@ public partial class FileMover
             if (!anchor.VisiblePathMatches(quarantinePath)
                 || !TryVerifyEmptyDirectory(quarantinePath, out emptyReason))
             {
-                TryRestoreMovedEntry(quarantinePath, destinationPath, out _);
-                movedToQuarantine = false;
+                var restored = TryRestoreMovedEntry(
+                    quarantinePath,
+                    destinationPath,
+                    out var restoreReason);
+                movedToQuarantine = !restored;
                 return (
                     false,
                     null,
-                    $"The quarantined destination did not match the pinned empty placeholder: {emptyReason}");
+                    restored
+                        ? $"The quarantined destination did not match the pinned empty placeholder: {emptyReason}"
+                        : $"The quarantined destination changed and could not be restored: {restoreReason}");
             }
 
             var placeholder = new QuarantinedEmptyDestinationPlaceholder(
@@ -202,18 +207,31 @@ public partial class FileMover
         catch (Exception exception) when (exception is not (
             OperationCanceledException or OutOfMemoryException or StackOverflowException))
         {
+            string? restoreReason = null;
             if (movedToQuarantine && quarantinePath != null)
             {
-                TryRestoreMovedEntry(quarantinePath, destinationPath, out _);
+                var restored = TryRestoreMovedEntry(
+                    quarantinePath,
+                    destinationPath,
+                    out var attemptedRestoreReason);
+                movedToQuarantine = !restored;
+                restoreReason = restored ? null : attemptedRestoreReason;
             }
 
             return (
                 false,
                 null,
-                $"The empty destination placeholder could not be quarantined: {exception.GetType().Name}.");
+                restoreReason == null
+                    ? $"The empty destination placeholder could not be quarantined: {exception.GetType().Name}."
+                    : $"The empty destination placeholder could not be quarantined or restored: {restoreReason}");
         }
         finally
         {
+            if (movedToQuarantine && quarantinePath != null)
+            {
+                TryRestoreMovedEntry(quarantinePath, destinationPath, out _);
+            }
+
             anchor?.Dispose();
         }
     }
