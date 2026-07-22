@@ -114,15 +114,75 @@ public sealed class FileMoverDirectoryPublicationRaceTests : BaseTests
         }
     }
 
+    [Fact]
+    public async Task CopyDirectoryAsync_StagingRootReplacedBeforePublication_IsBlocked()
+    {
+        var root = FileService.GetTempDirectory("directory-copy-publication-race");
+        var source = Path.Join(root, "source");
+        var destination = Path.Join(root, "destination");
+        var external = FileService.GetTempDirectory("directory-copy-publication-external");
+        var probe = Path.Join(root, "link-probe");
+        Directory.CreateDirectory(source);
+        await File.WriteAllTextAsync(Path.Join(source, "book.m4b"), "source-audio");
+        if (!TryCreateDirectoryLink(probe, external))
+        {
+            return;
+        }
+        Directory.Delete(probe);
+
+        string? stagingRoot = null;
+        string? displacedStaging = null;
+        var hookRan = false;
+        var mover = CreateMover(beforePublication: path =>
+        {
+            stagingRoot = path;
+            displacedStaging = path + ".original";
+            Directory.Move(path, displacedStaging);
+            Directory.CreateSymbolicLink(path, external);
+            hookRan = true;
+            return Task.CompletedTask;
+        });
+
+        try
+        {
+            var result = await mover.CopyDirectoryAsync(source, destination);
+
+            Assert.False(result);
+            Assert.True(hookRan);
+            Assert.Empty(Directory.EnumerateFileSystemEntries(external));
+            Assert.False(Directory.Exists(destination));
+            Assert.Equal("source-audio", await File.ReadAllTextAsync(Path.Join(source, "book.m4b")));
+        }
+        finally
+        {
+            if (stagingRoot != null)
+            {
+                TryDeleteDirectoryLink(stagingRoot);
+                if (displacedStaging != null
+                    && Directory.Exists(displacedStaging)
+                    && !Directory.Exists(stagingRoot))
+                {
+                    Directory.Move(displacedStaging, stagingRoot);
+                }
+                if (Directory.Exists(stagingRoot))
+                {
+                    Directory.Delete(stagingRoot, recursive: true);
+                }
+            }
+        }
+    }
+
     private static FileMover CreateMover(
         Func<Task>? afterPreflight = null,
-        Func<string, Task>? afterStagingDirectoriesCreated = null) => new(
+        Func<string, Task>? afterStagingDirectoriesCreated = null,
+        Func<string, Task>? beforePublication = null) => new(
         new NullLogger<FileMover>(),
         options: Options.Create(new FileMoverOptions { MaxRetries = 1 }),
         semanticsResolver: new FileSystemSemanticsResolver())
     {
         AfterDirectoryCopyPreflightForTestAsync = afterPreflight,
-        AfterDirectoryCopyStagingDirectoriesCreatedForTestAsync = afterStagingDirectoriesCreated
+        AfterDirectoryCopyStagingDirectoriesCreatedForTestAsync = afterStagingDirectoriesCreated,
+        BeforeDirectoryCopyPublicationForTestAsync = beforePublication
     };
 
     private static bool TryCreateDirectoryLink(string linkPath, string targetPath)
