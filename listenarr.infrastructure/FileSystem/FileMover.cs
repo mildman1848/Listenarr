@@ -127,6 +127,7 @@ namespace Listenarr.Infrastructure.FileSystem
             {
                 try
                 {
+                    BeforeDirectoryMoveAttemptForTest?.Invoke();
                     Directory.Move(sourceDir, destDir);
                     LogMutation(FileMutationOutcome.Success, FileAction.Move, sourceDir, destDir);
                     return true;
