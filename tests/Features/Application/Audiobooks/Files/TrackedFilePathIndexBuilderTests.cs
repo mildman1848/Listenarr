@@ -1,9 +1,11 @@
+using Listenarr.Tests.Common;
+
 namespace Listenarr.Tests.Features.Application.Audiobooks.Files;
 
 [Trait("Area", "AudiobookFiles")]
 [Trait("Name", "TrackedFilePathIndexBuilderTests")]
 [Trait("Category", "Application")]
-public sealed class TrackedFilePathIndexBuilderTests
+public sealed class TrackedFilePathIndexBuilderTests : BaseTests
 {
     [Fact]
     public void Build_RelativeAudiobookFilePath_ResolvesAgainstOwningBasePath()
