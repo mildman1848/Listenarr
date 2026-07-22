@@ -101,6 +101,271 @@ namespace Listenarr.Tests.Features.Api.Features.Library
         }
 
         [Fact]
+        public async Task BulkUpdate_PhysicalPathChange_WithoutMetadata_EnqueuesAndReportsNoMetadataUpdate()
+        {
+            var jobId = Guid.NewGuid();
+            var moveQueue = new Mock<IMoveQueueService>();
+            moveQueue.Setup(service => service.EnqueueMoveAsync(
+                    It.IsAny<MoveEnqueueCommand>(),
+                    It.IsAny<CancellationToken>()))
+                .ReturnsAsync(jobId);
+            Init(services => services.WithSingleton(moveQueue.Object));
+
+            var destinationRoot = FileService.GetTempDirectory("bulk-path-only-destination");
+            await _applicationSettingsRepository.SaveAsync(new ApplicationSettingsBuilder()
+                .WithOutputPath(destinationRoot)
+                .WithFileNamingPattern("{Author}/{Title}")
+                .Build());
+            var sourceBasePath = FileService.GetTempDirectory("bulk-path-only-source");
+            var sourceFilePath = Path.Join(sourceBasePath, "book.m4b");
+            await File.WriteAllTextAsync(sourceFilePath, "audio");
+            var audiobook = await _audiobookRepository.AddAsync(new Audiobook
+            {
+                Title = "Path Only Book",
+                Authors = ["Path Only Author"],
+                BasePath = sourceBasePath,
+                FilePath = sourceFilePath
+            });
+            await AddTrackedFileAsync(audiobook, sourceFilePath);
+
+            var actionResult = await _provider.GetRequiredService<LibraryController>()
+                .BulkUpdateAudiobooks(new LibraryController.BulkUpdateRequest
+                {
+                    Ids = [audiobook.Id],
+                    PathChange = new LibraryController.BulkPathChangeRequest
+                    {
+                        Mode = LibraryController.BulkPathChangeMode.Physical,
+                        DestinationRootOrPath = destinationRoot
+                    }
+                });
+
+            var ok = Assert.IsType<OkObjectResult>(actionResult);
+            var json = JsonSerializer.Serialize(ok.Value);
+            using var document = JsonDocument.Parse(json);
+            var result = Assert.Single(document.RootElement.GetProperty("results").EnumerateArray());
+            Assert.True(result.GetProperty("success").GetBoolean());
+            Assert.False(result.GetProperty("metadataUpdated").GetBoolean());
+            Assert.Equal("enqueued", result.GetProperty("pathChangeOutcome").GetString());
+            Assert.Equal(jobId, result.GetProperty("moveJobId").GetGuid());
+            moveQueue.Verify(service => service.EnqueueMoveAsync(
+                It.IsAny<MoveEnqueueCommand>(),
+                It.IsAny<CancellationToken>()), Times.Once);
+        }
+
+        [Fact]
+        public async Task BulkUpdate_PhysicalPathChange_EmptyJobIdFailsClosed()
+        {
+            var moveQueue = new Mock<IMoveQueueService>();
+            moveQueue.Setup(service => service.EnqueueMoveAsync(
+                    It.IsAny<MoveEnqueueCommand>(),
+                    It.IsAny<CancellationToken>()))
+                .ReturnsAsync(Guid.Empty);
+            Init(services => services.WithSingleton(moveQueue.Object));
+
+            var destinationRoot = FileService.GetTempDirectory("bulk-empty-job-destination");
+            await _applicationSettingsRepository.SaveAsync(new ApplicationSettingsBuilder()
+                .WithOutputPath(destinationRoot)
+                .WithFileNamingPattern("{Author}/{Title}")
+                .Build());
+            var sourceBasePath = FileService.GetTempDirectory("bulk-empty-job-source");
+            var sourceFilePath = Path.Join(sourceBasePath, "book.m4b");
+            await File.WriteAllTextAsync(sourceFilePath, "audio");
+            var audiobook = await _audiobookRepository.AddAsync(new Audiobook
+            {
+                Title = "Empty Job Book",
+                Authors = ["Empty Job Author"],
+                BasePath = sourceBasePath,
+                FilePath = sourceFilePath
+            });
+            await AddTrackedFileAsync(audiobook, sourceFilePath);
+
+            var actionResult = await _provider.GetRequiredService<LibraryController>()
+                .BulkUpdateAudiobooks(new LibraryController.BulkUpdateRequest
+                {
+                    Ids = [audiobook.Id],
+                    PathChange = new LibraryController.BulkPathChangeRequest
+                    {
+                        Mode = LibraryController.BulkPathChangeMode.Physical,
+                        DestinationRootOrPath = destinationRoot
+                    }
+                });
+
+            var ok = Assert.IsType<OkObjectResult>(actionResult);
+            var json = JsonSerializer.Serialize(ok.Value);
+            using var document = JsonDocument.Parse(json);
+            var result = Assert.Single(document.RootElement.GetProperty("results").EnumerateArray());
+            Assert.False(result.GetProperty("success").GetBoolean());
+            Assert.Equal("failed", result.GetProperty("pathChangeOutcome").GetString());
+            Assert.Equal(JsonValueKind.Null, result.GetProperty("moveJobId").ValueKind);
+            Assert.Contains(
+                result.GetProperty("errors").EnumerateArray(),
+                error => error.GetString() == "The server did not return a durable move job ID.");
+        }
+
+        [Fact]
+        public async Task BulkUpdate_PhysicalPathChange_EnqueueFailureIsReturnedPerItem()
+        {
+            var moveQueue = new Mock<IMoveQueueService>();
+            moveQueue.Setup(service => service.EnqueueMoveAsync(
+                    It.IsAny<MoveEnqueueCommand>(),
+                    It.IsAny<CancellationToken>()))
+                .ThrowsAsync(new IOException("queue unavailable"));
+            Init(services => services.WithSingleton(moveQueue.Object));
+
+            var destinationRoot = FileService.GetTempDirectory("bulk-enqueue-failure-destination");
+            await _applicationSettingsRepository.SaveAsync(new ApplicationSettingsBuilder()
+                .WithOutputPath(destinationRoot)
+                .WithFileNamingPattern("{Author}/{Title}")
+                .Build());
+            var sourceBasePath = FileService.GetTempDirectory("bulk-enqueue-failure-source");
+            var sourceFilePath = Path.Join(sourceBasePath, "book.m4b");
+            await File.WriteAllTextAsync(sourceFilePath, "audio");
+            var audiobook = await _audiobookRepository.AddAsync(new Audiobook
+            {
+                Title = "Enqueue Failure Book",
+                Authors = ["Enqueue Failure Author"],
+                BasePath = sourceBasePath,
+                FilePath = sourceFilePath
+            });
+            await AddTrackedFileAsync(audiobook, sourceFilePath);
+
+            var actionResult = await _provider.GetRequiredService<LibraryController>()
+                .BulkUpdateAudiobooks(new LibraryController.BulkUpdateRequest
+                {
+                    Ids = [audiobook.Id],
+                    PathChange = new LibraryController.BulkPathChangeRequest
+                    {
+                        Mode = LibraryController.BulkPathChangeMode.Physical,
+                        DestinationRootOrPath = destinationRoot
+                    }
+                });
+
+            var ok = Assert.IsType<OkObjectResult>(actionResult);
+            var json = JsonSerializer.Serialize(ok.Value);
+            using var document = JsonDocument.Parse(json);
+            var result = Assert.Single(document.RootElement.GetProperty("results").EnumerateArray());
+            Assert.False(result.GetProperty("success").GetBoolean());
+            Assert.Equal("failed", result.GetProperty("pathChangeOutcome").GetString());
+            Assert.Equal(JsonValueKind.Null, result.GetProperty("moveJobId").ValueKind);
+            Assert.Contains(
+                result.GetProperty("errors").EnumerateArray(),
+                error => error.GetString()?.Contains("Failed to enqueue move job", StringComparison.Ordinal) == true);
+
+            var stored = await GetFreshAudiobookAsync(audiobook.Id);
+            Assert.NotNull(stored);
+            Assert.Equal(sourceBasePath, stored.BasePath);
+            Assert.Equal(sourceFilePath, stored.FilePath);
+        }
+
+        [Fact]
+        public async Task BulkUpdate_TypedMetadataOnlyFailure_DoesNotReportOverallSuccess()
+        {
+            var configuredRoot = FileService.GetTempDirectory("bulk-typed-configured-root");
+            var outsideRoot = FileService.GetTempDirectory("bulk-typed-outside-root");
+            await _applicationSettingsRepository.SaveAsync(new ApplicationSettingsBuilder()
+                .WithOutputPath(configuredRoot)
+                .WithFileNamingPattern("{Author}/{Title}")
+                .Build());
+            var originalBasePath = Path.Join(configuredRoot, "Existing", "Book");
+            var audiobook = await _audiobookRepository.AddAsync(new Audiobook
+            {
+                Title = "Typed Metadata Only",
+                Authors = ["Author"],
+                Monitored = false,
+                BasePath = originalBasePath
+            });
+
+            var actionResult = await _provider.GetRequiredService<LibraryController>()
+                .BulkUpdateAudiobooks(new LibraryController.BulkUpdateRequest
+                {
+                    Ids = [audiobook.Id],
+                    Updates = new Dictionary<string, object>
+                    {
+                        ["monitored"] = true
+                    },
+                    PathChange = new LibraryController.BulkPathChangeRequest
+                    {
+                        Mode = LibraryController.BulkPathChangeMode.MetadataOnly,
+                        DestinationRootOrPath = outsideRoot
+                    }
+                });
+
+            var ok = Assert.IsType<OkObjectResult>(actionResult);
+            var json = JsonSerializer.Serialize(ok.Value);
+            using var document = JsonDocument.Parse(json);
+            var result = Assert.Single(document.RootElement.GetProperty("results").EnumerateArray());
+            Assert.False(result.GetProperty("success").GetBoolean());
+            Assert.True(result.GetProperty("metadataUpdated").GetBoolean());
+            Assert.Equal("failed", result.GetProperty("pathChangeOutcome").GetString());
+            Assert.Contains(
+                result.GetProperty("errors").EnumerateArray(),
+                error => error.GetString()?.Contains(
+                    "configured root folder or output path",
+                    StringComparison.OrdinalIgnoreCase) == true);
+
+            var stored = await GetFreshAudiobookAsync(audiobook.Id);
+            Assert.NotNull(stored);
+            Assert.True(stored.Monitored);
+            Assert.Equal(originalBasePath, stored.BasePath);
+        }
+
+        [Fact]
+        public async Task BulkUpdate_PhysicalPathChange_DoesNotEnqueueWhenRequestedMetadataIsInvalid()
+        {
+            var moveQueue = new Mock<IMoveQueueService>();
+            moveQueue.Setup(service => service.EnqueueMoveAsync(
+                    It.IsAny<MoveEnqueueCommand>(),
+                    It.IsAny<CancellationToken>()))
+                .ReturnsAsync(Guid.NewGuid());
+            Init(services => services.WithSingleton(moveQueue.Object));
+
+            var destinationRoot = FileService.GetTempDirectory("bulk-invalid-metadata-destination");
+            await _applicationSettingsRepository.SaveAsync(new ApplicationSettingsBuilder()
+                .WithOutputPath(destinationRoot)
+                .WithFileNamingPattern("{Author}/{Title}")
+                .Build());
+            var sourceBasePath = FileService.GetTempDirectory("bulk-invalid-metadata-source");
+            var sourceFilePath = Path.Join(sourceBasePath, "book.m4b");
+            await File.WriteAllTextAsync(sourceFilePath, "audio");
+            var audiobook = await _audiobookRepository.AddAsync(new Audiobook
+            {
+                Title = "Invalid Metadata Book",
+                Authors = ["Invalid Metadata Author"],
+                Monitored = false,
+                BasePath = sourceBasePath,
+                FilePath = sourceFilePath
+            });
+            await AddTrackedFileAsync(audiobook, sourceFilePath);
+
+            var actionResult = await _provider.GetRequiredService<LibraryController>()
+                .BulkUpdateAudiobooks(new LibraryController.BulkUpdateRequest
+                {
+                    Ids = [audiobook.Id],
+                    Updates = new Dictionary<string, object>
+                    {
+                        ["monitored"] = "not-a-boolean"
+                    },
+                    PathChange = new LibraryController.BulkPathChangeRequest
+                    {
+                        Mode = LibraryController.BulkPathChangeMode.Physical,
+                        DestinationRootOrPath = destinationRoot
+                    }
+                });
+
+            var ok = Assert.IsType<OkObjectResult>(actionResult);
+            var json = JsonSerializer.Serialize(ok.Value);
+            using var document = JsonDocument.Parse(json);
+            var result = Assert.Single(document.RootElement.GetProperty("results").EnumerateArray());
+            Assert.False(result.GetProperty("success").GetBoolean());
+            Assert.Contains(
+                result.GetProperty("errors").EnumerateArray(),
+                error => error.GetString()?.Contains("Invalid monitored value", StringComparison.Ordinal) == true);
+            moveQueue.Verify(service => service.EnqueueMoveAsync(
+                It.IsAny<MoveEnqueueCommand>(),
+                It.IsAny<CancellationToken>()), Times.Never);
+        }
+
+        [Fact]
         public async Task BulkUpdate_InvalidRootFolderStillAppliesValidMetadataUpdates()
         {
             var controller = _provider.GetRequiredService<LibraryController>();

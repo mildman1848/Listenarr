@@ -389,13 +389,8 @@ async function handleSave() {
         deleteEmptySource: userWantsDeleteEmpty,
       },
       {
-        getAudiobook: (id) => apiService.getAudiobook(id),
-        previewLibraryPath: (metadata, destinationRoot) =>
-          apiService.previewLibraryPath(metadata, destinationRoot),
-        bulkUpdateAudiobooks: (audiobookIds, metadataUpdates) =>
-          apiService.bulkUpdateAudiobooks(audiobookIds, metadataUpdates),
-        moveAudiobook: (id, destinationPath, options) =>
-          apiService.moveAudiobook(id, destinationPath, options),
+        bulkUpdateAudiobooks: (audiobookIds, metadataUpdates, pathChange) =>
+          apiService.bulkUpdateAudiobooks(audiobookIds, metadataUpdates, pathChange),
         trackQueuedJob: (job) => moveJobsStore.trackQueuedJob(job),
       },
     )

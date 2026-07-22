@@ -17,14 +17,12 @@
  */
 
 using System.Text.Json;
-using System.Text.RegularExpressions;
 using Listenarr.Application.Common.Exceptions;
-using Listenarr.Domain.Common;
 using Microsoft.AspNetCore.Mvc;
 
 namespace Listenarr.Api.Features.Library
 {
-    public sealed class LibraryBulkEditWorkflow
+    public sealed partial class LibraryBulkEditWorkflow
     {
         private readonly IImageCacheService _imageCacheService;
         private readonly IHistoryRepository _historyRepository;
@@ -34,6 +32,7 @@ namespace Listenarr.Api.Features.Library
         private readonly IFileSystem _fileSystem;
         private readonly IAudiobookDestinationRewriteService _destinationRewriteService;
         private readonly IAudiobookOperationCoordinator _audiobookOperationCoordinator;
+        private readonly LibraryMoveWorkflow _moveWorkflow;
         private readonly ILogger<LibraryBulkEditWorkflow> _logger;
 
         public LibraryBulkEditWorkflow(
@@ -45,6 +44,7 @@ namespace Listenarr.Api.Features.Library
             IFileSystem fileSystem,
             IAudiobookDestinationRewriteService destinationRewriteService,
             IAudiobookOperationCoordinator audiobookOperationCoordinator,
+            LibraryMoveWorkflow moveWorkflow,
             ILogger<LibraryBulkEditWorkflow> logger)
         {
             _imageCacheService = imageCacheService;
@@ -55,61 +55,8 @@ namespace Listenarr.Api.Features.Library
             _fileSystem = fileSystem;
             _destinationRewriteService = destinationRewriteService ?? throw new ArgumentNullException(nameof(destinationRewriteService));
             _audiobookOperationCoordinator = audiobookOperationCoordinator ?? throw new ArgumentNullException(nameof(audiobookOperationCoordinator));
+            _moveWorkflow = moveWorkflow ?? throw new ArgumentNullException(nameof(moveWorkflow));
             _logger = logger;
-        }
-
-        public async Task<IActionResult> BulkDeleteAsync(LibraryController.BulkDeleteRequest request)
-        {
-            if (request.Ids == null || !request.Ids.Any())
-            {
-                return new BadRequestObjectResult(new { message = "No audiobook IDs provided for bulk deletion" });
-            }
-
-            var deletedCount = 0;
-            var deletedImagesCount = 0;
-            var errors = new List<string>();
-            var deletedIds = new List<int>();
-
-            foreach (var id in request.Ids.Distinct())
-            {
-                var outcome = await _audiobookOperationCoordinator.ExecuteExclusiveAsync(
-                    id,
-                    _ => DeleteOneAsync(id));
-                deletedImagesCount += outcome.DeletedImages;
-                if (outcome.Deleted)
-                {
-                    deletedCount++;
-                    deletedIds.Add(id);
-                }
-                if (outcome.Error != null)
-                {
-                    errors.Add(outcome.Error);
-                }
-            }
-
-            if (deletedCount == 0 && errors.Any())
-            {
-                return new BadRequestObjectResult(new { message = "No audiobooks were successfully deleted", errors });
-            }
-
-            object result = errors.Any()
-                ? new
-                {
-                    message = $"Partially successful: deleted {deletedCount} audiobook{(deletedCount != 1 ? "s" : "")}, {errors.Count} error{(errors.Count != 1 ? "s" : "")} occurred",
-                    deletedCount,
-                    deletedImagesCount,
-                    ids = deletedIds,
-                    errors
-                }
-                : new
-                {
-                    message = $"Successfully deleted {deletedCount} audiobook{(deletedCount != 1 ? "s" : "")}",
-                    deletedCount,
-                    deletedImagesCount,
-                    ids = deletedIds
-                };
-
-            return new OkObjectResult(result);
         }
 
         public async Task<IActionResult> BulkUpdateAsync(LibraryController.BulkUpdateRequest request)
@@ -121,77 +68,137 @@ namespace Listenarr.Api.Features.Library
 
             var results = new List<object>();
             var settings = await TryLoadApplicationSettingsAsync();
+            var pathChangeMode = request.PathChange?.Mode
+                ?? LibraryController.BulkPathChangeMode.None;
+            var metadataUpdates = new Dictionary<string, object>(
+                request.Updates ?? [],
+                StringComparer.OrdinalIgnoreCase);
+            metadataUpdates.Remove("moveFiles");
+            metadataUpdates.Remove("deleteEmptySource");
+            if (pathChangeMode == LibraryController.BulkPathChangeMode.Physical)
+            {
+                metadataUpdates.Remove("rootFolder");
+            }
 
             foreach (var id in request.Ids.Distinct())
             {
-                var rootRewrite = await RewriteRootFolderIfRequestedAsync(
-                    id,
-                    request.Updates,
-                    settings);
+                var physicalPlan = pathChangeMode == LibraryController.BulkPathChangeMode.Physical
+                    ? await PlanPhysicalPathChangeAsync(
+                        id,
+                        request.PathChange?.DestinationRootOrPath,
+                        settings)
+                    : PhysicalPathChangePlan.NotRequested;
+                var rootRewrite = pathChangeMode switch
+                {
+                    LibraryController.BulkPathChangeMode.Physical =>
+                        new RootFolderRewriteOutcome(false, null, null),
+                    LibraryController.BulkPathChangeMode.MetadataOnly =>
+                        await RewriteRootFolderIfRequestedAsync(
+                            id,
+                            metadataUpdates,
+                            settings,
+                            request.PathChange?.DestinationRootOrPath),
+                    _ => await RewriteRootFolderIfRequestedAsync(
+                        id,
+                        metadataUpdates,
+                        settings)
+                };
                 var outcome = await _audiobookOperationCoordinator.ExecuteExclusiveAsync(
                     id,
-                    _ => UpdateOneAsync(id, request.Updates, rootRewrite.Rewritten));
+                    _ => UpdateOneAsync(
+                        id,
+                        metadataUpdates,
+                        rootRewrite.Rewritten,
+                        pathChangeMode == LibraryController.BulkPathChangeMode.Physical));
                 var errors = outcome.Errors
                     .Concat(rootRewrite.Error == null ? [] : [rootRewrite.Error])
+                    .Concat(physicalPlan.Error == null ? [] : [physicalPlan.Error])
                     .Distinct(StringComparer.Ordinal)
                     .ToList();
-                results.Add(new { id, success = outcome.Success, errors });
+                var success = outcome.Success
+                    && (pathChangeMode != LibraryController.BulkPathChangeMode.MetadataOnly
+                        || rootRewrite.Error == null);
+                Guid? moveJobId = null;
+                var resolvedDestination = pathChangeMode == LibraryController.BulkPathChangeMode.MetadataOnly
+                    ? rootRewrite.Destination
+                    : physicalPlan.Destination;
+                var pathChangeOutcome = pathChangeMode switch
+                {
+                    LibraryController.BulkPathChangeMode.Physical => "not-enqueued",
+                    LibraryController.BulkPathChangeMode.MetadataOnly when rootRewrite.Rewritten => "metadata-updated",
+                    LibraryController.BulkPathChangeMode.MetadataOnly => "failed",
+                    _ => "none"
+                };
+
+                if (pathChangeMode == LibraryController.BulkPathChangeMode.Physical)
+                {
+                    if (physicalPlan.Error != null || string.IsNullOrWhiteSpace(physicalPlan.Destination))
+                    {
+                        success = false;
+                    }
+                    else if (outcome.Success)
+                    {
+                        var enqueueResult = await _moveWorkflow.EnqueueAsync(
+                            id,
+                            new LibraryController.MoveRequest
+                            {
+                                DestinationPath = physicalPlan.Destination,
+                                MoveFiles = true,
+                                DeleteEmptySource = request.PathChange?.DeleteEmptySource ?? true
+                            });
+                        if (enqueueResult is AcceptedResult
+                            {
+                                Value: MoveEnqueuedResponse enqueued
+                            })
+                        {
+                            if (enqueued.JobId == Guid.Empty)
+                            {
+                                success = false;
+                                pathChangeOutcome = "failed";
+                                errors.Add("The server did not return a durable move job ID.");
+                            }
+                            else
+                            {
+                                moveJobId = enqueued.JobId;
+                                resolvedDestination = enqueued.Target;
+                                pathChangeOutcome = "enqueued";
+                            }
+                        }
+                        else
+                        {
+                            success = false;
+                            pathChangeOutcome = "failed";
+                            errors.Add(GetActionResultError(enqueueResult));
+                        }
+                    }
+                }
+
+                results.Add(new
+                {
+                    id,
+                    success,
+                    metadataUpdated = outcome.MetadataUpdated,
+                    pathChangeOutcome,
+                    moveJobId,
+                    resolvedDestination,
+                    errors = errors.Distinct(StringComparer.Ordinal).ToList()
+                });
             }
 
             return new OkObjectResult(new { message = "Bulk update completed", results });
         }
 
-        private async Task<BulkDeleteOutcome> DeleteOneAsync(int id)
-        {
-            try
-            {
-                using var scope = _scopeFactory.CreateScope();
-                var repository = scope.ServiceProvider.GetRequiredService<IAudiobookRepository>();
-                var audiobook = await repository.GetByIdAsync(id);
-                if (audiobook == null)
-                {
-                    return new BulkDeleteOutcome(false, 0, $"Audiobook with ID {id} not found");
-                }
-
-                var deletedImages = await DeleteCachedImageAsync(audiobook);
-                await _historyRepository.AddAsync(new History
-                {
-                    AudiobookId = audiobook.Id,
-                    AudiobookTitle = audiobook.Title ?? "Unknown Title",
-                    EventType = "Deleted",
-                    Message = $"Audiobook '{audiobook.Title}' deleted via bulk operation",
-                    Source = "BulkDelete",
-                    Timestamp = DateTime.UtcNow
-                });
-
-                if (!await repository.DeleteByIdAsync(id))
-                {
-                    return new BulkDeleteOutcome(false, deletedImages, $"Failed to delete audiobook with ID {id}");
-                }
-
-                _logger.LogInformation(
-                    "Deleted audiobook '{Title}' (ID: {Id}) via bulk operation",
-                    LogRedaction.SanitizeText(audiobook.Title),
-                    id);
-                return new BulkDeleteOutcome(true, deletedImages, null);
-            }
-            catch (Exception ex) when (ex is not OperationCanceledException
-                && ex is not OutOfMemoryException
-                && ex is not StackOverflowException)
-            {
-                _logger.LogError(ex, "Error during bulk delete for ID {Id}: {Message}", id, ex.Message);
-                return new BulkDeleteOutcome(false, 0, $"Error deleting audiobook with ID {id}: {ex.Message}");
-            }
-        }
-
         private async Task<RootFolderRewriteOutcome> RewriteRootFolderIfRequestedAsync(
             int id,
             Dictionary<string, object>? updates,
-            ApplicationSettings? settings)
+            ApplicationSettings? settings,
+            string? explicitRootPath = null)
         {
-            if (updates == null || !updates.TryGetValue("rootFolder", out var rootObject))
+            object? rootObject = explicitRootPath;
+            if (rootObject == null
+                && (updates == null || !updates.TryGetValue("rootFolder", out rootObject)))
             {
-                return new RootFolderRewriteOutcome(false, null);
+                return new RootFolderRewriteOutcome(false, null, null);
             }
 
             try
@@ -199,7 +206,7 @@ namespace Listenarr.Api.Features.Library
                 var rootPath = ExtractRootPath(rootObject);
                 if (string.IsNullOrWhiteSpace(rootPath))
                 {
-                    return new RootFolderRewriteOutcome(false, "Invalid rootFolder value");
+                    return new RootFolderRewriteOutcome(false, null, "Invalid rootFolder value");
                 }
 
                 using var scope = _scopeFactory.CreateScope();
@@ -207,7 +214,10 @@ namespace Listenarr.Api.Features.Library
                 var audiobook = await repository.GetByIdAsync(id);
                 if (audiobook == null)
                 {
-                    return new RootFolderRewriteOutcome(false, $"Audiobook with ID {id} not found");
+                    return new RootFolderRewriteOutcome(
+                        false,
+                        null,
+                        $"Audiobook with ID {id} not found");
                 }
 
                 var namingPattern = !string.IsNullOrWhiteSpace(settings?.FolderNamingPattern)
@@ -226,6 +236,7 @@ namespace Listenarr.Api.Features.Library
                 {
                     return new RootFolderRewriteOutcome(
                         false,
+                        null,
                         $"Computed audiobook path is outside the selected root folder: {reason}");
                 }
 
@@ -236,11 +247,11 @@ namespace Listenarr.Api.Features.Library
                 await AddBulkUpdateHistoryAsync(
                     audiobook,
                     $"Destination path rewritten to {newBasePath} via bulk update");
-                return new RootFolderRewriteOutcome(true, null);
+                return new RootFolderRewriteOutcome(true, newBasePath, null);
             }
             catch (ListenarrApplicationException ex)
             {
-                return new RootFolderRewriteOutcome(false, ex.SafeDetail);
+                return new RootFolderRewriteOutcome(false, null, ex.SafeDetail);
             }
             catch (Exception ex) when (ex is not OperationCanceledException
                 && ex is not OutOfMemoryException
@@ -248,14 +259,101 @@ namespace Listenarr.Api.Features.Library
             {
                 return new RootFolderRewriteOutcome(
                     false,
+                    null,
                     $"Failed to apply root folder for audiobook {id}: {ex.Message}");
             }
+        }
+
+        private async Task<PhysicalPathChangePlan> PlanPhysicalPathChangeAsync(
+            int id,
+            string? destinationRootOrPath,
+            ApplicationSettings? settings)
+        {
+            if (string.IsNullOrWhiteSpace(destinationRootOrPath))
+            {
+                return new PhysicalPathChangePlan(
+                    null,
+                    "A destination root is required for a physical path change.");
+            }
+
+            try
+            {
+                using var scope = _scopeFactory.CreateScope();
+                var repository = scope.ServiceProvider.GetRequiredService<IAudiobookRepository>();
+                var audiobook = await repository.GetByIdAsync(id);
+                if (audiobook == null)
+                {
+                    return new PhysicalPathChangePlan(
+                        null,
+                        $"Audiobook with ID {id} not found");
+                }
+
+                var destinationRoot = destinationRootOrPath.Trim();
+                var namingPattern = !string.IsNullOrWhiteSpace(settings?.FolderNamingPattern)
+                    ? settings!.FolderNamingPattern
+                    : settings?.FileNamingPattern ?? string.Empty;
+                var destination = LibraryPathPlanner.ComputeAudiobookBaseDirectoryFromPattern(
+                    audiobook,
+                    destinationRoot,
+                    namingPattern,
+                    _fileNamingService);
+                if (!_fileSystem.TryValidateMutationTarget(
+                        destination,
+                        [destinationRoot],
+                        out destination,
+                        out var reason))
+                {
+                    return new PhysicalPathChangePlan(
+                        null,
+                        $"Computed audiobook path is outside the selected destination root: {reason}");
+                }
+
+                return new PhysicalPathChangePlan(destination, null);
+            }
+            catch (ListenarrApplicationException ex)
+            {
+                return new PhysicalPathChangePlan(null, ex.SafeDetail);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException
+                && ex is not OutOfMemoryException
+                && ex is not StackOverflowException)
+            {
+                return new PhysicalPathChangePlan(
+                    null,
+                    $"Failed to plan physical move for audiobook {id}: {ex.Message}");
+            }
+        }
+
+        private static string GetActionResultError(IActionResult result)
+        {
+            if (result is ObjectResult { Value: not null } objectResult)
+            {
+                try
+                {
+                    var element = JsonSerializer.SerializeToElement(objectResult.Value);
+                    if (element.ValueKind == JsonValueKind.Object
+                        && element.TryGetProperty("message", out var message)
+                        && !string.IsNullOrWhiteSpace(message.GetString()))
+                    {
+                        return message.GetString()!;
+                    }
+                }
+                catch (Exception exception) when (exception is JsonException or NotSupportedException)
+                {
+                    // Fall back to the status-based message below.
+                }
+
+                return $"Physical move enqueue failed with status {objectResult.StatusCode ?? 500}.";
+            }
+
+            return "Physical move enqueue failed.";
         }
 
         private async Task<BulkUpdateOutcome> UpdateOneAsync(
             int id,
             Dictionary<string, object>? updates,
-            bool rootFolderRewritten)
+            bool rootFolderRewritten,
+            bool physicalPathChangeRequested)
         {
             var errors = new List<string>();
             try
@@ -266,7 +364,7 @@ namespace Listenarr.Api.Features.Library
                 if (audiobook == null)
                 {
                     errors.Add($"Audiobook with ID {id} not found");
-                    return new BulkUpdateOutcome(false, errors);
+                    return new BulkUpdateOutcome(false, false, errors);
                 }
 
                 var changed = false;
@@ -315,10 +413,10 @@ namespace Listenarr.Api.Features.Library
                     }
                 }
 
-                if (!changed && !rootFolderRewritten)
+                if (!changed && !rootFolderRewritten && !physicalPathChangeRequested)
                 {
                     errors.Add("No valid updates provided for this audiobook");
-                    return new BulkUpdateOutcome(false, errors);
+                    return new BulkUpdateOutcome(false, false, errors);
                 }
 
                 if (changed)
@@ -326,111 +424,30 @@ namespace Listenarr.Api.Features.Library
                     await repository.UpdateAsync(audiobook);
                 }
 
-                return new BulkUpdateOutcome(true, errors);
+                return new BulkUpdateOutcome(errors.Count == 0, changed, errors);
             }
             catch (Exception ex) when (ex is not OperationCanceledException
                 && ex is not OutOfMemoryException
                 && ex is not StackOverflowException)
             {
                 errors.Add($"Unhandled error: {ex.Message}");
-                return new BulkUpdateOutcome(false, errors);
+                return new BulkUpdateOutcome(false, false, errors);
             }
         }
 
-        private sealed record BulkDeleteOutcome(bool Deleted, int DeletedImages, string? Error);
-        private sealed record RootFolderRewriteOutcome(bool Rewritten, string? Error);
-        private sealed record BulkUpdateOutcome(bool Success, List<string> Errors);
-
-        private async Task<int> DeleteCachedImageAsync(Audiobook audiobook)
+        private sealed record RootFolderRewriteOutcome(
+            bool Rewritten,
+            string? Destination,
+            string? Error);
+        private sealed record PhysicalPathChangePlan(string? Destination, string? Error)
         {
-            try
-            {
-                if (!string.IsNullOrEmpty(audiobook.Asin))
-                {
-                    var imagePath = await _imageCacheService.GetCachedImagePathAsync(audiobook.Asin);
-                    if (imagePath != null)
-                    {
-                        var fullPath = ResolvePathWithOptionalBase(_contentRootPath, imagePath);
-                        if (_fileSystem.FileExists(fullPath))
-                        {
-                            if (!_fileSystem.TryValidateMutationTarget(fullPath, [_contentRootPath], out var safePath, out var reason))
-                            {
-                                _logger.LogWarning(
-                                    "Blocked cached image delete for ASIN {Asin}: {Reason}",
-                                    LogRedaction.SanitizeText(audiobook.Asin),
-                                    LogRedaction.SanitizeText(reason));
-                                return 0;
-                            }
-
-                            _fileSystem.DeleteFile(safePath);
-                            _logger.LogInformation("Deleted cached image for ASIN {Asin}", LogRedaction.SanitizeText(audiobook.Asin));
-                            return 1;
-                        }
-                    }
-                }
-                else if (!string.IsNullOrEmpty(audiobook.ImageUrl))
-                {
-                    return await DeleteCachedImageFromUrlAsync(audiobook);
-                }
-            }
-            catch (Exception ex) when (ex is not OperationCanceledException && ex is not OutOfMemoryException && ex is not StackOverflowException)
-            {
-                _logger.LogWarning(ex, "Failed to delete cached image for audiobook id {Id}", audiobook.Id);
-            }
-
-            return 0;
+            public static PhysicalPathChangePlan NotRequested { get; } = new(null, null);
         }
 
-        private async Task<int> DeleteCachedImageFromUrlAsync(Audiobook audiobook)
-        {
-            try
-            {
-                const string marker = "/config/cache/images/library/";
-                var url = audiobook.ImageUrl!;
-                var idx = url.IndexOf(marker, StringComparison.OrdinalIgnoreCase);
-                if (idx < 0)
-                {
-                    return 0;
-                }
-
-                var filename = url.Substring(idx + marker.Length);
-                filename = Path.GetFileName(filename);
-                var identifier = Path.GetFileNameWithoutExtension(filename);
-
-                if (string.IsNullOrEmpty(identifier) || !Regex.IsMatch(identifier, "^[A-Za-z0-9_\\-\\.]{1,128}$"))
-                {
-                    _logger.LogWarning("Image identifier from ImageUrl for audiobook id {Id} is invalid: {Identifier}", audiobook.Id, LogRedaction.SanitizeText(identifier));
-                    return 0;
-                }
-
-                var imagePath = await _imageCacheService.GetCachedImagePathAsync(identifier);
-                if (!string.IsNullOrEmpty(imagePath))
-                {
-                    var fullPath = ResolvePathWithOptionalBase(_contentRootPath, imagePath);
-                    if (_fileSystem.FileExists(fullPath))
-                    {
-                        if (!_fileSystem.TryValidateMutationTarget(fullPath, [_contentRootPath], out var safePath, out var reason))
-                        {
-                            _logger.LogWarning(
-                                "Blocked cached image delete for identifier {Identifier}: {Reason}",
-                                LogRedaction.SanitizeText(identifier),
-                                LogRedaction.SanitizeText(reason));
-                            return 0;
-                        }
-
-                        _fileSystem.DeleteFile(safePath);
-                        _logger.LogInformation("Deleted cached image for identifier (from ImageUrl): {Identifier}", LogRedaction.SanitizeText(identifier));
-                        return 1;
-                    }
-                }
-            }
-            catch (Exception ex) when (ex is not OperationCanceledException && ex is not OutOfMemoryException && ex is not StackOverflowException)
-            {
-                _logger.LogWarning(ex, "Failed to delete cached image based on stored ImageUrl for audiobook id {Id}", audiobook.Id);
-            }
-
-            return 0;
-        }
+        private sealed record BulkUpdateOutcome(
+            bool Success,
+            bool MetadataUpdated,
+            List<string> Errors);
 
         private async Task<ApplicationSettings?> TryLoadApplicationSettingsAsync()
         {
@@ -470,9 +487,5 @@ namespace Listenarr.Api.Features.Library
             });
         }
 
-        private static string ResolvePathWithOptionalBase(string? basePath, string candidatePath)
-        {
-            return FileUtils.CombineWithOptionalBase(basePath, candidatePath);
-        }
     }
 }

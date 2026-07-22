@@ -250,7 +250,7 @@ public sealed partial class LibraryMoveWorkflow
 
             return new AcceptedResult(
                 string.Empty,
-                new { message = "Move enqueued", jobId });
+                new MoveEnqueuedResponse("Move enqueued", jobId, final));
         }
         catch (PersistenceException ex)
         {

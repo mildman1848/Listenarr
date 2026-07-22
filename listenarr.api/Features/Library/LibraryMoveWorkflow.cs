@@ -22,6 +22,11 @@ using Microsoft.AspNetCore.Mvc;
 
 namespace Listenarr.Api.Features.Library
 {
+    internal sealed record MoveEnqueuedResponse(
+        string Message,
+        Guid JobId,
+        string Target);
+
     public sealed partial class LibraryMoveWorkflow
     {
         private readonly IAudiobookRepository _repo;
