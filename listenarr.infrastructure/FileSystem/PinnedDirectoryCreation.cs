@@ -27,6 +27,7 @@ internal sealed class PinnedDirectoryCreation : IDisposable
     private const uint FileFlagOpenReparsePoint = 0x00200000;
     private const uint FileAttributeDirectory = 0x00000010;
     private const uint FileAttributeHidden = 0x00000002;
+    private const uint FileAttributeReparsePoint = 0x00000400;
     private const uint FileCreate = 2;
     private const uint FileDirectoryFile = 0x00000001;
     private const uint FileNonDirectoryFile = 0x00000040;
@@ -62,6 +63,7 @@ internal sealed class PinnedDirectoryCreation : IDisposable
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(parentPath);
         ValidateLeafName(childName);
+        ExclusiveDirectoryCreator.InvokeBeforeOpenParentHook(parentPath);
 
         return OperatingSystem.IsWindows()
             ? TryCreateWindows(parentPath, childName)
@@ -143,9 +145,10 @@ internal sealed class PinnedDirectoryCreation : IDisposable
         string parentPath,
         string childName)
     {
-        var parentHandle = OpenDirectoryWindows(parentPath, openReparsePoint: false);
+        var parentHandle = OpenDirectoryWindows(parentPath, openReparsePoint: true);
         try
         {
+            EnsureWindowsParentIsNotReparsePoint(parentHandle, parentPath);
             ExclusiveDirectoryCreator.InvokeBeforeCreateHook(Path.Join(parentPath, childName));
             var status = CreateRelativeWindows(
                 parentHandle,
@@ -184,7 +187,7 @@ internal sealed class PinnedDirectoryCreation : IDisposable
         string parentPath,
         string childName)
     {
-        var parentHandle = OpenDirectoryUnix(parentPath, noFollow: false);
+        var parentHandle = OpenDirectoryUnix(parentPath, noFollow: true);
         var temporaryName = $".listenarr-create-{Guid.NewGuid():N}";
         SafeFileHandle? directoryHandle = null;
         var temporaryExists = false;
@@ -318,6 +321,28 @@ internal sealed class PinnedDirectoryCreation : IDisposable
         OperatingSystem.IsWindows()
             ? OpenDirectoryWindows(path, openReparsePoint: true)
             : OpenDirectoryUnix(path, noFollow: true);
+
+    private static void EnsureWindowsParentIsNotReparsePoint(
+        SafeFileHandle handle,
+        string path)
+    {
+        if (!GetFileAttributeTagInformationByHandleEx(
+                handle,
+                FileInformationClass.FileAttributeTagInfo,
+                out var information,
+                (uint)Marshal.SizeOf<FileAttributeTagInformation>()))
+        {
+            throw new Win32Exception(
+                Marshal.GetLastWin32Error(),
+                $"Could not inspect directory '{path}'.");
+        }
+
+        if ((information.FileAttributes & FileAttributeReparsePoint) != 0)
+        {
+            throw new InvalidOperationException(
+                "A pinned directory parent cannot be a symbolic link or reparse point.");
+        }
+    }
 
     private static SafeFileHandle OpenDirectoryWindows(
         string path,
@@ -604,7 +629,15 @@ internal sealed class PinnedDirectoryCreation : IDisposable
 
     private enum FileInformationClass
     {
+        FileAttributeTagInfo = 9,
         FileIdInfo = 18
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct FileAttributeTagInformation
+    {
+        public uint FileAttributes;
+        public uint ReparseTag;
     }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -704,6 +737,14 @@ internal sealed class PinnedDirectoryCreation : IDisposable
         uint creationDisposition,
         uint flagsAndAttributes,
         IntPtr templateFile);
+
+    [DllImport("kernel32.dll", EntryPoint = "GetFileInformationByHandleEx", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetFileAttributeTagInformationByHandleEx(
+        SafeFileHandle fileHandle,
+        FileInformationClass fileInformationClass,
+        out FileAttributeTagInformation fileInformation,
+        uint bufferSize);
 
     [DllImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
