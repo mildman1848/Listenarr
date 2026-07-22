@@ -32,7 +32,9 @@ namespace Listenarr.Application.Audiobooks.Contracts.Repositories
         Task UpdateAsync(AudiobookFile file, CancellationToken ct = default);
         Task DeleteByAudiobookIdAsync(int audiobookId, CancellationToken ct = default);
         Task DeleteAsync(int id, CancellationToken ct = default);
-        Task<List<string>> GetAllFilePathsAsync(CancellationToken ct = default);
+        Task<List<string>> GetAllFilePathsAsync(
+            FileSystemPathSemantics comparisonSemantics,
+            CancellationToken ct = default);
         Task<List<AudiobookFile>> GetAllAsync(CancellationToken ct = default);
         Task<List<AudiobookFormatSummary>> GetFormatSummariesAsync(CancellationToken ct = default);
         Task<Dictionary<int, int>> GetCountsByAudiobookIdAsync(CancellationToken ct = default);

@@ -359,12 +359,13 @@ namespace Listenarr.Api.Features.Library
             if (_unmatchedQueue.TryGetLastJobForPath(folder.Path, out var job) && job != null)
             {
                 // Filter out items already added to the library since the scan ran
-                var trackedFromFiles = await _fileRepository.GetAllFilePathsAsync();
+                var trackedPathSemantics = await ResolveFolderSemanticsAsync(folder);
+                var trackedFromFiles = await _fileRepository.GetAllFilePathsAsync(
+                    trackedPathSemantics);
                 var trackedFromAudiobooks = (await _audiobookRepository.GetAllAsync())
                     .Where(a => a.FilePath != null)
                     .Select(a => a.FilePath!)
                     .ToList();
-                var trackedPathSemantics = await ResolveFolderSemanticsAsync(folder);
                 var tracked = trackedFromFiles
                     .Concat(trackedFromAudiobooks)
                     .Select(path => TryCanonicalizePathForComparison(path, trackedPathSemantics))

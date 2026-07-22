@@ -30,7 +30,8 @@ public sealed class EfAudiobookFileTrackedPathTests : BaseTests
         await db.SaveChangesAsync();
         var repository = new EfAudiobookFileRepository(db);
 
-        var paths = await repository.GetAllFilePathsAsync();
+        var paths = await repository.GetAllFilePathsAsync(
+            FileSystemPathSemantics.CurrentHostDefault);
 
         Assert.Contains(Path.Join(basePath, "disc-1", "chapter.m4b"), paths);
         Assert.Contains(Path.Join(basePath, "legacy", "single.m4b"), paths);

@@ -225,7 +225,9 @@ namespace Listenarr.Infrastructure.Persistence.Repositories
             }
         }
 
-        public async Task<List<string>> GetAllFilePathsAsync(CancellationToken ct = default)
+        public async Task<List<string>> GetAllFilePathsAsync(
+            FileSystemPathSemantics comparisonSemantics,
+            CancellationToken ct = default)
         {
             var files = await _db.AudiobookFiles
                 .AsNoTracking()
@@ -236,7 +238,7 @@ namespace Listenarr.Infrastructure.Persistence.Repositories
             return TrackedFilePathIndexBuilder.ResolvePaths(
                     files,
                     audiobooks,
-                    FileSystemPathSemantics.CurrentHostDefault)
+                    comparisonSemantics)
                 .ToList();
         }
 

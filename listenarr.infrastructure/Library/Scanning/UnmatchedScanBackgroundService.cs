@@ -175,7 +175,7 @@ namespace Listenarr.Infrastructure.Library.Scanning
             // Load all tracked file paths (normalized) from DB.
             // Check BOTH AudiobookFiles (multi-file imports) AND Audiobook.FilePath (single-file imports)
             // so that files already in the library are not reported as unmatched.
-            var trackedFromFiles = await fileRepository.GetAllFilePathsAsync(ct);
+            var trackedFromFiles = await fileRepository.GetAllFilePathsAsync(semantics, ct);
 
             var allAudiobooks = await audiobookRepository.GetAllAsync();
             var trackedFromAudiobooks = allAudiobooks
