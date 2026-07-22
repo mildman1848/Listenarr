@@ -37,6 +37,46 @@ public sealed class FileMoverHardlinkAliasRegressionTests : BaseTests
         Assert.Equal("audio", await File.ReadAllTextAsync(destination));
     }
 
+    [Theory]
+    [InlineData(FileAction.Copy)]
+    [InlineData(FileAction.HardlinkCopy)]
+    public async Task FileOperation_HardlinkAliasIntroducedBeforeSameContentShortcut_IsBlocked(
+        FileAction action)
+    {
+        var root = FileService.GetTempDirectory("file-hardlink-shortcut-race");
+        var source = await FileService.GetFileAsync(root, "source.m4b", "audio");
+        var destination = Path.Join(root, "destination.m4b");
+        var hookRan = false;
+        var supported = true;
+        var mover = new FileMover(
+            new NullLogger<FileMover>(),
+            options: Options.Create(new FileMoverOptions { MaxRetries = 1 }),
+            semanticsResolver: new FileSystemSemanticsResolver())
+        {
+            BeforeFileSameContentShortcutForTestAsync = (_, observedSource, observedDestination) =>
+            {
+                Assert.Equal(source, observedSource);
+                Assert.Equal(destination, observedDestination);
+                supported = TryCreateHardLink(destination, source);
+                hookRan = true;
+                return Task.CompletedTask;
+            }
+        };
+
+        var result = await PerformAsync(mover, action, source, destination);
+
+        Assert.True(hookRan);
+        if (!supported)
+        {
+            return;
+        }
+        Assert.False(result);
+        Assert.True(File.Exists(source));
+        Assert.True(File.Exists(destination));
+        Assert.Equal("audio", await File.ReadAllTextAsync(source));
+        Assert.Equal("audio", await File.ReadAllTextAsync(destination));
+    }
+
     private static Task<bool> PerformAsync(
         FileMover mover,
         FileAction action,
