@@ -8,13 +8,30 @@ on:
     types: [ opened, synchronize, reopened ]
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: run-tests-${{ github.head_ref || github.ref }}
   cancel-in-progress: true
 
 jobs:
+  normalize-directory-robocopy-destination:
+    if: github.repository == 'Listenarrs/Listenarr' && github.head_ref == 'bugfix/unix-folder-name-space'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: bugfix/unix-folder-name-space
+      - name: Apply exact reviewed robocopy normalization
+        run: python .github/scripts/normalize-directory-robocopy-destination.py
+      - name: Commit exact robocopy normalization
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add listenarr.infrastructure/FileSystem/FileMover.cs
+          git commit -m "fix(filesystem): use normalized directory robocopy target"
+          git push origin HEAD:bugfix/unix-folder-name-space
+
   unit-tests:
     runs-on: ubuntu-latest
     env:
