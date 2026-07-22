@@ -167,6 +167,8 @@ import Checkbox from '@/components/form/Checkbox.vue'
 import { Modal, ModalBody, ModalHeader } from '@/components/feedback'
 import MoveAudiobookModal from '@/components/feedback/MoveAudiobookModal.vue'
 import { apiService } from '@/services/api'
+import { useMoveJobsStore } from '@/stores/moveJobs'
+import { executeBulkEdit } from '@/utils/bulkEditOrchestration'
 import { buildApiPath } from '@/services/apiBase'
 import { useToast } from '@/services/toastService'
 import type { QualityProfile } from '@/types'
@@ -197,6 +199,7 @@ const emit = defineEmits<{
 const qualityProfiles = ref<QualityProfile[]>([])
 const rootFolders = ref<string[]>([])
 const rootStore = useRootFoldersStore()
+const moveJobsStore = useMoveJobsStore()
 const saving = ref(false)
 
 // Root change helper values
@@ -344,178 +347,83 @@ async function handleSave() {
 
   saving.value = true
   try {
-    // Build update payload with only changed fields
     const updates: Record<string, boolean | number | string> = {}
-
     if (formData.value.monitored !== null) {
       updates.monitored = formData.value.monitored
     }
-
     if (formData.value.qualityProfileId !== null) {
       updates.qualityProfileId = formData.value.qualityProfileId
     }
 
-    // Handle root folder change with move confirmation
     let userWantsMove = false
     let userWantsDeleteEmpty = false
     let newRootPath: string | null = null
-
-    // Store original basePaths before updating if we're changing root folders
-    const originalBasePaths = new Map<number, string>()
-
     if (formData.value.rootChangeEnabled === true) {
-      // Resolve chosen root path: named root, custom path or default
-      if (formData.value.rootId === 0) {
-        newRootPath = formData.value.rootCustomPath || null
-      } else if (formData.value.rootId && formData.value.rootId > 0) {
-        const found = rootStore.folders.find((f) => f.id === formData.value.rootId)
-        newRootPath = found?.path ?? null
-      } else if (formData.value.rootId === null) {
-        // Use default path (if available)
-        newRootPath = defaultOutputPath.value
+      newRootPath = resolvedRootPath.value
+      if (!newRootPath) {
+        throw new Error('Select a valid destination root before saving.')
       }
 
-      if (newRootPath !== null) {
-        // Fetch all audiobooks BEFORE updating to capture their original basePaths
-        const ids = Array.from(props.selectedIds)
-        for (const id of ids) {
-          try {
-            const audiobook = await apiService.getAudiobook(id)
-            if (audiobook?.basePath) {
-              originalBasePaths.set(id, audiobook.basePath)
-            }
-          } catch (err) {
-            console.error(`Failed to fetch audiobook ${id} before update:`, err)
-          }
-        }
-
-        // Ask user if they want to move files
-        const choice = await askMoveConfirmation(newRootPath)
-        if (!choice || !choice.proceed) {
-          saving.value = false
-          return // User cancelled
-        }
-        userWantsMove = Boolean(choice.moveFiles)
-        userWantsDeleteEmpty = Boolean(choice.deleteEmptySource)
-        updates.rootFolder = newRootPath
-      }
+      const choice = await askMoveConfirmation(newRootPath)
+      if (!choice?.proceed) return
+      userWantsMove = Boolean(choice.moveFiles)
+      userWantsDeleteEmpty = Boolean(choice.deleteEmptySource)
+      updates.rootFolder = newRootPath
     }
 
-    // Add move options if root folder is being changed
-    if (formData.value.rootChangeEnabled && newRootPath) {
-      ;(updates as { moveFiles?: boolean; deleteEmptySource?: boolean }).moveFiles = userWantsMove
-      ;(updates as { moveFiles?: boolean; deleteEmptySource?: boolean }).deleteEmptySource =
-        userWantsDeleteEmpty
-    }
-
-    // Convert Set to Array for API call
     const ids = Array.from(props.selectedIds)
+    logger.debug('[BulkEditModal] Preparing bulk update', {
+      endpoint: bulkUpdateEndpoint,
+      ids,
+      updates,
+      physicalMove: userWantsMove,
+      timestamp: new Date().toISOString(),
+    })
 
-    // Debug logging: payload and environment
-    // This will help diagnose NS_ERROR_CONNECTION_REFUSED in browser
-    try {
-      logger.debug('[BulkEditModal] Preparing bulk update', {
-        endpoint: bulkUpdateEndpoint,
-        origin: window?.location?.origin,
+    const outcome = await executeBulkEdit(
+      {
         ids,
         updates,
-        navigatorOnline: typeof navigator !== 'undefined' ? navigator.onLine : undefined,
-        timestamp: new Date().toISOString(),
-      })
-    } catch {
-      // ignore logging errors in non-browser envs
-    }
+        destinationRoot: newRootPath,
+        moveFiles: userWantsMove,
+        deleteEmptySource: userWantsDeleteEmpty,
+      },
+      {
+        getAudiobook: (id) => apiService.getAudiobook(id),
+        previewLibraryPath: (metadata, destinationRoot) =>
+          apiService.previewLibraryPath(metadata, destinationRoot),
+        bulkUpdateAudiobooks: (audiobookIds, metadataUpdates) =>
+          apiService.bulkUpdateAudiobooks(audiobookIds, metadataUpdates),
+        moveAudiobook: (id, destinationPath, options) =>
+          apiService.moveAudiobook(id, destinationPath, options),
+        trackQueuedJob: (job) => moveJobsStore.trackQueuedJob(job),
+      },
+    )
 
-    // Call bulk update API
-    const resp = await apiService.bulkUpdateAudiobooks(ids, updates)
-
-    // Save per-id results for display
-    results.value = resp.results || []
+    results.value = outcome.results
     showResults.value = true
-
-    // If user wants to move files, enqueue move jobs for each audiobook
-    if (userWantsMove && newRootPath) {
-      console.log('[BulkEditModal] Starting move job enqueue process', {
-        userWantsMove,
-        newRootPath,
-        totalIds: ids.length,
-        originalBasePathsSize: originalBasePaths.size,
-      })
-
-      let moveCount = 0
-      for (const id of ids) {
-        // Only enqueue move for audiobooks that were successfully updated
-        const result = results.value.find((r) => r.id === id)
-        console.log(`[BulkEditModal] Processing audiobook ${id}`, {
-          hasResult: !!result,
-          success: result?.success,
-        })
-
-        if (result && result.success) {
-          try {
-            // Get the ORIGINAL basePath (before update) and the NEW basePath (after update)
-            const originalBasePath = originalBasePaths.get(id)
-            const audiobook = await apiService.getAudiobook(id)
-            const newBasePath = audiobook?.basePath
-
-            console.log(`[BulkEditModal] Audiobook ${id} paths:`, {
-              originalBasePath,
-              newBasePath,
-              pathsAreDifferent: originalBasePath !== newBasePath,
-            })
-
-            if (originalBasePath && newBasePath && originalBasePath !== newBasePath) {
-              console.log(`[BulkEditModal] Enqueueing move for audiobook ${id}`, {
-                destination: newBasePath,
-                source: originalBasePath,
-                deleteEmpty: userWantsDeleteEmpty,
-              })
-
-              const moveResult = await apiService.moveAudiobook(id, newBasePath, {
-                sourcePath: originalBasePath,
-                moveFiles: true,
-                deleteEmptySource: userWantsDeleteEmpty,
-              })
-
-              console.log(`[BulkEditModal] Move enqueued for audiobook ${id}:`, moveResult)
-              moveCount++
-            } else {
-              console.warn(
-                `[BulkEditModal] Skipping move for audiobook ${id} - invalid paths or paths are the same`,
-              )
-            }
-          } catch (moveErr) {
-            console.error(`Failed to enqueue move for audiobook ${id}:`, moveErr)
-            // Don't fail the entire operation, just log the error
-          }
-        }
-      }
-
-      console.log(`[BulkEditModal] Finished move enqueue process. Queued ${moveCount} moves.`)
-
-      if (moveCount > 0) {
-        toast.info(
-          'Move jobs queued',
-          `Queued ${moveCount} move job(s). Files will be moved in the background.`,
-        )
-      } else {
-        console.warn('[BulkEditModal] No move jobs were queued!')
-      }
-    } else {
-      console.log('[BulkEditModal] Skipping move job enqueue', { userWantsMove, newRootPath })
+    const successCount = results.value.filter((result) => result.success).length
+    const failureCount = results.value.length - successCount
+    if (failureCount > 0) {
+      toast.error(
+        'Bulk update incomplete',
+        `${successCount} succeeded and ${failureCount} failed. Review the per-audiobook results.`,
+      )
+      return
     }
 
-    // Count successes
-    const successCount = results.value.filter((r) => r.success).length
-    toast.success('Bulk update', `Updated ${successCount} of ${results.value.length} audiobook(s)`)
+    if (userWantsMove) {
+      toast.info(
+        'Move jobs queued',
+        `Queued ${successCount} move job(s). Files will be moved in the background.`,
+      )
+    } else {
+      toast.success('Bulk update', `Updated ${successCount} audiobook(s)`)
+    }
 
-    // Notify parent that changes were saved
     emit('saved')
-
-    // Close the modal after successful operation
     close()
   } catch (error) {
-    // Enhanced error logging so browser console shows more details
     try {
       const err = error as Error & { url?: string }
       console.error('[BulkEditModal] Failed to save bulk edits:', {
@@ -525,18 +433,16 @@ async function handleSave() {
         url: err?.url || bulkUpdateEndpoint,
       })
     } catch {
-      // fallback
       console.error('Failed to save bulk edits (minimal):', error)
     }
 
-    // Try to extract a readable message from the API error
     let message = 'Failed to save changes. Please try again.'
     try {
       const err = error as Error & { body?: string }
       if (err.body) {
         try {
           const parsed = JSON.parse(err.body)
-          if (parsed && parsed.message) message = parsed.message
+          if (parsed?.message) message = parsed.message
         } catch {
           message = err.body
         }
@@ -544,7 +450,7 @@ async function handleSave() {
         message = err.message
       }
     } catch {
-      // fallback
+      // Keep the generic message when an error cannot be inspected.
     }
     toast.error('Bulk update failed', message)
   } finally {
