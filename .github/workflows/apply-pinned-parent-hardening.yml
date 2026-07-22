@@ -18,123 +18,21 @@ jobs:
         with:
           ref: bugfix/unix-folder-name-space
           fetch-depth: 0
-      - name: Apply reviewed native patch
+      - name: Make pinned directory implementation partial
         shell: python
         run: |
           from pathlib import Path
 
           path = Path('listenarr.infrastructure/FileSystem/PinnedDirectoryCreation.cs')
           text = path.read_text(encoding='utf-8')
-          if 'EnsureWindowsParentIsNotReparsePoint' in text:
+          old = 'internal sealed class PinnedDirectoryCreation : IDisposable\n'
+          new = 'internal sealed partial class PinnedDirectoryCreation : IDisposable\n'
+          if new in text:
               raise SystemExit(0)
-
-          def replace_once(old: str, new: str, description: str) -> None:
-              global text
-              if old not in text:
-                  raise RuntimeError(f'{description} anchor not found')
-              text = text.replace(old, new, 1)
-
-          replace_once(
-              '    private const uint FileAttributeHidden = 0x00000002;\n',
-              '    private const uint FileAttributeHidden = 0x00000002;\n'
-              '    private const uint FileAttributeReparsePoint = 0x00000400;\n',
-              'reparse attribute constant',
-          )
-          replace_once(
-              '        ValidateLeafName(childName);\n\n'
-              '        return OperatingSystem.IsWindows()\n',
-              '        ValidateLeafName(childName);\n'
-              '        ExclusiveDirectoryCreator.InvokeBeforeOpenParentHook(parentPath);\n\n'
-              '        return OperatingSystem.IsWindows()\n',
-              'pre-open hook',
-          )
-          replace_once(
-              '        var parentHandle = OpenDirectoryWindows(parentPath, openReparsePoint: false);\n'
-              '        try\n'
-              '        {\n',
-              '        var parentHandle = OpenDirectoryWindows(parentPath, openReparsePoint: true);\n'
-              '        try\n'
-              '        {\n'
-              '            EnsureWindowsParentIsNotReparsePoint(parentHandle, parentPath);\n',
-              'Windows parent open',
-          )
-          replace_once(
-              '        var parentHandle = OpenDirectoryUnix(parentPath, noFollow: false);\n',
-              '        var parentHandle = OpenDirectoryUnix(parentPath, noFollow: true);\n',
-              'Unix parent open',
-          )
-          open_method = (
-              '    private static SafeFileHandle OpenDirectoryWindows(\n'
-              '        string path,\n'
-              '        bool openReparsePoint)\n'
-              '    {\n'
-          )
-          guard_method = (
-              '    private static void EnsureWindowsParentIsNotReparsePoint(\n'
-              '        SafeFileHandle handle,\n'
-              '        string path)\n'
-              '    {\n'
-              '        if (!GetFileAttributeTagInformationByHandleEx(\n'
-              '                handle,\n'
-              '                FileInformationClass.FileAttributeTagInfo,\n'
-              '                out var information,\n'
-              '                (uint)Marshal.SizeOf<FileAttributeTagInformation>()))\n'
-              '        {\n'
-              '            throw new Win32Exception(\n'
-              '                Marshal.GetLastWin32Error(),\n'
-              '                $"Could not inspect directory \'{path}\'.");\n'
-              '        }\n\n'
-              '        if ((information.FileAttributes & FileAttributeReparsePoint) != 0)\n'
-              '        {\n'
-              '            throw new InvalidOperationException(\n'
-              '                "A pinned directory parent cannot be a symbolic link or reparse point.");\n'
-              '        }\n'
-              '    }\n\n'
-          )
-          replace_once(open_method, guard_method + open_method, 'Windows parent guard method')
-          replace_once(
-              '    private enum FileInformationClass\n'
-              '    {\n'
-              '        FileIdInfo = 18\n'
-              '    }\n',
-              '    private enum FileInformationClass\n'
-              '    {\n'
-              '        FileAttributeTagInfo = 9,\n'
-              '        FileIdInfo = 18\n'
-              '    }\n',
-              'file information enum',
-          )
-          replace_once(
-              '    [StructLayout(LayoutKind.Sequential)]\n'
-              '    private struct FileId128\n',
-              '    [StructLayout(LayoutKind.Sequential)]\n'
-              '    private struct FileAttributeTagInformation\n'
-              '    {\n'
-              '        public uint FileAttributes;\n'
-              '        public uint ReparseTag;\n'
-              '    }\n\n'
-              '    [StructLayout(LayoutKind.Sequential)]\n'
-              '    private struct FileId128\n',
-              'file attribute tag structure',
-          )
-          replace_once(
-              '    [DllImport("kernel32.dll", SetLastError = true)]\n'
-              '    [return: MarshalAs(UnmanagedType.Bool)]\n'
-              '    private static extern bool GetFileInformationByHandleEx(\n',
-              '    [DllImport("kernel32.dll", EntryPoint = "GetFileInformationByHandleEx", SetLastError = true)]\n'
-              '    [return: MarshalAs(UnmanagedType.Bool)]\n'
-              '    private static extern bool GetFileAttributeTagInformationByHandleEx(\n'
-              '        SafeFileHandle fileHandle,\n'
-              '        FileInformationClass fileInformationClass,\n'
-              '        out FileAttributeTagInformation fileInformation,\n'
-              '        uint bufferSize);\n\n'
-              '    [DllImport("kernel32.dll", SetLastError = true)]\n'
-              '    [return: MarshalAs(UnmanagedType.Bool)]\n'
-              '    private static extern bool GetFileInformationByHandleEx(\n',
-              'attribute tag P/Invoke',
-          )
-          path.write_text(text, encoding='utf-8')
-      - name: Commit native hardening
+          if old not in text:
+              raise RuntimeError('PinnedDirectoryCreation declaration anchor not found')
+          path.write_text(text.replace(old, new, 1), encoding='utf-8')
+      - name: Commit partial declaration
         shell: bash
         run: |
           if git diff --quiet -- listenarr.infrastructure/FileSystem/PinnedDirectoryCreation.cs; then
@@ -143,5 +41,5 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add listenarr.infrastructure/FileSystem/PinnedDirectoryCreation.cs
-          git commit -m "fix(filesystem): reject linked parents before relative creation"
+          git commit -m "refactor(filesystem): split pinned hierarchy implementation"
           git push origin HEAD:bugfix/unix-folder-name-space
