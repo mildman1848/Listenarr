@@ -8,30 +8,13 @@ on:
     types: [ opened, synchronize, reopened ]
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: run-tests-${{ github.head_ref || github.ref }}
   cancel-in-progress: true
 
 jobs:
-  apply-empty-destination-handoff:
-    if: github.repository == 'Listenarrs/Listenarr' && github.head_ref == 'bugfix/unix-folder-name-space'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: bugfix/unix-folder-name-space
-      - name: Apply exact reviewed handoff patch
-        run: python .github/scripts/wire-empty-destination-placeholder.py
-      - name: Commit exact handoff patch
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add listenarr.infrastructure/FileSystem/FileMover.cs
-          git commit -m "fix(filesystem): safely hand off empty move destinations"
-          git push origin HEAD:bugfix/unix-folder-name-space
-
   unit-tests:
     runs-on: ubuntu-latest
     env:
