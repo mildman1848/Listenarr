@@ -1,3 +1,4 @@
+using System.Security.Cryptography;
 using Listenarr.Tests.Common;
 
 namespace Listenarr.Tests.Features.Infrastructure.Library.Moving;
@@ -82,6 +83,57 @@ public sealed class PinnedDirectoryCreationTests : BaseTests
         Assert.True(rootAnchor.VisiblePathMatches(Path.Join(parent, "published")));
         Assert.True(published.VisiblePathMatches());
         Assert.True(Directory.Exists(Path.Join(parent, "published", "child")));
+    }
+
+    [Fact]
+    public async Task MoveExistingFileTo_PublishesOpenedFileBetweenPinnedParents()
+    {
+        var sourceParent = FileService.GetTempDirectory("pinned-file-move-source");
+        var destinationParent = FileService.GetTempDirectory("pinned-file-move-destination");
+        var sourceFile = await FileService.GetFileAsync(sourceParent, "book.m4b", "verified audio");
+        var expectedHash = Convert.ToHexString(SHA256.HashData(await File.ReadAllBytesAsync(sourceFile)));
+        using var sourceAnchor = PinnedDirectoryCreation.OpenPinnedDirectoryNoFollow(sourceParent);
+        using var destinationAnchor = PinnedDirectoryCreation.OpenPinnedDirectoryNoFollow(destinationParent);
+        using (var sourceEntry = sourceAnchor.OpenExistingFile(
+            "book.m4b",
+            requireDeleteAccess: true))
+        {
+            Assert.True(await sourceEntry.MatchesAsync(
+                new FileInfo(sourceFile).Length,
+                expectedHash,
+                CancellationToken.None));
+            sourceEntry.MoveTo(destinationAnchor, "book.m4b");
+            Assert.True(await sourceEntry.MatchesAsync(
+                "verified audio"u8.Length,
+                expectedHash,
+                CancellationToken.None));
+        }
+
+        Assert.False(File.Exists(sourceFile));
+        Assert.Equal(
+            "verified audio",
+            await File.ReadAllTextAsync(Path.Join(destinationParent, "book.m4b")));
+    }
+
+    [Fact]
+    public async Task MoveExistingFileTo_ExistingDestinationPreservesBothFiles()
+    {
+        var sourceParent = FileService.GetTempDirectory("pinned-file-move-collision-source");
+        var destinationParent = FileService.GetTempDirectory("pinned-file-move-collision-destination");
+        var sourceFile = await FileService.GetFileAsync(sourceParent, "book.m4b", "source");
+        var destinationFile = await FileService.GetFileAsync(destinationParent, "book.m4b", "destination");
+        using var sourceAnchor = PinnedDirectoryCreation.OpenPinnedDirectoryNoFollow(sourceParent);
+        using var destinationAnchor = PinnedDirectoryCreation.OpenPinnedDirectoryNoFollow(destinationParent);
+        using (var sourceEntry = sourceAnchor.OpenExistingFile(
+            "book.m4b",
+            requireDeleteAccess: true))
+        {
+            Assert.ThrowsAny<Exception>(() =>
+                sourceEntry.MoveTo(destinationAnchor, "book.m4b"));
+        }
+
+        Assert.Equal("source", await File.ReadAllTextAsync(sourceFile));
+        Assert.Equal("destination", await File.ReadAllTextAsync(destinationFile));
     }
 
     [Fact]

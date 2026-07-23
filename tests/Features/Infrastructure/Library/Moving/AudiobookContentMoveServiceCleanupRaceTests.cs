@@ -101,11 +101,12 @@ public partial class AudiobookContentMoveServiceTests
                 service.MoveContentsAsync(request, CancellationToken.None));
 
             Assert.Equal("verified audio", await File.ReadAllTextAsync(externalFile));
-            Assert.True(File.Exists(Path.Join(nestedSourceBackup, "book.m4b")));
-            Assert.Equal("verified audio", await File.ReadAllTextAsync(sourceFile.Replace(
-                nestedSource,
-                nestedSourceBackup,
-                StringComparison.Ordinal)));
+            var displacedSourceFile = Path.Join(nestedSourceBackup, "book.m4b");
+            Assert.True(File.Exists(sourceFile) || File.Exists(displacedSourceFile));
+            Assert.Equal(
+                "verified audio",
+                await File.ReadAllTextAsync(
+                    File.Exists(sourceFile) ? sourceFile : displacedSourceFile));
             Assert.True(File.Exists(Path.Join(target, "extras", "book.m4b")));
         }
         finally

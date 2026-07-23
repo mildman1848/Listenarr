@@ -63,6 +63,12 @@ internal sealed partial class PinnedDirectoryCreation
 
         internal string FullPath { get; }
 
+        internal SafeFileHandle DuplicateHandleForOperation()
+        {
+            ThrowIfDisposed();
+            return DuplicateSafeHandle(_handle);
+        }
+
         internal bool VisiblePathMatches() =>
             VisiblePathMatches(FullPath, _followVisibleFinalLink);
 

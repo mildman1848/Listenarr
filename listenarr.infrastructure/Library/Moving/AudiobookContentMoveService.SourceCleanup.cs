@@ -203,18 +203,6 @@ internal sealed partial class AudiobookContentMoveService
                 out var quarantineFile);
             ValidateQuarantineMutationPath(quarantineOwnership, quarantineFile);
 
-            var quarantineDirectory = Path.GetDirectoryName(quarantineFile);
-            if (!string.IsNullOrEmpty(quarantineDirectory))
-            {
-                await EnsureMutationAuthorizedAsync(
-                    cleanupRequest,
-                    source,
-                    target,
-                    cancellationToken);
-                ValidateQuarantineMutationPath(quarantineOwnership, quarantineFile);
-                Directory.CreateDirectory(quarantineDirectory);
-            }
-
             ValidateQuarantineMutationPath(quarantineOwnership, quarantineFile);
             if (!File.Exists(quarantineFile))
             {
@@ -259,10 +247,16 @@ internal sealed partial class AudiobookContentMoveService
                     sourceSemantics,
                     targetSemantics,
                     cancellationToken);
-                faultInjector?.OnSourceCleanupMutation(
-                    jobId,
-                    SourceCleanupFaultPoint.BeforeSourceFilePublication);
-                File.Move(sourceFile, quarantineFile, overwrite: false);
+                await MoveSourceFileToPinnedQuarantineAsync(
+                    cleanupRequest,
+                    source,
+                    target,
+                    sourceFile,
+                    quarantineFile,
+                    quarantineRoot,
+                    entry,
+                    sourceSemantics,
+                    cancellationToken);
             }
 
             ValidateQuarantineMutationPath(quarantineOwnership, quarantineFile);

@@ -50,6 +50,7 @@ internal sealed partial class PinnedDirectoryCreation
                     _handle,
                     fileHandle,
                     temporaryFileName,
+                    _handle,
                     finalFileName);
                 published = true;
                 EnsureVisiblePathMatches();
@@ -67,29 +68,35 @@ internal sealed partial class PinnedDirectoryCreation
     }
 
     private static void RenameRelativeEntry(
-        SafeFileHandle directoryHandle,
+        SafeFileHandle sourceDirectoryHandle,
         SafeFileHandle entryHandle,
-        string temporaryName,
+        string sourceName,
+        SafeFileHandle destinationDirectoryHandle,
         string finalName)
     {
         if (OperatingSystem.IsWindows())
         {
-            RenameRelativeEntryWindows(directoryHandle, entryHandle, finalName);
+            RenameRelativeEntryWindows(destinationDirectoryHandle, entryHandle, finalName);
             return;
         }
 
-        var directoryFileDescriptor = directoryHandle.DangerousGetHandle().ToInt32();
+        var sourceDirectoryFileDescriptor = sourceDirectoryHandle
+            .DangerousGetHandle()
+            .ToInt32();
+        var destinationDirectoryFileDescriptor = destinationDirectoryHandle
+            .DangerousGetHandle()
+            .ToInt32();
         var result = OperatingSystem.IsMacOS()
             ? RenameAtExclusiveMac(
-                directoryFileDescriptor,
-                temporaryName,
-                directoryFileDescriptor,
+                sourceDirectoryFileDescriptor,
+                sourceName,
+                destinationDirectoryFileDescriptor,
                 finalName,
                 RenameExclusiveMac)
             : RenameAtNoReplaceLinux(
-                directoryFileDescriptor,
-                temporaryName,
-                directoryFileDescriptor,
+                sourceDirectoryFileDescriptor,
+                sourceName,
+                destinationDirectoryFileDescriptor,
                 finalName,
                 RenameNoReplace);
         if (result != 0)
