@@ -58,6 +58,67 @@ public partial class AudiobookContentMoveServiceTests
     }
 
     [Fact]
+    public async Task MoveContentsAsync_NestedSourceParentReplacedAfterRevalidation_DoesNotConsumeExternalFile()
+    {
+        var capabilityParent = FileService.GetTempDirectory("content-move-nested-cleanup-race-capability");
+        var capabilityTarget = FileService.GetTempDirectory("content-move-nested-cleanup-race-capability-target");
+        var capabilityLink = Path.Join(capabilityParent, "link");
+        if (!TryCreateDirectoryLink(capabilityLink, capabilityTarget))
+        {
+            return;
+        }
+
+        TryRemoveDirectoryLink(capabilityLink);
+        var source = FileService.GetTempDirectory("content-move-nested-cleanup-race-src");
+        var nestedSource = Path.Join(source, "extras");
+        Directory.CreateDirectory(nestedSource);
+        var sourceFile = await FileService.GetFileAsync(
+            nestedSource,
+            "book.m4b",
+            "verified audio");
+        var nestedSourceBackup = nestedSource + $"-backup-{Guid.NewGuid():N}";
+        var target = Path.Join(
+            FileService.GetTempPath(),
+            $"content-move-nested-cleanup-race-dst-{Guid.NewGuid():N}");
+        var external = FileService.GetTempDirectory("content-move-nested-cleanup-race-external");
+        var externalFile = await FileService.GetFileAsync(
+            external,
+            "book.m4b",
+            "verified audio");
+        var request = await CreateLeasedMoveRequestAsync(source, target);
+        var service = new AudiobookContentMoveService(
+            _provider.GetRequiredService<ILogger<AudiobookContentMoveService>>(),
+            _provider.GetRequiredService<IDbContextFactory<ListenArrDbContext>>(),
+            TimeProvider.System,
+            new ReplaceNestedSourceParentAfterRevalidation(
+                nestedSource,
+                nestedSourceBackup,
+                external));
+
+        try
+        {
+            await Assert.ThrowsAnyAsync<Exception>(() =>
+                service.MoveContentsAsync(request, CancellationToken.None));
+
+            Assert.Equal("verified audio", await File.ReadAllTextAsync(externalFile));
+            Assert.True(File.Exists(Path.Join(nestedSourceBackup, "book.m4b")));
+            Assert.Equal("verified audio", await File.ReadAllTextAsync(sourceFile.Replace(
+                nestedSource,
+                nestedSourceBackup,
+                StringComparison.Ordinal)));
+            Assert.True(File.Exists(Path.Join(target, "extras", "book.m4b")));
+        }
+        finally
+        {
+            TryRemoveDirectoryLink(nestedSource);
+            if (Directory.Exists(nestedSourceBackup) && !Directory.Exists(nestedSource))
+            {
+                Directory.Move(nestedSourceBackup, nestedSource);
+            }
+        }
+    }
+
+    [Fact]
     public async Task MoveContentsAsync_UnownedTargetEntryAppearsBeforeSourceMove_PreservesSource()
     {
         var source = FileService.GetTempDirectory("content-move-unowned-target-cleanup-src");
@@ -145,6 +206,37 @@ public partial class AudiobookContentMoveServiceTests
             if (File.Exists(linkedTargetFile))
             {
                 File.Delete(linkedTargetFile);
+            }
+        }
+    }
+
+    private sealed class ReplaceNestedSourceParentAfterRevalidation(
+        string nestedSource,
+        string nestedSourceBackup,
+        string external) : IMoveFaultInjector
+    {
+        private bool _replaced;
+
+        public void OnSourceCleanupMutation(
+            Guid jobId,
+            SourceCleanupFaultPoint faultPoint)
+        {
+            if (!_replaced
+                && faultPoint == SourceCleanupFaultPoint.BeforeSourceFilePublication)
+            {
+                Directory.Move(nestedSource, nestedSourceBackup);
+                if (!TryCreateDirectoryLink(nestedSource, external))
+                {
+                    throw new IOException("The nested source replacement link could not be created.");
+                }
+
+                _replaced = true;
+                return;
+            }
+
+            if (_replaced && faultPoint == SourceCleanupFaultPoint.BeforeQuarantineFileDelete)
+            {
+                throw new IOException("Stop after quarantine publication for inspection.");
             }
         }
     }

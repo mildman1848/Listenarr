@@ -30,6 +30,7 @@ internal enum OwnershipMarkerWriteFaultPoint
 internal enum SourceCleanupFaultPoint
 {
     BeforeSourceFileMove,
+    BeforeSourceFilePublication,
     BeforeQuarantineFileDelete,
     AfterEmptySourceDirectoryQuarantine
 }

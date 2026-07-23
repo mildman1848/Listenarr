@@ -259,6 +259,9 @@ internal sealed partial class AudiobookContentMoveService
                     sourceSemantics,
                     targetSemantics,
                     cancellationToken);
+                faultInjector?.OnSourceCleanupMutation(
+                    jobId,
+                    SourceCleanupFaultPoint.BeforeSourceFilePublication);
                 File.Move(sourceFile, quarantineFile, overwrite: false);
             }
 
