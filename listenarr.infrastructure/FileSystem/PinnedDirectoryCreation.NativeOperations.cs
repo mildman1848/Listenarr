@@ -178,6 +178,8 @@ internal sealed partial class PinnedDirectoryCreation
         SafeFileHandle rootHandle,
         string name,
         bool directory,
+        bool hiddenFile,
+        bool requireDirectoryDeleteAccess,
         out IntPtr rawHandle)
     {
         var nameBuffer = Marshal.StringToHGlobalUni(name);
@@ -200,6 +202,7 @@ internal sealed partial class PinnedDirectoryCreation
             };
             var desiredAccess = directory
                 ? FileListDirectory | FileReadAttributes | Synchronize
+                    | (requireDirectoryDeleteAccess ? DeleteAccess : 0u)
                 : GenericRead | GenericWrite | DeleteAccess | Synchronize;
             var createOptions = (directory ? FileDirectoryFile : FileNonDirectoryFile)
                 | FileSynchronousIoNonAlert
@@ -210,7 +213,9 @@ internal sealed partial class PinnedDirectoryCreation
                 ref attributes,
                 out _,
                 IntPtr.Zero,
-                directory ? FileAttributeDirectory : FileAttributeHidden,
+                directory
+                    ? FileAttributeDirectory
+                    : hiddenFile ? FileAttributeHidden : 0u,
                 FileShareAll,
                 FileCreate,
                 createOptions,

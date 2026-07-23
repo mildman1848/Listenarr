@@ -46,7 +46,7 @@ internal sealed partial class PinnedDirectoryCreation
 
                 await beforePublicationAsync();
                 EnsureVisiblePathMatches();
-                RenameRelativeFile(
+                RenameRelativeEntry(
                     _handle,
                     fileHandle,
                     temporaryFileName,
@@ -66,15 +66,15 @@ internal sealed partial class PinnedDirectoryCreation
         }
     }
 
-    private static void RenameRelativeFile(
+    private static void RenameRelativeEntry(
         SafeFileHandle directoryHandle,
-        SafeFileHandle fileHandle,
-        string temporaryFileName,
-        string finalFileName)
+        SafeFileHandle entryHandle,
+        string temporaryName,
+        string finalName)
     {
         if (OperatingSystem.IsWindows())
         {
-            RenameRelativeFileWindows(directoryHandle, fileHandle, finalFileName);
+            RenameRelativeEntryWindows(directoryHandle, entryHandle, finalName);
             return;
         }
 
@@ -82,30 +82,30 @@ internal sealed partial class PinnedDirectoryCreation
         var result = OperatingSystem.IsMacOS()
             ? RenameAtExclusiveMac(
                 directoryFileDescriptor,
-                temporaryFileName,
+                temporaryName,
                 directoryFileDescriptor,
-                finalFileName,
+                finalName,
                 RenameExclusiveMac)
             : RenameAtNoReplaceLinux(
                 directoryFileDescriptor,
-                temporaryFileName,
+                temporaryName,
                 directoryFileDescriptor,
-                finalFileName,
+                finalName,
                 RenameNoReplace);
         if (result != 0)
         {
             throw new Win32Exception(
                 Marshal.GetLastWin32Error(),
-                "Could not publish a pinned file relative to its owned directory.");
+                "Could not publish a pinned filesystem entry relative to its owned directory.");
         }
     }
 
-    private static void RenameRelativeFileWindows(
+    private static void RenameRelativeEntryWindows(
         SafeFileHandle directoryHandle,
-        SafeFileHandle fileHandle,
-        string finalFileName)
+        SafeFileHandle entryHandle,
+        string finalName)
     {
-        var fileNameBytes = Encoding.Unicode.GetBytes(finalFileName);
+        var fileNameBytes = Encoding.Unicode.GetBytes(finalName);
         var rootDirectoryOffset = IntPtr.Size == 8 ? 8 : 4;
         var fileNameLengthOffset = rootDirectoryOffset + IntPtr.Size;
         var fileNameOffset = fileNameLengthOffset + sizeof(uint);
@@ -127,7 +127,7 @@ internal sealed partial class PinnedDirectoryCreation
             Marshal.Copy(fileNameBytes, 0, buffer + fileNameOffset, fileNameBytes.Length);
             const int fileRenameInformation = 10;
             var status = NtSetInformationFile(
-                fileHandle,
+                entryHandle,
                 out _,
                 buffer,
                 checked((uint)bufferSize),
@@ -137,7 +137,7 @@ internal sealed partial class PinnedDirectoryCreation
                 var error = unchecked((int)RtlNtStatusToDosError(status));
                 throw new Win32Exception(
                     error,
-                    $"Could not publish a pinned file relative to its owned directory (Windows error {error}).");
+                    $"Could not publish a pinned filesystem entry relative to its owned directory (Windows error {error}).");
             }
         }
         finally

@@ -68,6 +68,35 @@ public partial class AudiobookContentMoveServiceTests
     }
 
     [Fact]
+    public async Task MoveContentsAsync_UnownedPreparedScaffold_IsNotAdoptedOrMarked()
+    {
+        var scaffoldParent = FileService.GetTempDirectory("content-move-unowned-prepared-scaffold-root");
+        var source = FileService.GetTempDirectory("content-move-unowned-prepared-scaffold-source");
+        var sourceFile = await FileService.GetFileAsync(source, "book.m4b", "audio");
+        var target = Path.Join(scaffoldParent, "Author", "Book");
+        var request = await CreateLeasedMoveRequestAsync(source, target);
+        var temporaryRoot = Path.Join(
+            scaffoldParent,
+            $".listenarr-scaffold-{request.JobId:N}");
+        Directory.CreateDirectory(temporaryRoot);
+
+        var service = new AudiobookContentMoveService(
+            _provider.GetRequiredService<ILogger<AudiobookContentMoveService>>(),
+            _provider.GetRequiredService<IDbContextFactory<ListenArrDbContext>>(),
+            TimeProvider.System,
+            new DisableAtomicRename());
+
+        await Assert.ThrowsAsync<MoveNeedsAttentionException>(() =>
+            service.MoveContentsAsync(request, CancellationToken.None));
+
+        Assert.True(Directory.Exists(temporaryRoot));
+        Assert.Empty(Directory.EnumerateFileSystemEntries(temporaryRoot));
+        Assert.False(File.Exists(Path.Join(temporaryRoot, ".listenarr-scaffold-owner.json")));
+        Assert.True(File.Exists(sourceFile));
+        Assert.False(Directory.Exists(Path.Join(scaffoldParent, "Author")));
+    }
+
+    [Fact]
     public async Task MoveContentsAsync_ScaffoldParentReplacedAtPublication_DoesNotPublishSubstituteTree()
     {
         var root = FileService.GetTempDirectory("content-move-scaffold-publication-race-root");
@@ -121,7 +150,6 @@ public partial class AudiobookContentMoveServiceTests
             Assert.True(publicationRan);
             Assert.False(substitutePublished);
             Assert.False(Directory.Exists(externalPublishedRoot));
-            Assert.True(Directory.Exists(externalTemporaryRoot));
             Assert.True(File.Exists(sourceFile));
             Assert.False(Directory.Exists(Path.Join(external, "Author", "Book")));
         }

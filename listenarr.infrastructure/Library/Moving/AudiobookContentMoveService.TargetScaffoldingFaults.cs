@@ -2,17 +2,29 @@ namespace Listenarr.Infrastructure.Library.Moving;
 
 internal sealed partial class AudiobookContentMoveService
 {
-    private void PublishTargetScaffoldingForTestableBoundary(
-        Guid jobId,
-        string temporaryRoot,
-        string publishedRoot)
+    private async Task<PinnedDirectoryCreation.PinnedDirectoryAnchor>
+        PublishTargetScaffoldingForTestableBoundaryAsync(
+            Guid jobId,
+            PreparedTargetScaffolding preparedScaffolding,
+            string finalName,
+            Func<Task> authorizeMutation)
     {
         faultInjector?.OnTargetScaffoldPreparation(
             jobId,
             TargetScaffoldPreparationFaultPoint.BeforePublication);
-        Directory.Move(temporaryRoot, publishedRoot);
-        faultInjector?.OnTargetScaffoldPreparation(
-            jobId,
-            TargetScaffoldPreparationFaultPoint.AfterPublication);
+        await authorizeMutation();
+        var publishedAnchor = preparedScaffolding.PublishAs(finalName);
+        try
+        {
+            faultInjector?.OnTargetScaffoldPreparation(
+                jobId,
+                TargetScaffoldPreparationFaultPoint.AfterPublication);
+            return publishedAnchor;
+        }
+        catch
+        {
+            publishedAnchor.Dispose();
+            throw;
+        }
     }
 }

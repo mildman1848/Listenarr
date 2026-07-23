@@ -109,6 +109,33 @@ public partial class AudiobookContentMoveServiceTests
     }
 
     [Fact]
+    public async Task MoveContentsAsync_LeaseReplacedAtScaffoldPublication_DoesNotPublishPreparedHierarchy()
+    {
+        var scaffoldParent = FileService.GetTempDirectory("content-move-scaffold-lease-root");
+        var source = FileService.GetTempDirectory("content-move-scaffold-lease-source");
+        var sourceFile = await FileService.GetFileAsync(source, "book.m4b", "verified audio");
+        var target = Path.Join(scaffoldParent, "Author", "Book");
+        var request = await CreateLeasedMoveRequestAsync(source, target);
+        var temporaryRoot = Path.Join(
+            scaffoldParent,
+            $".listenarr-scaffold-{request.JobId:N}");
+        var factory = _provider.GetRequiredService<IDbContextFactory<ListenArrDbContext>>();
+        var service = new AudiobookContentMoveService(
+            _provider.GetRequiredService<ILogger<AudiobookContentMoveService>>(),
+            factory,
+            TimeProvider.System,
+            new ReplaceLeaseBeforeScaffoldPublication(factory));
+
+        await Assert.ThrowsAsync<MoveLeaseLostException>(() =>
+            service.MoveContentsAsync(request, CancellationToken.None));
+
+        Assert.False(Directory.Exists(Path.Join(scaffoldParent, "Author")));
+        Assert.True(Directory.Exists(temporaryRoot));
+        Assert.True(File.Exists(Path.Join(temporaryRoot, ".listenarr-scaffold-owner.json")));
+        Assert.True(File.Exists(sourceFile));
+    }
+
+    [Fact]
     public async Task MoveContentsAsync_LeaseReplacedDuringOwnershipCleanup_PreservesTombstoneForNewWorker()
     {
         var source = FileService.GetTempDirectory("content-move-cleanup-lease-src");
@@ -228,6 +255,32 @@ public partial class AudiobookContentMoveServiceTests
             if (_replaced
                 || markerKind != OwnershipMarkerKind.TemporaryDirectory
                 || faultPoint != OwnershipMarkerWriteFaultPoint.BeforePublication)
+            {
+                return;
+            }
+
+            using var db = factory.CreateDbContext();
+            var job = db.MoveJobs.Single(candidate => candidate.Id == jobId);
+            job.LeaseOwner = "replacement-worker";
+            job.LeaseGeneration++;
+            job.LeaseExpiresAt = DateTime.UtcNow.AddMinutes(5);
+            db.SaveChanges();
+            _replaced = true;
+        }
+    }
+
+    private sealed class ReplaceLeaseBeforeScaffoldPublication(
+        IDbContextFactory<ListenArrDbContext> factory) : IMoveFaultInjector
+    {
+        private bool _replaced;
+
+        public bool AllowAtomicRename => false;
+
+        public void OnTargetScaffoldPreparation(
+            Guid jobId,
+            TargetScaffoldPreparationFaultPoint faultPoint)
+        {
+            if (_replaced || faultPoint != TargetScaffoldPreparationFaultPoint.BeforePublication)
             {
                 return;
             }

@@ -60,14 +60,25 @@ internal sealed partial class PinnedDirectoryCreation : IDisposable
 
     public string FullPath => Path.Join(_parentPath, _childName);
 
-    public static PinnedDirectoryCreation TryCreate(string parentPath, string childName)
+    public static PinnedDirectoryCreation TryCreate(string parentPath, string childName) =>
+        TryCreateCore(parentPath, childName, requireDirectoryDeleteAccess: false);
+
+    internal static PinnedDirectoryCreation TryCreateForPublication(
+        string parentPath,
+        string childName) =>
+        TryCreateCore(parentPath, childName, requireDirectoryDeleteAccess: true);
+
+    private static PinnedDirectoryCreation TryCreateCore(
+        string parentPath,
+        string childName,
+        bool requireDirectoryDeleteAccess)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(parentPath);
         ValidateLeafName(childName);
         ExclusiveDirectoryCreator.InvokeBeforeOpenParentHook(parentPath);
 
         return OperatingSystem.IsWindows()
-            ? TryCreateWindows(parentPath, childName)
+            ? TryCreateWindows(parentPath, childName, requireDirectoryDeleteAccess)
             : TryCreateUnix(parentPath, childName);
     }
 
@@ -95,7 +106,8 @@ internal sealed partial class PinnedDirectoryCreation : IDisposable
     public Task WriteInsideFileAsync(
         string fileName,
         string contents,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool hiddenFile = true)
     {
         ThrowIfDisposed();
         if (!Created || _directoryHandle == null)
@@ -108,7 +120,8 @@ internal sealed partial class PinnedDirectoryCreation : IDisposable
             _directoryHandle,
             fileName,
             contents,
-            cancellationToken);
+            cancellationToken,
+            hiddenFile);
     }
 
     public Task WriteParentFileAsync(
@@ -127,7 +140,8 @@ internal sealed partial class PinnedDirectoryCreation : IDisposable
             _parentHandle,
             fileName,
             contents,
-            cancellationToken);
+            cancellationToken,
+            hiddenFile: true);
     }
 
     public void Dispose()
@@ -144,7 +158,8 @@ internal sealed partial class PinnedDirectoryCreation : IDisposable
 
     private static PinnedDirectoryCreation TryCreateWindows(
         string parentPath,
-        string childName)
+        string childName,
+        bool requireDirectoryDeleteAccess)
     {
         var parentHandle = OpenDirectoryWindows(parentPath, openReparsePoint: true);
         try
@@ -155,6 +170,8 @@ internal sealed partial class PinnedDirectoryCreation : IDisposable
                 parentHandle,
                 childName,
                 directory: true,
+                hiddenFile: false,
+                requireDirectoryDeleteAccess,
                 out var rawHandle);
             if (status == StatusObjectNameCollision)
             {
@@ -254,11 +271,12 @@ internal sealed partial class PinnedDirectoryCreation : IDisposable
         SafeFileHandle directoryHandle,
         string fileName,
         string contents,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool hiddenFile)
     {
         ValidateLeafName(fileName);
         using var fileHandle = OperatingSystem.IsWindows()
-            ? CreateRelativeFileWindows(directoryHandle, fileName)
+            ? CreateRelativeFileWindows(directoryHandle, fileName, hiddenFile)
             : CreateRelativeFileUnix(directoryHandle, fileName);
         await using var stream = new FileStream(
             fileHandle,
@@ -273,12 +291,15 @@ internal sealed partial class PinnedDirectoryCreation : IDisposable
 
     private static SafeFileHandle CreateRelativeFileWindows(
         SafeFileHandle directoryHandle,
-        string fileName)
+        string fileName,
+        bool hiddenFile = true)
     {
         var status = CreateRelativeWindows(
             directoryHandle,
             fileName,
             directory: false,
+            hiddenFile,
+            requireDirectoryDeleteAccess: false,
             out var rawHandle);
         if (status == StatusObjectNameCollision)
         {

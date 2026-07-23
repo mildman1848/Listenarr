@@ -103,7 +103,7 @@ internal sealed partial class AudiobookContentMoveService
                 "The planned target scaffold root is occupied by a file.");
         }
 
-        await PrepareScaffoldingAsync(
+        using var preparedScaffolding = await PrepareScaffoldingAsync(
             request,
             source,
             target,
@@ -125,7 +125,22 @@ internal sealed partial class AudiobookContentMoveService
             target,
             publishedRoot,
             request.TargetSemantics);
-        PublishTargetScaffoldingForTestableBoundary(request.JobId, temporaryRoot, publishedRoot);
+        preparedScaffolding.EnsureVisibleHierarchy();
+        using var publishedAnchor = await PublishTargetScaffoldingForTestableBoundaryAsync(
+            request.JobId,
+            preparedScaffolding,
+            Path.GetFileName(publishedRoot),
+            () => EnsureMutationAuthorizedAsync(
+                request,
+                source,
+                target,
+                cancellationToken));
+        if (!publishedAnchor.VisiblePathMatches(publishedRoot))
+        {
+            throw new MoveNeedsAttentionException(
+                "The published target scaffolding no longer identifies the prepared directory.");
+        }
+
         ValidateExistingMoveDirectory(publishedRoot, "published target scaffolding");
         ValidatePublishedScaffoldTree(
             publishedRoot,
@@ -143,84 +158,6 @@ internal sealed partial class AudiobookContentMoveService
                 MoveCreatedDirectoryState.Created,
                 cancellationToken);
         }
-    }
-
-    private async Task PrepareScaffoldingAsync(
-        AudiobookContentMoveRequest request,
-        string source,
-        string target,
-        string publishedRoot,
-        string temporaryRoot,
-        IReadOnlyList<MoveJobCreatedDirectory> ordered,
-        CancellationToken cancellationToken)
-    {
-        if (File.Exists(temporaryRoot))
-        {
-            throw new MoveNeedsAttentionException(
-                "The prepared target scaffold path is occupied by a file.");
-        }
-
-        if (!Directory.Exists(temporaryRoot))
-        {
-            await EnsureMutationAuthorizedAsync(request, source, target, cancellationToken);
-            Directory.CreateDirectory(temporaryRoot);
-            ValidateExistingMoveDirectory(temporaryRoot, "prepared target scaffolding");
-            WriteScaffoldMarker(
-                temporaryRoot,
-                new ScaffoldOwnershipMarker(
-                    ScaffoldMarkerVersion,
-                    request.JobId,
-                    target,
-                    publishedRoot));
-        }
-        else
-        {
-            ValidateExistingMoveDirectory(temporaryRoot, "prepared target scaffolding");
-            ValidateScaffoldMarker(
-                ReadScaffoldMarker(temporaryRoot),
-                request.JobId,
-                target,
-                publishedRoot,
-                request.TargetSemantics);
-        }
-
-        foreach (var directory in ordered.Skip(1))
-        {
-            if (!FileSystemPathIdentity.TryGetRelativePathWithinBase(
-                    publishedRoot,
-                    directory.Path,
-                    request.TargetSemantics,
-                    out var relativePath)
-                || !FileSystemPathIdentity.TryResolveRelativePathWithinBase(
-                    temporaryRoot,
-                    relativePath,
-                    request.TargetSemantics,
-                    out var preparedPath))
-            {
-                throw new MoveNeedsAttentionException(
-                    "A target scaffold directory escaped the prepared scaffold root.");
-            }
-
-            if (File.Exists(preparedPath))
-            {
-                throw new MoveNeedsAttentionException(
-                    "A prepared target scaffold directory is occupied by a file.");
-            }
-
-            if (!Directory.Exists(preparedPath))
-            {
-                await EnsureMutationAuthorizedAsync(request, source, target, cancellationToken);
-                Directory.CreateDirectory(preparedPath);
-            }
-
-            ValidateExistingMoveDirectory(preparedPath, "prepared target scaffold directory");
-        }
-
-        ValidatePreparedScaffoldTree(
-            temporaryRoot,
-            publishedRoot,
-            ordered,
-            request.TargetSemantics);
     }
 
     private async Task AdoptOrValidatePublishedScaffoldingAsync(

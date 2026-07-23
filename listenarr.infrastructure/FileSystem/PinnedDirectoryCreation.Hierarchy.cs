@@ -201,6 +201,8 @@ internal sealed partial class PinnedDirectoryCreation
                 parentHandle,
                 childName,
                 directory: true,
+                hiddenFile: false,
+                requireDirectoryDeleteAccess: false,
                 out var rawHandle);
             if (status == StatusObjectNameCollision)
             {
@@ -309,11 +311,13 @@ internal sealed partial class PinnedDirectoryCreation
     private static SafeFileHandle OpenRelativeDirectoryWindows(
         SafeFileHandle parentHandle,
         string childName,
-        string childPath)
+        string childPath,
+        bool requireDeleteAccess = false)
     {
         var status = OpenRelativeDirectoryWindowsCore(
             parentHandle,
             childName,
+            requireDeleteAccess,
             out var rawHandle);
         if (status < 0)
         {
@@ -336,6 +340,7 @@ internal sealed partial class PinnedDirectoryCreation
     private static int OpenRelativeDirectoryWindowsCore(
         SafeFileHandle parentHandle,
         string childName,
+        bool requireDeleteAccess,
         out IntPtr rawHandle)
     {
         var nameBuffer = Marshal.StringToHGlobalUni(childName);
@@ -356,9 +361,11 @@ internal sealed partial class PinnedDirectoryCreation
                 RootDirectory = parentHandle.DangerousGetHandle(),
                 ObjectName = unicodeStringPointer
             };
+            var desiredAccess = FileListDirectory | FileReadAttributes | Synchronize
+                | (requireDeleteAccess ? DeleteAccess : 0u);
             return NtCreateFile(
                 out rawHandle,
-                FileListDirectory | FileReadAttributes | Synchronize,
+                desiredAccess,
                 ref attributes,
                 out _,
                 IntPtr.Zero,
