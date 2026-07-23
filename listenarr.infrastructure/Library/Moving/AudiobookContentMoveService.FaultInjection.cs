@@ -32,6 +32,7 @@ internal enum SourceCleanupFaultPoint
     BeforeSourceFileMove,
     BeforeSourceFilePublication,
     BeforeQuarantineFileDelete,
+    BeforeQuarantineFileRemoval,
     AfterEmptySourceDirectoryQuarantine
 }
 

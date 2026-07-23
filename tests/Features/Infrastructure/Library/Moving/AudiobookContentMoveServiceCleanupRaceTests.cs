@@ -150,6 +150,47 @@ public partial class AudiobookContentMoveServiceTests
     }
 
     [Fact]
+    public async Task MoveContentsAsync_QuarantineFileReplacedAfterRevalidation_DoesNotDeleteExternalBytes()
+    {
+        var source = FileService.GetTempDirectory("content-move-quarantine-file-race-src");
+        await FileService.GetFileAsync(source, "book.m4b", "verified audio");
+        var target = Path.Join(
+            FileService.GetTempPath(),
+            $"content-move-quarantine-file-race-dst-{Guid.NewGuid():N}");
+        var external = FileService.GetTempDirectory("content-move-quarantine-file-race-external");
+        var externalFile = await FileService.GetFileAsync(
+            external,
+            "external.m4b",
+            "external bytes");
+        var request = await CreateLeasedMoveRequestAsync(source, target);
+        var quarantineRoot = Path.Join(
+            Path.GetDirectoryName(source)!,
+            $".listenarr-quarantine-{request.JobId:N}");
+        var quarantineFile = Path.Join(quarantineRoot, "book.m4b");
+        var quarantineBackup = Path.Join(quarantineRoot, "book.original.m4b");
+        var service = new AudiobookContentMoveService(
+            _provider.GetRequiredService<ILogger<AudiobookContentMoveService>>(),
+            _provider.GetRequiredService<IDbContextFactory<ListenArrDbContext>>(),
+            TimeProvider.System,
+            new ReplaceQuarantineFileAfterRevalidation(
+                quarantineFile,
+                quarantineBackup,
+                externalFile));
+
+        await Assert.ThrowsAnyAsync<Exception>(() =>
+            service.MoveContentsAsync(request, CancellationToken.None));
+
+        Assert.True(File.Exists(quarantineBackup));
+        Assert.Equal("verified audio", await File.ReadAllTextAsync(quarantineBackup));
+        var preservedExternalPath = File.Exists(externalFile)
+            ? externalFile
+            : quarantineFile;
+        Assert.True(File.Exists(preservedExternalPath));
+        Assert.Equal("external bytes", await File.ReadAllTextAsync(preservedExternalPath));
+        Assert.True(File.Exists(Path.Join(target, "book.m4b")));
+    }
+
+    [Fact]
     public async Task MoveContentsAsync_TargetFileReplacedBeforeQuarantineDelete_PreservesQuarantineAndExternalFile()
     {
         var capabilityRoot = FileService.GetTempDirectory("content-move-target-race-capability");
@@ -258,6 +299,28 @@ public partial class AudiobookContentMoveServiceTests
 
             File.WriteAllText(Path.Join(target, "operator-note.txt"), "preserve me");
             _added = true;
+        }
+    }
+
+    private sealed class ReplaceQuarantineFileAfterRevalidation(
+        string quarantineFile,
+        string quarantineBackup,
+        string externalFile) : IMoveFaultInjector
+    {
+        private bool _replaced;
+
+        public void OnSourceCleanupMutation(
+            Guid jobId,
+            SourceCleanupFaultPoint faultPoint)
+        {
+            if (_replaced || faultPoint != SourceCleanupFaultPoint.BeforeQuarantineFileRemoval)
+            {
+                return;
+            }
+
+            File.Move(quarantineFile, quarantineBackup);
+            File.Move(externalFile, quarantineFile);
+            _replaced = true;
         }
     }
 

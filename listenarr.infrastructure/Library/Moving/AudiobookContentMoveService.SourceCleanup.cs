@@ -313,6 +313,9 @@ internal sealed partial class AudiobookContentMoveService
                 sourceSemantics,
                 targetSemantics,
                 cancellationToken);
+            faultInjector?.OnSourceCleanupMutation(
+                jobId,
+                SourceCleanupFaultPoint.BeforeQuarantineFileRemoval);
             File.Delete(quarantineFile);
             await UpdateCleanupStateAsync(
                 jobId,
