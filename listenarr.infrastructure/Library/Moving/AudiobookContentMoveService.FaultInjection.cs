@@ -50,7 +50,8 @@ internal enum AtomicRenameFaultPoint
 
 internal enum TempPublicationFaultPoint
 {
-    BeforeFinalValidation
+    BeforeFinalValidation,
+    BeforePublication
 }
 
 internal enum OwnershipCleanupFaultPoint

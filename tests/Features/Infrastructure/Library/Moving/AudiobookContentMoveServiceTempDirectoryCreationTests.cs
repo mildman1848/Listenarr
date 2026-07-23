@@ -72,6 +72,77 @@ public partial class AudiobookContentMoveServiceTests
     }
 
     [Fact]
+    public async Task MoveContentsAsync_TempParentReplacedAtPublication_DoesNotPublishSubstituteTree()
+    {
+        var root = FileService.GetTempDirectory("content-move-temp-publication-race-root");
+        var targetParent = Path.Join(root, "destination-parent");
+        var displacedParent = Path.Join(root, "destination-parent.original");
+        var external = FileService.GetTempDirectory("content-move-temp-publication-race-external");
+        var probe = Path.Join(root, "link-probe");
+        Directory.CreateDirectory(targetParent);
+        if (!TryCreateTempDirectoryLink(probe, external))
+        {
+            return;
+        }
+        Directory.Delete(probe);
+
+        var source = FileService.GetTempDirectory("content-move-temp-publication-race-source");
+        var sourceFile = await FileService.GetFileAsync(source, "book.m4b", "audio");
+        var target = Path.Join(targetParent, "Book");
+        var request = await CreateLeasedMoveRequestAsync(source, target);
+        var tempName = Path.GetFileName(target) + ".tmp-" + request.JobId.ToString("N");
+        var externalTemp = Path.Join(external, tempName);
+        var externalTarget = Path.Join(external, Path.GetFileName(target));
+        var publicationRan = false;
+        void ReplaceParentAndSubstituteTemp()
+        {
+            publicationRan = true;
+            Directory.Move(targetParent, displacedParent);
+            var originalTemp = Path.Join(displacedParent, tempName);
+            Directory.CreateDirectory(externalTemp);
+            foreach (var file in Directory.EnumerateFiles(originalTemp))
+            {
+                File.Copy(file, Path.Join(externalTemp, Path.GetFileName(file)));
+            }
+
+            if (OperatingSystem.IsWindows())
+            {
+                if (!TryCreateTempDirectoryJunction(targetParent, external))
+                {
+                    throw new IOException("The target parent replacement junction could not be created.");
+                }
+            }
+            else
+            {
+                Directory.CreateSymbolicLink(targetParent, external);
+            }
+        }
+
+        try
+        {
+            var service = new AudiobookContentMoveService(
+                _provider.GetRequiredService<ILogger<AudiobookContentMoveService>>(),
+                _provider.GetRequiredService<IDbContextFactory<ListenArrDbContext>>(),
+                TimeProvider.System,
+                new ReplaceTempParentAtPublication(ReplaceParentAndSubstituteTemp));
+            await Assert.ThrowsAnyAsync<Exception>(() =>
+                service.MoveContentsAsync(request, CancellationToken.None));
+
+            Assert.True(publicationRan);
+            Assert.False(Directory.Exists(externalTarget));
+            Assert.True(File.Exists(sourceFile));
+        }
+        finally
+        {
+            TryDeleteTempDirectoryLink(targetParent);
+            if (Directory.Exists(displacedParent) && !Directory.Exists(targetParent))
+            {
+                Directory.Move(displacedParent, targetParent);
+            }
+        }
+    }
+
+    [Fact]
     public async Task MoveContentsAsync_TempParentReplacedBeforeMarkerCreation_DoesNotWriteOutsideBoundary()
     {
         var root = FileService.GetTempDirectory("content-move-temp-marker-parent-race-root");
@@ -135,6 +206,27 @@ public partial class AudiobookContentMoveServiceTests
     private sealed class DisableAtomicRename : IMoveFaultInjector
     {
         public bool AllowAtomicRename => false;
+    }
+
+    private sealed class ReplaceTempParentAtPublication(Action replaceParent)
+        : IMoveFaultInjector
+    {
+        private bool _replaced;
+
+        public bool AllowAtomicRename => false;
+
+        public void OnTempPublication(
+            Guid jobId,
+            TempPublicationFaultPoint faultPoint)
+        {
+            if (_replaced || faultPoint != TempPublicationFaultPoint.BeforePublication)
+            {
+                return;
+            }
+
+            _replaced = true;
+            replaceParent();
+        }
     }
 
     private sealed class ReplaceTempParentBeforeMarkerCreation(Action replaceParent)

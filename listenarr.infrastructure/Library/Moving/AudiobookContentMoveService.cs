@@ -395,6 +395,9 @@ internal sealed partial class AudiobookContentMoveService(
                         "The move target appeared immediately before temporary publication.");
                 }
 
+                faultInjector?.OnTempPublication(
+                    request.JobId,
+                    TempPublicationFaultPoint.BeforePublication);
                 Directory.Move(tempName, target);
             }
 
