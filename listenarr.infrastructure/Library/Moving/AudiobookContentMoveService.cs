@@ -363,42 +363,13 @@ internal sealed partial class AudiobookContentMoveService(
 
             if (useTemp)
             {
-                await ValidateOwnedTempDirectoryAsync(
-                    tempName,
-                    targetParent,
+                await PublishOwnedTempDirectoryAsync(
                     request,
                     source,
                     target,
-                    cancellationToken);
-                ValidateMoveTargetRoot(target);
-                if (Directory.Exists(target))
-                {
-                    throw new MoveNeedsAttentionException(
-                        "The move target appeared before temporary publication.");
-                }
-
-                await EnsureMutationAuthorizedAsync(request, source, target, cancellationToken);
-                faultInjector?.OnTempPublication(
-                    request.JobId,
-                    TempPublicationFaultPoint.BeforeFinalValidation);
-                await ValidateOwnedTempDirectoryAsync(
                     tempName,
                     targetParent,
-                    request,
-                    source,
-                    target,
                     cancellationToken);
-                ValidateMoveTargetRoot(target);
-                if (Directory.Exists(target))
-                {
-                    throw new MoveNeedsAttentionException(
-                        "The move target appeared immediately before temporary publication.");
-                }
-
-                faultInjector?.OnTempPublication(
-                    request.JobId,
-                    TempPublicationFaultPoint.BeforePublication);
-                Directory.Move(tempName, target);
             }
 
             await UpdateJobPhaseAsync(request.JobId, request.LeaseToken, MoveJobPhase.Published, cancellationToken);
