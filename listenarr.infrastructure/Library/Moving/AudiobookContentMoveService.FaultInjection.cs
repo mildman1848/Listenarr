@@ -38,6 +38,7 @@ internal enum SourceCleanupFaultPoint
 
 internal enum CopyMutationFaultPoint
 {
+    BeforePartialFileCreation,
     AfterChunkWritten,
     BeforePartialPublication
 }

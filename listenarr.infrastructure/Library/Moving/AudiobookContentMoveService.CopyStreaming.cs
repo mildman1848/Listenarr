@@ -27,6 +27,9 @@ internal sealed partial class AudiobookContentMoveService
                 FileShare.Read,
                 MoveCopyBufferSize,
                 FileOptions.Asynchronous | FileOptions.SequentialScan);
+            faultInjector?.OnCopyMutation(
+                request.JobId,
+                CopyMutationFaultPoint.BeforePartialFileCreation);
             await using var destinationStream = new FileStream(
                 destinationFile,
                 FileMode.CreateNew,
