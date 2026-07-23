@@ -116,6 +116,22 @@ public sealed class PinnedDirectoryCreationTests : BaseTests
     }
 
     [Fact]
+    public async Task DeleteOpenedFile_RemovesVerifiedPinnedEntry()
+    {
+        var parent = FileService.GetTempDirectory("pinned-file-delete");
+        var file = await FileService.GetFileAsync(parent, "book.m4b", "delete me");
+        using var anchor = PinnedDirectoryCreation.OpenPinnedDirectoryNoFollow(parent);
+        using (var entry = anchor.OpenExistingFile(
+            "book.m4b",
+            requireDeleteAccess: true))
+        {
+            entry.Delete();
+        }
+
+        Assert.False(File.Exists(file));
+    }
+
+    [Fact]
     public async Task MoveExistingFileTo_ExistingDestinationPreservesBothFiles()
     {
         var sourceParent = FileService.GetTempDirectory("pinned-file-move-collision-source");

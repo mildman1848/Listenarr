@@ -100,6 +100,76 @@ internal sealed partial class AudiobookContentMoveService
         }
     }
 
+    private async Task DeletePinnedQuarantineFileAsync(
+        AudiobookContentMoveRequest request,
+        string source,
+        string target,
+        string quarantineFile,
+        string quarantineRoot,
+        MoveJobEntry manifestEntry,
+        FileSystemPathSemantics sourceSemantics,
+        CancellationToken cancellationToken)
+    {
+        var (directorySegments, fileName) = SplitPinnedRelativeFilePath(
+            manifestEntry.RelativePath,
+            sourceSemantics);
+        try
+        {
+            using var quarantinePath = PinnedCleanupDirectoryPath.OpenExisting(
+                quarantineRoot,
+                directorySegments);
+            ValidatePinnedParentPath(
+                quarantinePath.Current.FullPath,
+                quarantineFile,
+                sourceSemantics,
+                "quarantine deletion");
+            using var quarantineEntry = quarantinePath.Current.OpenExistingFile(
+                fileName,
+                requireDeleteAccess: true);
+            if (!quarantineEntry.VisiblePathMatches()
+                || !await quarantineEntry.MatchesAsync(
+                    manifestEntry.Length,
+                    manifestEntry.Sha256,
+                    cancellationToken))
+            {
+                throw new MoveNeedsAttentionException(
+                    $"The pinned quarantine entry changed before deletion: {manifestEntry.RelativePath}");
+            }
+
+            quarantinePath.EnsureVisibleHierarchy();
+            faultInjector?.OnSourceCleanupMutation(
+                request.JobId,
+                SourceCleanupFaultPoint.BeforeQuarantineFileRemoval);
+            await EnsureMutationAuthorizedAsync(
+                request,
+                source,
+                target,
+                cancellationToken);
+            quarantinePath.EnsureVisibleHierarchy();
+            if (!quarantineEntry.VisiblePathMatches()
+                || !await quarantineEntry.MatchesAsync(
+                    manifestEntry.Length,
+                    manifestEntry.Sha256,
+                    cancellationToken))
+            {
+                throw new MoveNeedsAttentionException(
+                    $"The pinned quarantine entry changed at deletion: {manifestEntry.RelativePath}");
+            }
+
+            quarantineEntry.Delete();
+        }
+        catch (MoveNeedsAttentionException)
+        {
+            throw;
+        }
+        catch (Exception exception) when (exception is
+            InvalidOperationException or Win32Exception or UnauthorizedAccessException)
+        {
+            throw new MoveNeedsAttentionException(
+                $"The quarantine file could not be removed through pinned directory handles: {exception.Message}");
+        }
+    }
+
     private static void ValidatePinnedParentPath(
         string pinnedParent,
         string expectedFile,
