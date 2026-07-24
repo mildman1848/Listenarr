@@ -305,15 +305,14 @@ internal sealed partial class AudiobookContentMoveService(
                     cancellationToken);
             }
 
-            if (!Directory.Exists(copyDestination))
-            {
-                await EnsureMutationAuthorizedAsync(request, source, target, cancellationToken);
-                ValidateMoveRootPath(
-                    copyDestination,
-                    mustExist: false,
-                    "copy destination");
-                Directory.CreateDirectory(copyDestination);
-            }
+            await EnsureCopyDestinationRootAsync(
+                request,
+                source,
+                target,
+                copyDestination,
+                useTemp,
+                targetSemantics,
+                cancellationToken);
             if (!useTemp && !resumingDirectCopy)
             {
                 await EnsureMutationAuthorizedAsync(request, source, target, cancellationToken);

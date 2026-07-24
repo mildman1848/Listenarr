@@ -152,6 +152,35 @@ public partial class AudiobookContentMoveServiceTests
         }
     }
 
+    [Fact]
+    public async Task MoveContentsAsync_OwnedTempDisappearsBeforeCopy_DoesNotRecreateUnmarkedDirectory()
+    {
+        var source = FileService.GetTempDirectory("content-move-temp-disappears-source");
+        var sourceFile = await FileService.GetFileAsync(source, "book.m4b", "verified audio");
+        var target = Path.Join(
+            FileService.GetTempPath(),
+            $"content-move-temp-disappears-target-{Guid.NewGuid():N}");
+        var request = await CreateLeasedMoveRequestAsync(source, target);
+        var tempRoot = Path.Join(
+            Path.GetDirectoryName(target)!,
+            Path.GetFileName(target) + ".tmp-" + request.JobId.ToString("N"));
+        var injector = new DeleteOwnedTempBeforeCopyRootValidation(tempRoot);
+        var service = new AudiobookContentMoveService(
+            _provider.GetRequiredService<ILogger<AudiobookContentMoveService>>(),
+            _provider.GetRequiredService<IDbContextFactory<ListenArrDbContext>>(),
+            TimeProvider.System,
+            injector);
+
+        var exception = await Assert.ThrowsAsync<MoveNeedsAttentionException>(() =>
+            service.MoveContentsAsync(request, CancellationToken.None));
+
+        Assert.True(injector.DeletionRan);
+        Assert.Contains("disappeared", exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.True(File.Exists(sourceFile));
+        Assert.False(Directory.Exists(tempRoot));
+        Assert.False(Directory.Exists(target));
+    }
+
     private sealed class StopAfterPublished(string source) : IMoveFaultInjector
     {
         public Exception? DeleteAccessError { get; private set; }
@@ -173,6 +202,26 @@ public partial class AudiobookContentMoveServiceTests
             }
 
             throw new MoveNeedsAttentionException("Stop after publication for source inspection.");
+        }
+    }
+
+    private sealed class DeleteOwnedTempBeforeCopyRootValidation(string tempRoot)
+        : IMoveFaultInjector
+    {
+        public bool AllowAtomicRename => false;
+
+        public bool DeletionRan { get; private set; }
+
+        public void OnCopyMutation(Guid jobId, CopyMutationFaultPoint faultPoint)
+        {
+            if (DeletionRan || faultPoint != CopyMutationFaultPoint.BeforeCopyRootValidation)
+            {
+                return;
+            }
+
+            Assert.True(File.Exists(Path.Join(tempRoot, ".listenarr-temp-owner.json")));
+            Directory.Delete(tempRoot, recursive: true);
+            DeletionRan = true;
         }
     }
 
