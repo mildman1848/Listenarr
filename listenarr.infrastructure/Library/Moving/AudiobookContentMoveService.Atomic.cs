@@ -104,6 +104,9 @@ internal sealed partial class AudiobookContentMoveService
                     "Atomic rename target appeared immediately before publication; no directory was moved.");
             }
 
+            faultInjector?.OnAtomicRename(
+                request.JobId,
+                AtomicRenameFaultPoint.BeforeDirectoryPublication);
             Directory.Move(source, target);
             renameCompleted = true;
             faultInjector?.OnAtomicRename(

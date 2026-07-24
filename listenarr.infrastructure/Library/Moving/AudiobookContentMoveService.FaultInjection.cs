@@ -47,6 +47,7 @@ internal enum CopyMutationFaultPoint
 internal enum AtomicRenameFaultPoint
 {
     BeforeSourceRevalidation,
+    BeforeDirectoryPublication,
     AfterDirectoryMoveBeforeVerification
 }
 

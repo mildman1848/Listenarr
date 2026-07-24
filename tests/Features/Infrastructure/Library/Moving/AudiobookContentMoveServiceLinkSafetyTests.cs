@@ -171,6 +171,54 @@ public partial class AudiobookContentMoveServiceTests
     }
 
     [Fact]
+    public async Task MoveContentsAsync_AtomicSourceReplacedAtPublication_DoesNotMoveReplacement()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var root = FileService.GetTempDirectory("content-move-atomic-publication-race");
+        var source = Path.Join(root, "source");
+        var displacedSource = Path.Join(root, "source.original");
+        var target = Path.Join(root, "target");
+        var external = FileService.GetTempDirectory("content-move-atomic-publication-external");
+        Directory.CreateDirectory(source);
+        await FileService.GetFileAsync(source, "book.m4b", "audio");
+        await FileService.GetFileAsync(external, "external.txt", "external");
+        var request = await CreateLeasedMoveRequestAsync(source, target);
+        var injector = new ReplaceAtomicSourceAtPublication(
+            source,
+            displacedSource,
+            external);
+        var service = new AudiobookContentMoveService(
+            _provider.GetRequiredService<ILogger<AudiobookContentMoveService>>(),
+            _provider.GetRequiredService<IDbContextFactory<ListenArrDbContext>>(),
+            TimeProvider.System,
+            injector);
+
+        try
+        {
+            await Assert.ThrowsAnyAsync<Exception>(() =>
+                service.MoveContentsAsync(request, CancellationToken.None));
+
+            Assert.True(injector.ReplacementRan);
+            Assert.True(File.Exists(Path.Join(displacedSource, "book.m4b")));
+            Assert.False(Directory.Exists(target));
+            Assert.Equal("external", await File.ReadAllTextAsync(Path.Join(external, "external.txt")));
+        }
+        finally
+        {
+            TryRemoveDirectoryLink(target);
+            TryRemoveDirectoryLink(source);
+            if (Directory.Exists(displacedSource) && !Directory.Exists(source))
+            {
+                Directory.Move(displacedSource, source);
+            }
+        }
+    }
+
+    [Fact]
     public async Task MoveContentsAsync_AtomicVerificationIoFailure_PreservesRecoverableState()
     {
         var source = FileService.GetTempDirectory("content-move-atomic-verify-retry-src");
@@ -261,6 +309,32 @@ public partial class AudiobookContentMoveServiceTests
         var factory = _provider.GetRequiredService<IDbContextFactory<ListenArrDbContext>>();
         await using var db = await factory.CreateDbContextAsync();
         Assert.True(await db.MoveJobEntries.AnyAsync(entry => entry.MoveJobId == jobId));
+    }
+
+    private sealed class ReplaceAtomicSourceAtPublication(
+        string source,
+        string displacedSource,
+        string external) : IMoveFaultInjector
+    {
+        public bool AllowAtomicRename => true;
+
+        public bool ReplacementRan { get; private set; }
+
+        public void OnAtomicRename(Guid jobId, AtomicRenameFaultPoint faultPoint)
+        {
+            if (ReplacementRan || faultPoint != AtomicRenameFaultPoint.BeforeDirectoryPublication)
+            {
+                return;
+            }
+
+            Directory.Move(source, displacedSource);
+            if (!TryCreateWindowsJunction(source, external))
+            {
+                throw new IOException("The atomic source replacement junction could not be created.");
+            }
+
+            ReplacementRan = true;
+        }
     }
 
     private sealed class DenyAtomicRenameBeforeSourceRevalidation : IMoveFaultInjector
