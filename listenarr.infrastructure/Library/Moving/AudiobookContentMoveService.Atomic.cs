@@ -17,7 +17,8 @@ internal sealed partial class AudiobookContentMoveService
         FileSystemPathSemantics targetSemantics,
         CancellationToken cancellationToken)
     {
-        if (targetInsideSource
+        if (!OperatingSystem.IsWindows()
+            || targetInsideSource
             || sourceInsideTarget
             || (faultInjector != null && !faultInjector.AllowAtomicRename)
             || !request.DeleteEmptySource
@@ -104,10 +105,47 @@ internal sealed partial class AudiobookContentMoveService
                     "Atomic rename target appeared immediately before publication; no directory was moved.");
             }
 
+            var sourceParent = Path.GetDirectoryName(source)
+                ?? throw new MoveNeedsAttentionException("The atomic move source parent is unavailable.");
+            var targetParent = Path.GetDirectoryName(target)
+                ?? throw new MoveNeedsAttentionException("The atomic move target parent is unavailable.");
+            using var sourcePublication = PinnedDirectoryCreation.OpenExistingForPublication(
+                sourceParent,
+                Path.GetFileName(source));
+            using var targetParentAnchor = PinnedDirectoryCreation.OpenPinnedDirectoryNoFollow(
+                targetParent);
+            if (!sourcePublication.VisiblePathMatches()
+                || !targetParentAnchor.VisiblePathMatches())
+            {
+                throw new MoveNeedsAttentionException(
+                    "The atomic move source or target parent changed while it was being pinned.");
+            }
+
             faultInjector?.OnAtomicRename(
                 request.JobId,
                 AtomicRenameFaultPoint.BeforeDirectoryPublication);
-            Directory.Move(source, target);
+            await EnsureMutationAuthorizedAsync(request, source, target, cancellationToken);
+            if (!sourcePublication.VisiblePathMatches()
+                || !targetParentAnchor.VisiblePathMatches())
+            {
+                throw new MoveNeedsAttentionException(
+                    "The atomic move source or target parent changed at publication.");
+            }
+            if (Directory.Exists(target) || File.Exists(target))
+            {
+                throw new MoveNeedsAttentionException(
+                    "The atomic move target appeared at publication; no directory was moved.");
+            }
+
+            using var publishedAnchor = sourcePublication.PublishCreatedDirectoryTo(
+                targetParentAnchor,
+                Path.GetFileName(target));
+            if (!publishedAnchor.VisiblePathMatches(target))
+            {
+                throw new MoveNeedsAttentionException(
+                    "The atomic move target does not identify the pinned source directory.");
+            }
+
             renameCompleted = true;
             faultInjector?.OnAtomicRename(
                 request.JobId,

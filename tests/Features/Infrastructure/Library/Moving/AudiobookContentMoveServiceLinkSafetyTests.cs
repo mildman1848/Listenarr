@@ -148,6 +148,11 @@ public partial class AudiobookContentMoveServiceTests
     [Fact]
     public async Task MoveContentsAsync_AtomicSourceChangesAfterPlanning_DoesNotMoveDirectory()
     {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
         var source = FileService.GetTempDirectory("content-move-atomic-drift-src");
         await FileService.GetFileAsync(source, "book.m4b", "audio");
         var target = Path.Join(
@@ -221,6 +226,11 @@ public partial class AudiobookContentMoveServiceTests
     [Fact]
     public async Task MoveContentsAsync_AtomicVerificationIoFailure_PreservesRecoverableState()
     {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
         var source = FileService.GetTempDirectory("content-move-atomic-verify-retry-src");
         await FileService.GetFileAsync(source, "book.m4b", "audio");
         var target = Path.Join(
