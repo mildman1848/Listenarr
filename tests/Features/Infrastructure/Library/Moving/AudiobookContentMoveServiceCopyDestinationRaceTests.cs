@@ -99,6 +99,59 @@ public partial class AudiobookContentMoveServiceTests
         }
     }
 
+    [Fact]
+    public async Task MoveContentsAsync_DirectCopyParentReplacedAfterHandleOpen_DoesNotCreateExternalTarget()
+    {
+        var source = FileService.GetTempDirectory("content-move-direct-root-race-source");
+        var displacedSource = source + ".original";
+        var external = FileService.GetTempDirectory("content-move-direct-root-race-external");
+        var probe = Path.Join(Path.GetDirectoryName(source)!, $"link-probe-{Guid.NewGuid():N}");
+        if (!TryCreateTempDirectoryLink(probe, external))
+        {
+            return;
+        }
+        Directory.Delete(probe);
+
+        var sourceFile = await FileService.GetFileAsync(source, "book.m4b", "verified audio");
+        var target = Path.Join(source, "published");
+        var request = await CreateLeasedMoveRequestAsync(source, target);
+        var hookRan = false;
+        void ReplaceParent(string path)
+        {
+            if (hookRan || !string.Equals(path, target, StringComparison.Ordinal))
+            {
+                return;
+            }
+
+            hookRan = true;
+            Directory.Move(source, displacedSource);
+            if (!TryCreateTempDirectoryLink(source, external))
+            {
+                throw new IOException("The direct-copy parent replacement link could not be created.");
+            }
+        }
+
+        using var hook = ExclusiveDirectoryCreator.PushBeforeCreateHook(ReplaceParent);
+        try
+        {
+            var service = _provider.GetRequiredService<AudiobookContentMoveService>();
+            await Assert.ThrowsAnyAsync<Exception>(() =>
+                service.MoveContentsAsync(request, CancellationToken.None));
+
+            Assert.True(hookRan);
+            Assert.True(File.Exists(Path.Join(displacedSource, Path.GetFileName(sourceFile))));
+            Assert.Empty(Directory.EnumerateFileSystemEntries(external));
+        }
+        finally
+        {
+            TryDeleteTempDirectoryLink(source);
+            if (Directory.Exists(displacedSource) && !Directory.Exists(source))
+            {
+                Directory.Move(displacedSource, source);
+            }
+        }
+    }
+
     private sealed class StopAfterPublished(string source) : IMoveFaultInjector
     {
         public Exception? DeleteAccessError { get; private set; }
