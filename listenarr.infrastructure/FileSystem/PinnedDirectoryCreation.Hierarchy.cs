@@ -397,7 +397,7 @@ internal sealed partial class PinnedDirectoryCreation
         var error = RtlNtStatusToDosError(status);
         return new Win32Exception(
             unchecked((int)error),
-            $"Could not open pinned directory '{path}'.");
+            $"Could not open pinned filesystem entry '{path}' (Windows error {error}).");
     }
 
     private static SafeFileHandle DuplicateSafeHandle(SafeFileHandle sourceHandle)

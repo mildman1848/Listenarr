@@ -1,5 +1,4 @@
 using Listenarr.Domain.Common;
-using Microsoft.Extensions.Logging;
 
 namespace Listenarr.Infrastructure.Library.Moving;
 
@@ -58,30 +57,14 @@ internal sealed partial class AudiobookContentMoveService
 
             if (manifestEntry.EntryType == MoveJobEntryType.Directory)
             {
-                if (Directory.Exists(destinationPath)
-                    && (File.GetAttributes(destinationPath) & FileAttributes.ReparsePoint) != 0)
-                {
-                    throw new MoveNeedsAttentionException(
-                        $"Move destination directory is a symbolic link or reparse point: {manifestEntry.RelativePath}");
-                }
-
-                if (!Directory.Exists(destinationPath))
-                {
-                    await EnsureMutationAuthorizedAsync(
-                        request,
-                        source,
-                        target,
-                        cancellationToken);
-                    ValidateCopyMutationPath(destinationPath, copyDestination);
-                    Directory.CreateDirectory(destinationPath);
-                    ValidateCopyMutationPath(destinationPath, copyDestination);
-                    if ((File.GetAttributes(destinationPath) & FileAttributes.ReparsePoint) != 0)
-                    {
-                        throw new MoveNeedsAttentionException(
-                            $"Move destination directory became linked during creation: {manifestEntry.RelativePath}");
-                    }
-                }
-
+                await EnsurePinnedCopyDirectoryAsync(
+                    request,
+                    source,
+                    target,
+                    copyDestination,
+                    manifestEntry.RelativePath,
+                    targetSemantics,
+                    cancellationToken);
                 continue;
             }
 
@@ -106,6 +89,7 @@ internal sealed partial class AudiobookContentMoveService
                 tempOwnership != null,
                 tempOwnership != null || directCopyOwnershipValidated,
                 sourceSemantics,
+                targetSemantics,
                 cancellationToken);
         }
     }
@@ -256,7 +240,7 @@ internal sealed partial class AudiobookContentMoveService
         }
     }
 
-    private async Task CopyFileWithRetryAsync(
+    private Task CopyFileWithRetryAsync(
         AudiobookContentMoveRequest request,
         string sourceRoot,
         string target,
@@ -267,220 +251,19 @@ internal sealed partial class AudiobookContentMoveService
         bool destinationIsJobOwnedTemp,
         bool destinationHasStructuredOwnership,
         FileSystemPathSemantics sourceSemantics,
-        CancellationToken cancellationToken)
-    {
-        ValidateCopyMutationPath(destinationFile, destinationRoot);
-        var destinationDirectory = Path.GetDirectoryName(destinationFile);
-        if (!string.IsNullOrEmpty(destinationDirectory) && !Directory.Exists(destinationDirectory))
-        {
-            await EnsureMutationAuthorizedAsync(request, sourceRoot, target, cancellationToken);
-            ValidateCopyMutationPath(destinationFile, destinationRoot);
-            Directory.CreateDirectory(destinationDirectory);
-            ValidateCopyMutationPath(destinationFile, destinationRoot);
-        }
-
-        var partialFile = destinationFile + $".listenarr-{request.JobId:N}.partial";
-        for (var attempt = 1; attempt <= MaxCopyAttempts; attempt++)
-        {
-            var partialExistedBeforeAttempt = File.Exists(partialFile);
-            try
-            {
-                if (!await FileMatchesManifestAsync(sourceFile, manifestEntry, cancellationToken))
-                {
-                    throw new MoveNeedsAttentionException(
-                        $"Source file no longer matches the persisted move manifest: {manifestEntry.RelativePath}");
-                }
-
-                ValidateCopyMutationPath(destinationFile, destinationRoot);
-                ValidateCopyMutationPath(partialFile, destinationRoot);
-
-                if (File.Exists(destinationFile))
-                {
-                    if (await FileMatchesManifestAsync(destinationFile, manifestEntry, cancellationToken))
-                    {
-                        await EnsureMutationAuthorizedAsync(request, sourceRoot, target, cancellationToken);
-                        await RemoveExistingPartialAsync(
-                            partialFile,
-                            destinationRoot,
-                            manifestEntry,
-                            destinationIsJobOwnedTemp,
-                            destinationHasStructuredOwnership,
-                            () => EnsureMutationAuthorizedAsync(
-                                request,
-                                sourceRoot,
-                                target,
-                                cancellationToken),
-                            cancellationToken);
-                        logger.LogInformation(
-                            "Skipping copy for move job {JobId}; destination already matches the persisted manifest: {Destination}",
-                            request.JobId,
-                            LogRedaction.SanitizeFilePath(destinationFile));
-                        return;
-                    }
-
-                    if (!destinationIsJobOwnedTemp)
-                    {
-                        throw new MoveNeedsAttentionException(
-                            $"Destination file differs from the move manifest and will not be overwritten: {Path.GetFileName(destinationFile)}");
-                    }
-
-                    await EnsureMutationAuthorizedAsync(request, sourceRoot, target, cancellationToken);
-                    DeleteValidatedOwnedFile(destinationFile, destinationRoot);
-                }
-
-                if (File.Exists(partialFile))
-                {
-                    if (!destinationHasStructuredOwnership)
-                    {
-                        throw new MoveNeedsAttentionException(
-                            "A job-shaped partial file exists without structured move ownership.");
-                    }
-
-                    ValidateExistingOwnedFile(partialFile, destinationRoot);
-                    if (await FileMatchesManifestAsync(partialFile, manifestEntry, cancellationToken))
-                    {
-                        await EnsureMutationAuthorizedAsync(request, sourceRoot, target, cancellationToken);
-                        faultInjector?.OnCopyMutation(
-                            request.JobId,
-                            CopyMutationFaultPoint.BeforePartialPublication);
-                        ValidateCopyMutationPath(destinationFile, destinationRoot);
-                        ValidateExistingOwnedFile(partialFile, destinationRoot);
-                        if (!await FileMatchesManifestAsync(
-                                partialFile,
-                                manifestEntry,
-                                cancellationToken))
-                        {
-                            throw new MoveNeedsAttentionException(
-                                $"The partial copy changed before publication: {Path.GetFileName(partialFile)}");
-                        }
-
-                        await EnsureMutationAuthorizedAsync(request, sourceRoot, target, cancellationToken);
-                        ValidateCopyMutationPath(destinationFile, destinationRoot);
-                        ValidateExistingOwnedFile(partialFile, destinationRoot);
-                        if (!await FileMatchesManifestAsync(
-                                partialFile,
-                                manifestEntry,
-                                cancellationToken))
-                        {
-                            throw new MoveNeedsAttentionException(
-                                $"The partial copy changed after lease revalidation: {Path.GetFileName(partialFile)}");
-                        }
-                        await EnsureMutationAuthorizedAsync(request, sourceRoot, target, cancellationToken);
-                        ValidateCopyMutationPath(destinationFile, destinationRoot);
-                        ValidateExistingOwnedFile(partialFile, destinationRoot);
-                        File.Move(partialFile, destinationFile, overwrite: false);
-                        return;
-                    }
-
-                    if (!destinationIsJobOwnedTemp)
-                    {
-                        throw new MoveNeedsAttentionException(
-                            $"A direct-copy partial file does not match the persisted manifest and was preserved: {Path.GetFileName(partialFile)}");
-                    }
-
-                    await EnsureMutationAuthorizedAsync(request, sourceRoot, target, cancellationToken);
-                    DeleteValidatedOwnedFile(partialFile, destinationRoot);
-                }
-
-                await ValidateSourceCopyPathAsync(
-                    sourceRoot,
-                    sourceFile,
-                    manifestEntry,
-                    sourceSemantics,
-                    cancellationToken);
-                ValidateCopyMutationPath(partialFile, destinationRoot);
-                if (File.Exists(partialFile) || Directory.Exists(partialFile))
-                {
-                    throw new MoveNeedsAttentionException(
-                        $"The partial copy destination appeared before copying: {Path.GetFileName(partialFile)}");
-                }
-
-                await EnsureMutationAuthorizedAsync(request, sourceRoot, target, cancellationToken);
-                await CopyFileWithLeaseChecksAsync(
-                    request,
-                    sourceRoot,
-                    target,
-                    sourceFile,
-                    partialFile,
-                    cancellationToken);
-                await EnsureMutationAuthorizedAsync(request, sourceRoot, target, cancellationToken);
-                PreserveFileMetadata(sourceFile, partialFile);
-                if (!await FileMatchesManifestAsync(partialFile, manifestEntry, cancellationToken))
-                {
-                    await EnsureMutationAuthorizedAsync(request, sourceRoot, target, cancellationToken);
-                    DeleteValidatedOwnedFile(partialFile, destinationRoot);
-                    throw new IOException("Temporary move copy failed persisted-manifest verification.");
-                }
-
-                ValidateCopyMutationPath(destinationFile, destinationRoot);
-                ValidateExistingOwnedFile(partialFile, destinationRoot);
-                if (File.Exists(destinationFile))
-                {
-                    if (await FileMatchesManifestAsync(destinationFile, manifestEntry, cancellationToken))
-                    {
-                        await EnsureMutationAuthorizedAsync(request, sourceRoot, target, cancellationToken);
-                        DeleteValidatedOwnedFile(partialFile, destinationRoot);
-                        return;
-                    }
-
-                    throw new MoveNeedsAttentionException(
-                        $"Destination file appeared during the move and differs from the manifest: {Path.GetFileName(destinationFile)}");
-                }
-
-                await EnsureMutationAuthorizedAsync(request, sourceRoot, target, cancellationToken);
-                faultInjector?.OnCopyMutation(
-                    request.JobId,
-                    CopyMutationFaultPoint.BeforePartialPublication);
-                ValidateExistingOwnedFile(partialFile, destinationRoot);
-                if (!await FileMatchesManifestAsync(
-                        partialFile,
-                        manifestEntry,
-                        cancellationToken))
-                {
-                    throw new MoveNeedsAttentionException(
-                        $"The partial copy changed before publication: {Path.GetFileName(partialFile)}");
-                }
-
-                await EnsureMutationAuthorizedAsync(request, sourceRoot, target, cancellationToken);
-                ValidateCopyMutationPath(destinationFile, destinationRoot);
-                ValidateExistingOwnedFile(partialFile, destinationRoot);
-                if (!await FileMatchesManifestAsync(
-                        partialFile,
-                        manifestEntry,
-                        cancellationToken))
-                {
-                    throw new MoveNeedsAttentionException(
-                        $"The partial copy changed after lease revalidation: {Path.GetFileName(partialFile)}");
-                }
-                await EnsureMutationAuthorizedAsync(request, sourceRoot, target, cancellationToken);
-                ValidateCopyMutationPath(destinationFile, destinationRoot);
-                ValidateExistingOwnedFile(partialFile, destinationRoot);
-                File.Move(partialFile, destinationFile, overwrite: false);
-                return;
-            }
-            catch (MoveNeedsAttentionException)
-            {
-                throw;
-            }
-            catch (IOException exception) when (attempt < MaxCopyAttempts)
-            {
-                if (!partialExistedBeforeAttempt && File.Exists(partialFile))
-                {
-                    await EnsureMutationAuthorizedAsync(request, sourceRoot, target, cancellationToken);
-                    DeleteValidatedOwnedFile(partialFile, destinationRoot);
-                }
-
-                logger.LogWarning(
-                    exception,
-                    "IO error copying file {File} attempt {Attempt}",
-                    LogRedaction.SanitizeFilePath(sourceFile),
-                    attempt);
-                var delay = TimeSpan.FromSeconds(Math.Min(8, Math.Pow(2, attempt - 1)));
-                await Task.Delay(delay, cancellationToken);
-            }
-        }
-
-        throw new IOException($"Failed to copy file after {MaxCopyAttempts} attempts: {sourceFile}");
-    }
-
+        FileSystemPathSemantics targetSemantics,
+        CancellationToken cancellationToken) =>
+        CopyFileWithPinnedRetryAsync(
+            request,
+            sourceRoot,
+            target,
+            sourceFile,
+            destinationFile,
+            manifestEntry,
+            destinationRoot,
+            destinationIsJobOwnedTemp,
+            destinationHasStructuredOwnership,
+            sourceSemantics,
+            targetSemantics,
+            cancellationToken);
 }

@@ -180,9 +180,25 @@ internal sealed partial class PinnedDirectoryCreation
                 return;
             }
 
+            var deletionName = $".listenarr-delete-{Guid.NewGuid():N}";
+            RenameRelativeEntry(
+                directoryHandle,
+                fileHandle,
+                fileName,
+                directoryHandle,
+                deletionName);
+            using var renamed = OpenRelativeFileUnix(
+                directoryHandle,
+                deletionName,
+                deletionName);
+            if (!HandlesIdentifySameDirectory(fileHandle, renamed))
+            {
+                return;
+            }
+
             _ = UnlinkAt(
                 directoryHandle.DangerousGetHandle().ToInt32(),
-                fileName,
+                deletionName,
                 flags: 0);
         }
         catch (Exception exception) when (exception is

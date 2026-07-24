@@ -21,10 +21,10 @@ internal sealed partial class AudiobookContentMoveService
             sourceSemantics);
         try
         {
-            using var sourcePath = PinnedCleanupDirectoryPath.OpenExisting(
+            using var sourcePath = PinnedMoveDirectoryPath.OpenExisting(
                 source,
                 directorySegments);
-            using var quarantinePath = await PinnedCleanupDirectoryPath.OpenOrCreateAsync(
+            using var quarantinePath = await PinnedMoveDirectoryPath.OpenOrCreateAsync(
                 quarantineRoot,
                 directorySegments,
                 () => EnsureMutationAuthorizedAsync(
@@ -96,7 +96,8 @@ internal sealed partial class AudiobookContentMoveService
             InvalidOperationException or Win32Exception or UnauthorizedAccessException)
         {
             throw new MoveNeedsAttentionException(
-                $"The source file could not be quarantined through pinned directory handles: {exception.Message}");
+                $"The source file could not be quarantined through pinned directory handles "
+                + $"for '{manifestEntry.RelativePath}': {exception.Message}");
         }
     }
 
@@ -115,7 +116,7 @@ internal sealed partial class AudiobookContentMoveService
             sourceSemantics);
         try
         {
-            using var quarantinePath = PinnedCleanupDirectoryPath.OpenExisting(
+            using var quarantinePath = PinnedMoveDirectoryPath.OpenExisting(
                 quarantineRoot,
                 directorySegments);
             ValidatePinnedParentPath(
@@ -222,127 +223,4 @@ internal sealed partial class AudiobookContentMoveService
         return (segments, fileName);
     }
 
-    private sealed class PinnedCleanupDirectoryPath : IDisposable
-    {
-        private readonly List<PinnedDirectoryCreation.PinnedDirectoryAnchor> _anchors;
-        private bool _disposed;
-
-        private PinnedCleanupDirectoryPath(
-            List<PinnedDirectoryCreation.PinnedDirectoryAnchor> anchors)
-        {
-            _anchors = anchors;
-        }
-
-        internal PinnedDirectoryCreation.PinnedDirectoryAnchor Current
-        {
-            get
-            {
-                ObjectDisposedException.ThrowIf(_disposed, this);
-                return _anchors[^1];
-            }
-        }
-
-        internal static PinnedCleanupDirectoryPath OpenExisting(
-            string root,
-            IReadOnlyList<string> segments)
-        {
-            var anchors = new List<PinnedDirectoryCreation.PinnedDirectoryAnchor>();
-            try
-            {
-                var current = PinnedDirectoryCreation.OpenPinnedDirectoryNoFollow(root);
-                anchors.Add(current);
-                foreach (var segment in segments)
-                {
-                    current = current.OpenExistingChild(segment);
-                    anchors.Add(current);
-                }
-
-                var path = new PinnedCleanupDirectoryPath(anchors);
-                path.EnsureVisibleHierarchy();
-                return path;
-            }
-            catch
-            {
-                DisposeAnchors(anchors);
-                throw;
-            }
-        }
-
-        internal static async Task<PinnedCleanupDirectoryPath> OpenOrCreateAsync(
-            string root,
-            IReadOnlyList<string> segments,
-            Func<Task> authorizeMutation)
-        {
-            ArgumentNullException.ThrowIfNull(authorizeMutation);
-            var anchors = new List<PinnedDirectoryCreation.PinnedDirectoryAnchor>();
-            try
-            {
-                var current = PinnedDirectoryCreation.OpenPinnedDirectoryNoFollow(root);
-                anchors.Add(current);
-                foreach (var segment in segments)
-                {
-                    var childPath = Path.Join(current.FullPath, segment);
-                    PinnedDirectoryCreation.PinnedDirectoryAnchor child;
-                    if (Directory.Exists(childPath))
-                    {
-                        child = current.OpenExistingChild(segment);
-                    }
-                    else
-                    {
-                        await authorizeMutation();
-                        using var creation = current.TryCreateChild(segment);
-                        if (!creation.Created || !creation.VisiblePathMatches())
-                        {
-                            throw new MoveNeedsAttentionException(
-                                "A quarantine child directory appeared before it could be claimed exclusively.");
-                        }
-
-                        child = creation.OpenCreatedDirectoryAnchor();
-                    }
-
-                    anchors.Add(child);
-                    current = child;
-                }
-
-                var path = new PinnedCleanupDirectoryPath(anchors);
-                path.EnsureVisibleHierarchy();
-                return path;
-            }
-            catch
-            {
-                DisposeAnchors(anchors);
-                throw;
-            }
-        }
-
-        internal void EnsureVisibleHierarchy()
-        {
-            ObjectDisposedException.ThrowIf(_disposed, this);
-            if (_anchors.Any(anchor => !anchor.VisiblePathMatches()))
-            {
-                throw new MoveNeedsAttentionException(
-                    "A pinned source or quarantine directory changed during cleanup.");
-            }
-        }
-
-        public void Dispose()
-        {
-            if (_disposed)
-            {
-                return;
-            }
-
-            DisposeAnchors(_anchors);
-            _disposed = true;
-        }
-
-        private static void DisposeAnchors(
-            IReadOnlyList<PinnedDirectoryCreation.PinnedDirectoryAnchor> anchors)
-        {
-            for (var index = anchors.Count - 1; index >= 0; index--)
-            {
-                anchors[index].Dispose();
-            }
-        }
-    }
 }

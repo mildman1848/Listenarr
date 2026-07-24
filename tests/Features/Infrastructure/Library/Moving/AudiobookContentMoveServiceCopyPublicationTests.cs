@@ -28,6 +28,9 @@ public partial class AudiobookContentMoveServiceTests
         Assert.False(File.Exists(Path.Join(target, "book.m4b")));
         Assert.True(File.Exists(partialPath));
         Assert.Equal("corrupted audio", await File.ReadAllTextAsync(partialPath));
+        Assert.Equal(
+            "verified audio",
+            await File.ReadAllTextAsync(partialPath + ".replaced"));
     }
 
     [Fact]
@@ -142,6 +145,7 @@ public partial class AudiobookContentMoveServiceTests
                 return;
             }
 
+            File.Move(partialPath, partialPath + ".replaced");
             File.WriteAllText(partialPath, "corrupted audio");
             _replaced = true;
         }

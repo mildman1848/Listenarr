@@ -5,6 +5,40 @@ namespace Listenarr.Tests.Features.Infrastructure.Library.Moving;
 public partial class AudiobookContentMoveServiceTests
 {
     [Fact]
+    public async Task MoveContentsAsync_ValidPersistedPartial_DoesNotConsumeSourceDuringPublication()
+    {
+        var source = FileService.GetTempDirectory("content-move-persisted-partial-source-check");
+        var sourceFile = await FileService.GetFileAsync(source, "book.m4b", "verified audio");
+        var target = FileService.GetTempDirectory("content-move-persisted-partial-target-check");
+        var request = await CreateLeasedMoveRequestAsync(source, target);
+        await PersistFileManifestAsync(request.JobId, "book.m4b", sourceFile);
+        var partial = Path.Join(
+            target,
+            $"book.m4b.listenarr-{request.JobId:N}.partial");
+        await File.WriteAllTextAsync(partial, "verified audio");
+        await WriteRecoveryMarkerAsync(
+            target,
+            request.JobId,
+            source,
+            target,
+            "copy-started");
+        var stopAfterPublished = new StopAfterPublished(source);
+        var service = new AudiobookContentMoveService(
+            _provider.GetRequiredService<ILogger<AudiobookContentMoveService>>(),
+            _provider.GetRequiredService<IDbContextFactory<ListenArrDbContext>>(),
+            TimeProvider.System,
+            stopAfterPublished);
+
+        await Assert.ThrowsAsync<MoveNeedsAttentionException>(() =>
+            service.MoveContentsAsync(request, CancellationToken.None));
+
+        Assert.True(File.Exists(sourceFile));
+        Assert.Null(stopAfterPublished.DeleteAccessError);
+        Assert.Equal("verified audio", await File.ReadAllTextAsync(sourceFile));
+        Assert.True(File.Exists(Path.Join(target, "book.m4b")));
+    }
+
+    [Fact]
     public async Task MoveContentsAsync_CopyParentReplacedBeforePartialCreation_DoesNotWriteExternalPartial()
     {
         var root = FileService.GetTempDirectory("content-move-copy-parent-race-root");
@@ -62,6 +96,30 @@ public partial class AudiobookContentMoveServiceTests
             {
                 Directory.Move(displacedDestinationParent, destinationParent);
             }
+        }
+    }
+
+    private sealed class StopAfterPublished(string source) : IMoveFaultInjector
+    {
+        public Exception? DeleteAccessError { get; private set; }
+
+        public Task AfterPublishedAsync(
+            Guid jobId,
+            CancellationToken cancellationToken)
+        {
+            try
+            {
+                using var sourceAnchor = PinnedDirectoryCreation.OpenPinnedDirectoryNoFollow(source);
+                using var sourceEntry = sourceAnchor.OpenExistingFile(
+                    "book.m4b",
+                    requireDeleteAccess: true);
+            }
+            catch (Exception exception)
+            {
+                DeleteAccessError = exception;
+            }
+
+            throw new MoveNeedsAttentionException("Stop after publication for source inspection.");
         }
     }
 

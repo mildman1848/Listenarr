@@ -13,30 +13,19 @@ internal sealed partial class AudiobookContentMoveService
         AudiobookContentMoveRequest request,
         string sourceRoot,
         string target,
-        string sourceFile,
-        string destinationFile,
+        PinnedDirectoryCreation.PinnedFileEntry sourceEntry,
+        PinnedDirectoryCreation.PinnedFileEntry destinationEntry,
         CancellationToken cancellationToken)
     {
         var buffer = ArrayPool<byte>.Shared.Rent(MoveCopyBufferSize);
         try
         {
-            await using var sourceStream = new FileStream(
-                sourceFile,
-                FileMode.Open,
-                FileAccess.Read,
-                FileShare.Read,
+            await using var sourceStream = sourceEntry.OpenIndependentReadStream(
                 MoveCopyBufferSize,
-                FileOptions.Asynchronous | FileOptions.SequentialScan);
-            faultInjector?.OnCopyMutation(
-                request.JobId,
-                CopyMutationFaultPoint.BeforePartialFileCreation);
-            await using var destinationStream = new FileStream(
-                destinationFile,
-                FileMode.CreateNew,
-                FileAccess.Write,
-                FileShare.None,
+                asynchronous: false);
+            await using var destinationStream = destinationEntry.OpenIndependentWriteStream(
                 MoveCopyBufferSize,
-                FileOptions.Asynchronous);
+                asynchronous: false);
 
             var bytesSinceLeaseCheck = 0L;
             var leaseCheckTimer = Stopwatch.StartNew();

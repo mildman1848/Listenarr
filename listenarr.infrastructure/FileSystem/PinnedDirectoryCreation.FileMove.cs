@@ -73,9 +73,34 @@ internal sealed partial class PinnedDirectoryCreation
             throw new InvalidOperationException(
                 "The file changed while it was being opened beneath its pinned parent.");
         }
+
+        internal PinnedFileEntry CreateNewFile(
+            string fileName,
+            bool hiddenFile = false)
+        {
+            ThrowIfDisposed();
+            ValidateLeafName(fileName);
+            EnsureVisiblePathMatches();
+            var handle = OperatingSystem.IsWindows()
+                ? CreateRelativeFileWindows(_handle, fileName, hiddenFile)
+                : CreateRelativeReadWriteFileUnix(_handle, fileName);
+            var entry = new PinnedFileEntry(
+                DuplicateSafeHandle(_handle),
+                handle,
+                FullPath,
+                fileName);
+            if (entry.VisiblePathMatches())
+            {
+                return entry;
+            }
+
+            entry.Dispose();
+            throw new InvalidOperationException(
+                "The newly created file changed beneath its pinned parent.");
+        }
     }
 
-    internal sealed class PinnedFileEntry : IDisposable
+    internal sealed partial class PinnedFileEntry : IDisposable
     {
         private readonly SafeFileHandle _parentHandle;
         private readonly SafeFileHandle _fileHandle;
@@ -96,6 +121,28 @@ internal sealed partial class PinnedDirectoryCreation
         }
 
         internal string FullPath => Path.Join(_parentPath, _fileName);
+
+        internal string FileName => _fileName;
+
+        internal FileStream OpenReadStream(int bufferSize, bool asynchronous)
+        {
+            ThrowIfDisposed();
+            return new FileStream(
+                DuplicateSafeHandle(_fileHandle),
+                FileAccess.Read,
+                bufferSize,
+                asynchronous);
+        }
+
+        internal FileStream OpenWriteStream(int bufferSize, bool asynchronous)
+        {
+            ThrowIfDisposed();
+            return new FileStream(
+                DuplicateSafeHandle(_fileHandle),
+                FileAccess.Write,
+                bufferSize,
+                asynchronous);
+        }
 
         internal bool VisiblePathMatches()
         {
@@ -119,6 +166,22 @@ internal sealed partial class PinnedDirectoryCreation
             }
         }
 
+        internal void PreserveMetadataTo(PinnedFileEntry destination)
+        {
+            ThrowIfDisposed();
+            ArgumentNullException.ThrowIfNull(destination);
+            destination.ThrowIfDisposed();
+            File.SetAttributes(
+                destination._fileHandle,
+                File.GetAttributes(_fileHandle));
+            File.SetLastWriteTimeUtc(
+                destination._fileHandle,
+                File.GetLastWriteTimeUtc(_fileHandle));
+            File.SetCreationTimeUtc(
+                destination._fileHandle,
+                File.GetCreationTimeUtc(_fileHandle));
+        }
+
         internal async Task<bool> MatchesAsync(
             long expectedLength,
             string? expectedSha256,
@@ -130,11 +193,9 @@ internal sealed partial class PinnedDirectoryCreation
                 return false;
             }
 
-            await using var stream = new FileStream(
-                DuplicateSafeHandle(_fileHandle),
-                FileAccess.Read,
+            await using var stream = OpenReadStream(
                 bufferSize: 128 * 1024,
-                isAsync: false);
+                asynchronous: false);
             if (stream.Length != expectedLength)
             {
                 return false;
@@ -187,6 +248,39 @@ internal sealed partial class PinnedDirectoryCreation
             {
                 throw new InvalidOperationException(
                     "The published quarantine file does not identify the opened source file.");
+            }
+        }
+
+        internal void MoveWithinParent(string destinationName)
+        {
+            ThrowIfDisposed();
+            ValidateLeafName(destinationName);
+            if (!VisiblePathMatches())
+            {
+                throw new InvalidOperationException(
+                    "The source file changed before its pinned publication.");
+            }
+
+            RenameRelativeEntry(
+                _parentHandle,
+                _fileHandle,
+                _fileName,
+                _parentHandle,
+                destinationName);
+            using var published = OperatingSystem.IsWindows()
+                ? OpenRelativeFileWindows(
+                    _parentHandle,
+                    destinationName,
+                    Path.Join(_parentPath, destinationName),
+                    requireDeleteAccess: false)
+                : OpenRelativeFileUnix(
+                    _parentHandle,
+                    destinationName,
+                    Path.Join(_parentPath, destinationName));
+            if (!HandlesIdentifySameDirectory(_fileHandle, published))
+            {
+                throw new InvalidOperationException(
+                    "The published file does not identify the opened partial file.");
             }
         }
 
@@ -245,6 +339,29 @@ internal sealed partial class PinnedDirectoryCreation
             _disposed = true;
         }
 
+        private FileStream OpenVerifiedIndependentStream(
+            SafeFileHandle handle,
+            FileAccess access,
+            int bufferSize,
+            bool asynchronous)
+        {
+            try
+            {
+                if (!HandlesIdentifySameDirectory(_fileHandle, handle))
+                {
+                    throw new InvalidOperationException(
+                        "The reopened pinned file does not identify the validated file object.");
+                }
+
+                return new FileStream(handle, access, bufferSize, asynchronous);
+            }
+            catch
+            {
+                handle.Dispose();
+                throw;
+            }
+        }
+
         private void ThrowIfDisposed()
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
@@ -274,69 +391,23 @@ internal sealed partial class PinnedDirectoryCreation
         }
     }
 
-    private static SafeFileHandle OpenRelativeFileWindows(
+    private static SafeFileHandle CreateRelativeReadWriteFileUnix(
         SafeFileHandle parentHandle,
-        string fileName,
-        string fullPath,
-        bool requireDeleteAccess)
+        string fileName)
     {
-        var nameBuffer = Marshal.StringToHGlobalUni(fileName);
-        var unicodeStringPointer = IntPtr.Zero;
-        try
+        var fd = OpenAt(
+            parentHandle.DangerousGetHandle().ToInt32(),
+            fileName,
+            GetUnixReadWriteCreateFlags(),
+            UnixFileMode);
+        if (fd >= 0)
         {
-            var unicodeString = new UnicodeString
-            {
-                Length = checked((ushort)(fileName.Length * sizeof(char))),
-                MaximumLength = checked((ushort)((fileName.Length + 1) * sizeof(char))),
-                Buffer = nameBuffer
-            };
-            unicodeStringPointer = Marshal.AllocHGlobal(Marshal.SizeOf<UnicodeString>());
-            Marshal.StructureToPtr(unicodeString, unicodeStringPointer, fDeleteOld: false);
-            var attributes = new ObjectAttributes
-            {
-                Length = (uint)Marshal.SizeOf<ObjectAttributes>(),
-                RootDirectory = parentHandle.DangerousGetHandle(),
-                ObjectName = unicodeStringPointer
-            };
-            var desiredAccess = GenericRead | Synchronize
-                | (requireDeleteAccess ? DeleteAccess : 0u);
-            var status = NtCreateFile(
-                out var rawHandle,
-                desiredAccess,
-                ref attributes,
-                out _,
-                IntPtr.Zero,
-                fileAttributes: 0,
-                FileShareAll,
-                FileOpen,
-                FileNonDirectoryFile | FileSynchronousIoNonAlert | FileOpenReparsePoint,
-                IntPtr.Zero,
-                0);
-            if (status < 0)
-            {
-                throw CreateNtOpenException(status, fullPath);
-            }
+            return new SafeFileHandle(new IntPtr(fd), ownsHandle: true);
+        }
 
-            var handle = new SafeFileHandle(rawHandle, ownsHandle: true);
-            try
-            {
-                EnsureFileHandleIsNotReparsePoint(handle, fullPath);
-                return handle;
-            }
-            catch
-            {
-                handle.Dispose();
-                throw;
-            }
-        }
-        finally
-        {
-            if (unicodeStringPointer != IntPtr.Zero)
-            {
-                Marshal.FreeHGlobal(unicodeStringPointer);
-            }
-            Marshal.FreeHGlobal(nameBuffer);
-        }
+        throw new Win32Exception(
+            Marshal.GetLastWin32Error(),
+            "Could not create a pinned read-write file.");
     }
 
     private static SafeFileHandle OpenRelativeFileUnix(
@@ -357,6 +428,26 @@ internal sealed partial class PinnedDirectoryCreation
         throw new Win32Exception(
             Marshal.GetLastWin32Error(),
             $"Could not open pinned file '{fullPath}'.");
+    }
+
+    private static SafeFileHandle OpenRelativeFileForWriteUnix(
+        SafeFileHandle parentHandle,
+        string fileName,
+        string fullPath)
+    {
+        var fd = OpenAt(
+            parentHandle.DangerousGetHandle().ToInt32(),
+            fileName,
+            GetUnixWriteExistingFlags(),
+            mode: 0);
+        if (fd >= 0)
+        {
+            return new SafeFileHandle(new IntPtr(fd), ownsHandle: true);
+        }
+
+        throw new Win32Exception(
+            Marshal.GetLastWin32Error(),
+            $"Could not open pinned file for writing '{fullPath}'.");
     }
 
     private static void EnsureFileHandleIsNotReparsePoint(
@@ -384,4 +475,12 @@ internal sealed partial class PinnedDirectoryCreation
     private static int GetUnixReadFlags() => OperatingSystem.IsMacOS()
         ? 0x100 | 0x1000000
         : 0x20000 | 0x80000;
+
+    private static int GetUnixReadWriteCreateFlags() => OperatingSystem.IsMacOS()
+        ? 0x2 | 0x200 | 0x800 | 0x100 | 0x1000000
+        : 0x2 | 0x40 | 0x80 | 0x20000 | 0x80000;
+
+    private static int GetUnixWriteExistingFlags() => OperatingSystem.IsMacOS()
+        ? 0x1 | 0x100 | 0x1000000
+        : 0x1 | 0x20000 | 0x80000;
 }

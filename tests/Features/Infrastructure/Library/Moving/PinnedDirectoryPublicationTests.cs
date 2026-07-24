@@ -170,4 +170,37 @@ public sealed class PinnedDirectoryCreationTests : BaseTests
         Assert.True(Directory.Exists(Path.Join(parent, "prepared")));
         Assert.False(Directory.Exists(Path.Join(parent, "published")));
     }
+
+    [Fact]
+    public async Task PublishNewFileAsync_TemporaryNameReplacedBeforeCleanup_PreservesReplacementBytes()
+    {
+        var parent = FileService.GetTempDirectory("pinned-file-publication-cleanup-race");
+        var temporaryName = "marker.json.writing-test";
+        var temporaryPath = Path.Join(parent, temporaryName);
+        var displacedPath = temporaryPath + ".original";
+        using var anchor = PinnedDirectoryCreation.OpenPinnedDirectoryNoFollow(parent);
+
+        await Assert.ThrowsAsync<IOException>(() => anchor.PublishNewFileAsync(
+            temporaryName,
+            "marker.json",
+            () => Task.CompletedTask,
+            async stream =>
+            {
+                await stream.WriteAsync("owned bytes"u8.ToArray());
+                stream.Flush(flushToDisk: true);
+            },
+            () =>
+            {
+                File.Move(temporaryPath, displacedPath);
+                File.WriteAllText(temporaryPath, "external bytes");
+                throw new IOException("Simulated publication failure after pathname replacement.");
+            },
+            _ => false));
+
+        Assert.False(File.Exists(Path.Join(parent, "marker.json")));
+        var survivingContents = await Task.WhenAll(
+            Directory.EnumerateFiles(parent)
+                .Select(path => File.ReadAllTextAsync(path)));
+        Assert.Contains("external bytes", survivingContents);
+    }
 }
