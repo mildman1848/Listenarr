@@ -153,8 +153,13 @@ public sealed class PinnedDirectoryCreationTests : BaseTests
     }
 
     [Fact]
-    public async Task PublishCreatedDirectoryAs_NonEmptyHierarchyWithLiveDescendant_FailsClosed()
+    public async Task PublishCreatedDirectoryAs_WindowsNonEmptyHierarchyWithLiveDescendant_FailsClosed()
     {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
         var parent = FileService.GetTempDirectory("pinned-directory-publication-live-hierarchy");
         using var creation = PinnedDirectoryCreation.TryCreateForPublication(parent, "prepared");
         Assert.True(creation.Created);

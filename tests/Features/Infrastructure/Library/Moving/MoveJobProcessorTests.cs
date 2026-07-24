@@ -659,17 +659,17 @@ namespace Listenarr.Tests.Features.Infrastructure.Library.Moving
                 BasePath = src
             });
             var (queue, job) = await CreateQueuedMoveJobAsync(audiobook, dst, src);
-            var contentMoveService = _provider.GetRequiredService<AudiobookContentMoveService>();
-            await contentMoveService.MoveContentsAsync(
-                new AudiobookContentMoveRequest(
-                    src,
-                    dst,
-                    job.Id,
-                    true,
-                    FileSystemPathSemantics.CurrentHostDefault,
-                    FileSystemPathSemantics.CurrentHostDefault,
-                    new MoveLeaseToken(LeaseOwner, job.LeaseGeneration)),
-                CancellationToken.None);
+            await File.WriteAllTextAsync(
+                Path.Join(src, $".listenarr-move-{job.Id:N}.pending"),
+                System.Text.Json.JsonSerializer.Serialize(new
+                {
+                    Version = 1,
+                    JobId = job.Id,
+                    Source = Path.GetFullPath(src),
+                    Target = Path.GetFullPath(dst),
+                    Stage = "atomic-rename-complete"
+                }));
+            Directory.Move(src, dst);
 
             Assert.False(Directory.Exists(src));
             Assert.Single(Directory.EnumerateFiles(dst, ".listenarr-move-*.pending"));

@@ -60,7 +60,11 @@ public partial class AudiobookContentMoveServiceTests
             target,
             "atomic-rename-complete");
 
-        var service = _provider.GetRequiredService<AudiobookContentMoveService>();
+        var service = new AudiobookContentMoveService(
+            _provider.GetRequiredService<ILogger<AudiobookContentMoveService>>(),
+            _provider.GetRequiredService<IDbContextFactory<ListenArrDbContext>>(),
+            TimeProvider.System,
+            new DisableAtomicRename());
         var result = await service.MoveContentsAsync(request, CancellationToken.None);
 
         Assert.True(result.SourceCleanupCompleted);

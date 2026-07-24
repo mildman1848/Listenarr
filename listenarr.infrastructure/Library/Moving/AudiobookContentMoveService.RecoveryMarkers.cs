@@ -162,38 +162,7 @@ internal sealed partial class AudiobookContentMoveService
             }
 
             var content = File.ReadAllText(markerPath).Trim();
-            if (IsKnownRecoveryStage(content))
-            {
-                return new ParsedRecoveryMarker(
-                    StructuredMarker: null,
-                    ObsoleteStage: content);
-            }
-
-            MoveRecoveryMarker? marker;
-            try
-            {
-                marker = JsonSerializer.Deserialize<MoveRecoveryMarker>(content);
-            }
-            catch (JsonException exception)
-            {
-                throw new MoveNeedsAttentionException(
-                    $"The move recovery marker is corrupt or truncated: {exception.Message}");
-            }
-
-            if (marker == null)
-            {
-                throw new MoveNeedsAttentionException(
-                    "The move recovery marker is empty or corrupt.");
-            }
-
-            if (marker.Version != RecoveryMarkerVersion
-                || !IsKnownRecoveryStage(marker.Stage))
-            {
-                throw new MoveNeedsAttentionException(
-                    "The move recovery marker uses an unsupported version or stage and was preserved.");
-            }
-
-            return new ParsedRecoveryMarker(marker, ObsoleteStage: null);
+            return ParseRecoveryMarkerContent(content);
         }
         catch (MoveNeedsAttentionException)
         {
@@ -209,6 +178,82 @@ internal sealed partial class AudiobookContentMoveService
                 "The move recovery marker is temporarily unreadable and was preserved.",
                 exception);
         }
+    }
+
+    private ParsedRecoveryMarker ReadRecoveryMarker(
+        PinnedDirectoryCreation.PinnedFileEntry markerEntry,
+        string markerPath)
+    {
+        try
+        {
+            using var stream = markerEntry.OpenReadStream(
+                bufferSize: 4096,
+                asynchronous: false);
+            if (stream.Length > MaximumMarkerLength)
+            {
+                throw new MoveNeedsAttentionException(
+                    "The move recovery marker exceeds the supported size and was preserved.");
+            }
+
+            stream.Position = 0;
+            using var reader = new StreamReader(
+                stream,
+                System.Text.Encoding.UTF8,
+                detectEncodingFromByteOrderMarks: true,
+                bufferSize: 4096,
+                leaveOpen: false);
+            return ParseRecoveryMarkerContent(reader.ReadToEnd().Trim());
+        }
+        catch (MoveNeedsAttentionException)
+        {
+            throw;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            logger.LogWarning(
+                exception,
+                "Pinned move recovery marker {Marker} is temporarily unreadable",
+                LogRedaction.SanitizeFilePath(markerPath));
+            throw new IOException(
+                "The move recovery marker is temporarily unreadable and was preserved.",
+                exception);
+        }
+    }
+
+    private static ParsedRecoveryMarker ParseRecoveryMarkerContent(string content)
+    {
+        if (IsKnownRecoveryStage(content))
+        {
+            return new ParsedRecoveryMarker(
+                StructuredMarker: null,
+                ObsoleteStage: content);
+        }
+
+        MoveRecoveryMarker? marker;
+        try
+        {
+            marker = JsonSerializer.Deserialize<MoveRecoveryMarker>(content);
+        }
+        catch (JsonException exception)
+        {
+            throw new MoveNeedsAttentionException(
+                $"The move recovery marker is corrupt or truncated: {exception.Message}");
+        }
+
+        if (marker == null)
+        {
+            throw new MoveNeedsAttentionException(
+                "The move recovery marker is empty or corrupt.");
+        }
+
+        if (marker.Version != RecoveryMarkerVersion
+            || !IsKnownRecoveryStage(marker.Stage))
+        {
+            throw new MoveNeedsAttentionException(
+                "The move recovery marker uses an unsupported version or stage and was preserved.");
+        }
+
+        return new ParsedRecoveryMarker(marker, ObsoleteStage: null);
     }
 
     private static void ValidateRecoveryMarker(

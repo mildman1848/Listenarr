@@ -277,6 +277,16 @@ internal sealed partial class AudiobookContentMoveService(
                 return atomicResult;
             }
 
+            if (sourceRecoveryMarker != null)
+            {
+                await RetireSourceAtomicMarkerBeforeCopyFallbackAsync(
+                    request,
+                    source,
+                    target,
+                    sourceRecoveryMarkerPath,
+                    cancellationToken);
+            }
+
             ValidateMoveSourceRoot(source);
             ValidateMoveTargetRoot(target);
 
