@@ -10,37 +10,6 @@ internal static class LibraryDirectoryOwnershipMarker
     private const long MaximumBytes = 16 * 1024;
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
 
-    public static Task EnsureAsync(
-        LibraryDirectoryOwnership ownership,
-        CancellationToken cancellationToken) =>
-        EnsureAtDirectoryAsync(
-            ownership,
-            ownership.CanonicalPath,
-            cancellationToken);
-
-    public static async Task EnsureAtDirectoryAsync(
-        LibraryDirectoryOwnership ownership,
-        string directory,
-        CancellationToken cancellationToken)
-    {
-        ArgumentNullException.ThrowIfNull(ownership);
-        ValidateOwnershipToken(ownership.OwnershipToken);
-        ValidateDirectory(directory);
-        var payload = new MarkerPayload(
-            Version,
-            ownership.OwnershipToken,
-            ownership.CanonicalPath);
-        await EnsureMarkerFileAsync(
-            GetInsidePath(directory),
-            payload,
-            cancellationToken);
-        await EnsureMarkerFileAsync(
-            GetSiblingPath(ownership),
-            payload,
-            cancellationToken);
-        Validate(ownership, directory);
-    }
-
     public static void Validate(
         LibraryDirectoryOwnership ownership,
         string directory)
@@ -62,19 +31,103 @@ internal static class LibraryDirectoryOwnershipMarker
             && string.Equals(entries[0], markerPath, StringComparison.Ordinal);
     }
 
+    public static bool ContainsOnlyInsideMarker(
+        LibraryDirectoryOwnership ownership,
+        PinnedDirectoryCreation.PinnedDirectoryAnchor directory,
+        PinnedDirectoryCreation.PinnedDirectoryAnchor parent)
+    {
+        Validate(ownership, directory, parent);
+        var markerPath = Path.Join(directory.FullPath, FileName);
+        var entries = Directory.EnumerateFileSystemEntries(directory.FullPath)
+            .Take(2)
+            .ToList();
+        if (!directory.VisiblePathMatches() || !parent.VisiblePathMatches())
+        {
+            throw new InvalidOperationException(
+                "The durable ownership directory changed during enumeration.");
+        }
+
+        return entries.Count == 1
+            && string.Equals(entries[0], markerPath, StringComparison.Ordinal);
+    }
+
     public static void DeleteInsideMarker(
         LibraryDirectoryOwnership ownership,
         string directory)
     {
         Validate(ownership, directory);
-        File.Delete(GetInsidePath(directory));
+        DeleteValidatedMarker(ownership, GetInsidePath(directory));
+    }
+
+    public static void DeleteInsideMarker(
+        LibraryDirectoryOwnership ownership,
+        PinnedDirectoryCreation.PinnedDirectoryAnchor directory,
+        PinnedDirectoryCreation.PinnedDirectoryAnchor parent)
+    {
+        Validate(ownership, directory, parent);
+        using var marker = directory.OpenExistingFile(
+            FileName,
+            requireDeleteAccess: true);
+        ValidateMarkerFile(ownership, marker);
+        if (!directory.VisiblePathMatches() || !parent.VisiblePathMatches())
+        {
+            throw new InvalidOperationException(
+                "The durable ownership directory changed before marker retirement.");
+        }
+
+        ValidateMarkerFile(ownership, marker);
+        marker.Delete();
+    }
+
+    public static void Validate(
+        LibraryDirectoryOwnership ownership,
+        PinnedDirectoryCreation.PinnedDirectoryAnchor directory,
+        PinnedDirectoryCreation.PinnedDirectoryAnchor parent)
+    {
+        try
+        {
+            ValidatePinnedCore(ownership, directory, parent);
+        }
+        catch (Exception exception) when (exception is
+            IOException or UnauthorizedAccessException
+                or System.ComponentModel.Win32Exception
+                or NotSupportedException)
+        {
+            throw new InvalidOperationException(
+                "The durable directory ownership marker could not be pinned.",
+                exception);
+        }
+    }
+
+    private static void ValidatePinnedCore(
+        LibraryDirectoryOwnership ownership,
+        PinnedDirectoryCreation.PinnedDirectoryAnchor directory,
+        PinnedDirectoryCreation.PinnedDirectoryAnchor parent)
+    {
+        ArgumentNullException.ThrowIfNull(ownership);
+        using var inside = directory.OpenExistingFile(
+            FileName,
+            requireDeleteAccess: false);
+        using var sibling = parent.OpenExistingFile(
+            Path.GetFileName(GetSiblingPath(ownership)),
+            requireDeleteAccess: false);
+        ValidateMarkerFile(ownership, inside);
+        ValidateMarkerFile(ownership, sibling);
+        if (!directory.VisiblePathMatches() || !parent.VisiblePathMatches())
+        {
+            throw new InvalidOperationException(
+                "The durable ownership directory changed during marker validation.");
+        }
+
+        ValidateMarkerFile(ownership, inside);
+        ValidateMarkerFile(ownership, sibling);
     }
 
     public static void DeleteSiblingMarker(LibraryDirectoryOwnership ownership)
     {
         var markerPath = GetSiblingPath(ownership);
         ValidateMarkerFile(ownership, markerPath);
-        File.Delete(markerPath);
+        DeleteValidatedMarker(ownership, markerPath);
     }
 
     public static bool TryDeleteRetiredSiblingMarker(
@@ -91,7 +144,7 @@ internal static class LibraryDirectoryOwnershipMarker
         try
         {
             ValidateMarkerFile(ownership, markerPath);
-            File.Delete(markerPath);
+            DeleteValidatedMarker(ownership, markerPath);
             reason = null;
             return true;
         }
@@ -127,60 +180,6 @@ internal static class LibraryDirectoryOwnershipMarker
         }
     }
 
-    private static async Task EnsureMarkerFileAsync(
-        string markerPath,
-        MarkerPayload payload,
-        CancellationToken cancellationToken)
-    {
-        if (File.Exists(markerPath))
-        {
-            ValidateMarkerFile(payload, markerPath);
-            return;
-        }
-
-        var temporaryPath = markerPath + $".writing-{Guid.NewGuid():N}";
-        try
-        {
-            await File.WriteAllTextAsync(
-                temporaryPath,
-                JsonSerializer.Serialize(payload, JsonOptions),
-                cancellationToken);
-            await using (var stream = new FileStream(
-                temporaryPath,
-                FileMode.Open,
-                FileAccess.ReadWrite,
-                FileShare.None,
-                bufferSize: 4096,
-                FileOptions.Asynchronous | FileOptions.WriteThrough))
-            {
-                await stream.FlushAsync(cancellationToken);
-                stream.Flush(flushToDisk: true);
-            }
-
-            try
-            {
-                File.Move(temporaryPath, markerPath, overwrite: false);
-            }
-            catch (IOException) when (File.Exists(markerPath))
-            {
-                File.Delete(temporaryPath);
-            }
-
-            if (OperatingSystem.IsWindows())
-            {
-                File.SetAttributes(markerPath, File.GetAttributes(markerPath) | FileAttributes.Hidden);
-            }
-            ValidateMarkerFile(payload, markerPath);
-        }
-        finally
-        {
-            if (File.Exists(temporaryPath))
-            {
-                File.Delete(temporaryPath);
-            }
-        }
-    }
-
     private static void ValidateMarkerFile(
         LibraryDirectoryOwnership ownership,
         string markerPath) =>
@@ -191,6 +190,78 @@ internal static class LibraryDirectoryOwnershipMarker
                 ownership.CanonicalPath),
             markerPath,
             ownership.GetIdentity().Semantics);
+
+    private static void DeleteValidatedMarker(
+        LibraryDirectoryOwnership ownership,
+        string markerPath)
+    {
+        var parentPath = Path.GetDirectoryName(Path.GetFullPath(markerPath))
+            ?? throw new InvalidOperationException(
+                "The durable directory ownership marker has no parent.");
+        using var parent = PinnedDirectoryCreation.OpenPinnedDirectoryNoFollow(
+            parentPath);
+        using var marker = parent.OpenExistingFile(
+            Path.GetFileName(markerPath),
+            requireDeleteAccess: true);
+        ValidateMarkerFile(ownership, marker);
+        if (!parent.VisiblePathMatches() || !marker.VisiblePathMatches())
+        {
+            throw new InvalidOperationException(
+                "The durable directory ownership marker changed before retirement.");
+        }
+
+        ValidateMarkerFile(ownership, marker);
+        marker.Delete();
+    }
+
+    internal static void ValidateMarkerFile(
+        LibraryDirectoryOwnership ownership,
+        PinnedDirectoryCreation.PinnedFileEntry markerEntry)
+    {
+        using var stream = markerEntry.OpenReadStream(
+            bufferSize: 4096,
+            asynchronous: false);
+        if (stream.Length <= 0 || stream.Length > MaximumBytes)
+        {
+            throw new InvalidOperationException(
+                "The durable directory ownership marker has an invalid size.");
+        }
+
+        MarkerPayload? marker;
+        try
+        {
+            stream.Position = 0;
+            marker = JsonSerializer.Deserialize<MarkerPayload>(stream, JsonOptions);
+        }
+        catch (JsonException exception)
+        {
+            throw new InvalidOperationException(
+                "The durable directory ownership marker is invalid.",
+                exception);
+        }
+
+        var expected = new MarkerPayload(
+            Version,
+            ownership.OwnershipToken,
+            ownership.CanonicalPath);
+        var semantics = ownership.GetIdentity().Semantics;
+        var pathsMatch = marker != null
+            && FileSystemPathIdentity.AreEquivalent(
+                marker.CanonicalPath,
+                expected.CanonicalPath,
+                semantics);
+        if (marker == null
+            || marker.Version != Version
+            || !string.Equals(
+                marker.OwnershipToken,
+                expected.OwnershipToken,
+                StringComparison.Ordinal)
+            || !pathsMatch)
+        {
+            throw new InvalidOperationException(
+                "The durable directory ownership marker does not match the persisted ownership claim.");
+        }
+    }
 
     private static void ValidateMarkerFile(
         MarkerPayload expected,

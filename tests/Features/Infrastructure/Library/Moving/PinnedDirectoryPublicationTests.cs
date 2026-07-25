@@ -132,6 +132,44 @@ public sealed class PinnedDirectoryCreationTests : BaseTests
     }
 
     [Fact]
+    public async Task DeleteOpenedFile_UnixReplacementAtRetirementBoundary_IsPreserved()
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var parent = FileService.GetTempDirectory("pinned-file-delete-race");
+        var file = await FileService.GetFileAsync(parent, "marker.json", "owned");
+        var displaced = Path.Join(parent, "marker.original");
+        using var anchor = PinnedDirectoryCreation.OpenPinnedDirectoryNoFollow(parent);
+        using var entry = anchor.OpenExistingFile(
+            "marker.json",
+            requireDeleteAccess: true);
+        var replaced = false;
+        using var hook = ExclusiveDirectoryCreator.PushBeforeCreateHook(path =>
+        {
+            if (replaced
+                || !Path.GetFileName(path).StartsWith(
+                    ".listenarr-retire-",
+                    StringComparison.Ordinal))
+            {
+                return;
+            }
+
+            replaced = true;
+            File.Move(file, displaced, overwrite: false);
+            File.WriteAllText(file, "external");
+        });
+
+        Assert.ThrowsAny<Exception>(() => entry.Delete());
+
+        Assert.True(replaced);
+        Assert.Equal("owned", await File.ReadAllTextAsync(displaced));
+        Assert.Equal("external", await File.ReadAllTextAsync(file));
+    }
+
+    [Fact]
     public async Task MoveExistingFileTo_ExistingDestinationPreservesBothFiles()
     {
         var sourceParent = FileService.GetTempDirectory("pinned-file-move-collision-source");
@@ -207,5 +245,42 @@ public sealed class PinnedDirectoryCreationTests : BaseTests
             Directory.EnumerateFiles(parent)
                 .Select(path => File.ReadAllTextAsync(path)));
         Assert.Contains("external bytes", survivingContents);
+    }
+
+    [Fact]
+    public async Task PublishNewFileAsync_UnixTemporaryReplacement_IsDetectedAfterPublication()
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var parent = FileService.GetTempDirectory("pinned-file-publication-leaf-race");
+        var temporaryName = "marker.json.writing-test";
+        var temporaryPath = Path.Join(parent, temporaryName);
+        var displacedPath = temporaryPath + ".original";
+        var finalPath = Path.Join(parent, "marker.json");
+        using var anchor = PinnedDirectoryCreation.OpenPinnedDirectoryNoFollow(parent);
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            anchor.PublishNewFileAsync(
+                temporaryName,
+                "marker.json",
+                () => Task.CompletedTask,
+                async stream =>
+                {
+                    await stream.WriteAsync("owned bytes"u8.ToArray());
+                    stream.Flush(flushToDisk: true);
+                },
+                () =>
+                {
+                    File.Move(temporaryPath, displacedPath);
+                    File.WriteAllText(temporaryPath, "external bytes");
+                    return Task.CompletedTask;
+                },
+                _ => true));
+
+        Assert.Equal("owned bytes", await File.ReadAllTextAsync(displacedPath));
+        Assert.Equal("external bytes", await File.ReadAllTextAsync(finalPath));
     }
 }

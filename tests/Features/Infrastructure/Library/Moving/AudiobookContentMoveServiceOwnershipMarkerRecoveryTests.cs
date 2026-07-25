@@ -68,6 +68,42 @@ public partial class AudiobookContentMoveServiceTests
     }
 
     [Fact]
+    public async Task MoveContentsAsync_ReplacedRecoveredOwnershipWrite_IsPreserved()
+    {
+        var source = FileService.GetTempDirectory("content-move-recovered-marker-replacement-src");
+        await FileService.GetFileAsync(source, "book.m4b", "verified audio");
+        var target = Path.Join(
+            FileService.GetTempPath(),
+            $"content-move-recovered-marker-replacement-dst-{Guid.NewGuid():N}");
+        var request = await CreateLeasedMoveRequestAsync(source, target);
+        var faultingService = CreateOwnershipFaultingService(
+            OwnershipMarkerKind.TemporaryDirectory);
+        await Assert.ThrowsAnyAsync<IOException>(() =>
+            faultingService.MoveContentsAsync(request, CancellationToken.None));
+        var tempDirectory = Path.Join(
+            Path.GetDirectoryName(target)!,
+            Path.GetFileName(target) + ".tmp-" + request.JobId.ToString("N"));
+        var writePath = Assert.Single(Directory.EnumerateFiles(
+            tempDirectory,
+            ".listenarr-temp-owner.json.writing-*"));
+        var originalGeneration = writePath + ".original";
+        var replacement = await File.ReadAllTextAsync(writePath);
+        var recoveryService = CreateMoveService(
+            new ReplaceRecoveredOwnershipWrite(
+                writePath,
+                originalGeneration,
+                replacement));
+
+        await Assert.ThrowsAsync<MoveNeedsAttentionException>(() =>
+            recoveryService.MoveContentsAsync(request, CancellationToken.None));
+
+        Assert.Equal(replacement, await File.ReadAllTextAsync(writePath));
+        Assert.Equal(replacement, await File.ReadAllTextAsync(originalGeneration));
+        Assert.False(File.Exists(Path.Join(tempDirectory, ".listenarr-temp-owner.json")));
+        Assert.True(File.Exists(Path.Join(source, "book.m4b")));
+    }
+
+    [Fact]
     public async Task ResumeSourceCleanup_InterruptedQuarantineOwnershipPublication_RecoversOrphanWriteMarker()
     {
         var source = FileService.GetTempDirectory("content-move-quarantine-marker-recovery-src");
@@ -352,6 +388,31 @@ public partial class AudiobookContentMoveServiceTests
             {
                 throw new IOException($"Simulated ownership publication failure at {faultPoint}.");
             }
+        }
+    }
+
+    private sealed class ReplaceRecoveredOwnershipWrite(
+        string writePath,
+        string originalGeneration,
+        string replacement) : IMoveFaultInjector
+    {
+        private bool _replaced;
+
+        public void OnOwnershipMarkerWrite(
+            Guid jobId,
+            OwnershipMarkerKind markerKind,
+            OwnershipMarkerWriteFaultPoint faultPoint)
+        {
+            if (_replaced
+                || markerKind != OwnershipMarkerKind.TemporaryDirectory
+                || faultPoint != OwnershipMarkerWriteFaultPoint.BeforeRecoveredPublication)
+            {
+                return;
+            }
+
+            File.Move(writePath, originalGeneration);
+            File.WriteAllText(writePath, replacement);
+            _replaced = true;
         }
     }
 }

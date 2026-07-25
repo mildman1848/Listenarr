@@ -373,7 +373,25 @@ internal sealed partial class AudiobookContentMoveService
             request.SourceSemantics,
             request.TargetSemantics,
             request.TargetSemantics);
-        File.Delete(ownership.MarkerPath);
+        await RetirePinnedArtifactAsync(
+            ownership.MarkerPath,
+            entry =>
+            {
+                var pinnedMarker = ReadOwnershipMarker(
+                    entry,
+                    ownership.MarkerPath);
+                ValidateOwnershipMarker(
+                    pinnedMarker,
+                    ownership.Marker,
+                    request.SourceSemantics,
+                    request.TargetSemantics,
+                    request.TargetSemantics);
+            },
+            () => EnsureMutationAuthorizedAsync(
+                request,
+                source,
+                target,
+                cancellationToken));
     }
 
     private async Task TryRemoveNewEmptyOwnershipDirectoryAsync(

@@ -1,4 +1,5 @@
 using Microsoft.Extensions.Logging;
+using System.Security.Cryptography;
 
 namespace Listenarr.Infrastructure.FileSystem;
 
@@ -41,23 +42,41 @@ public partial class FileMover
         string destinationRoot,
         Action? afterDestinationVerified = null)
     {
-        if (!FileSystemSafety.TryEnumerateTreeWithoutLinks(
+        if (!TryCaptureDirectoryCopySnapshot(
                 sourceRoot,
-                out var sourceFiles,
-                out var sourceDirectories,
-                out var reason))
+                out var snapshot,
+                out var reason)
+            || snapshot == null)
         {
             return new DirectoryCopyCleanupResult(false, false, reason);
         }
 
-        foreach (var sourceFile in sourceFiles)
+        return await CleanupCopiedSourceTreeAsync(
+            snapshot,
+            destinationRoot,
+            afterDestinationVerified);
+    }
+
+    private async Task<DirectoryCopyCleanupResult> CleanupCopiedSourceTreeAsync(
+        DirectoryCopySnapshot snapshot,
+        string destinationRoot,
+        Action? afterDestinationVerified = null)
+    {
+        var sourceRoot = snapshot.SourceRoot;
+        foreach (var fileSnapshot in snapshot.Files)
         {
+            var sourceFile = ResolveSnapshotPath(
+                sourceRoot,
+                fileSnapshot.RelativePath,
+                "source cleanup file");
             if (!TryMapCopiedPath(
                     sourceRoot,
                     destinationRoot,
                     sourceFile,
                     out var destinationFile)
                 || !File.Exists(destinationFile)
+                || !TryGetRegularFileIdentity(sourceFile, out var currentIdentity)
+                || currentIdentity != fileSnapshot.Identity
                 || !await FileSystemSafety.FilesHaveSameContentAsync(
                     sourceFile,
                     destinationFile))
@@ -72,8 +91,12 @@ public partial class FileMover
         afterDestinationVerified?.Invoke();
 
         var sourceChanged = false;
-        foreach (var sourceFile in sourceFiles)
+        foreach (var fileSnapshot in snapshot.Files)
         {
+            var sourceFile = ResolveSnapshotPath(
+                sourceRoot,
+                fileSnapshot.RelativePath,
+                "source cleanup file");
             if (!File.Exists(sourceFile))
             {
                 continue;
@@ -88,28 +111,37 @@ public partial class FileMover
                     sourceRoot,
                     destinationRoot,
                     sourceFile,
-                    destinationFile))
+                    destinationFile,
+                    fileSnapshot.Identity))
             {
                 sourceChanged = true;
             }
         }
 
-        foreach (var sourceDirectory in sourceDirectories
+        foreach (var sourceDirectory in snapshot.RelativeDirectories
+            .Select(path => ResolveSnapshotPath(
+                sourceRoot,
+                path,
+                "source cleanup directory"))
             .OrderByDescending(path => path.Length))
         {
-            if (!FileSystemSafety.TryDeleteEmptyDirectory(
+            var relativeDirectory = GetVerifiedRelativePath(
+                sourceRoot,
+                sourceDirectory);
+            if (!snapshot.DirectoryIdentities.TryGetValue(
+                    relativeDirectory,
+                    out var expectedIdentity)
+                || !TryDeletePinnedEmptyDirectory(
                     sourceDirectory,
-                    [sourceRoot],
-                    out _))
+                    expectedIdentity))
             {
                 sourceChanged = true;
             }
         }
 
-        if (!FileSystemSafety.TryDeleteEmptyDirectory(
+        if (!TryDeletePinnedEmptyDirectory(
                 sourceRoot,
-                [sourceRoot],
-                out var rootReason))
+                snapshot.SourceRootIdentity))
         {
             sourceChanged = true;
         }
@@ -122,16 +154,16 @@ public partial class FileMover
                 ? null
                 : sourceChanged
                     ? "The destination was copied, but new or changed source content was preserved."
-                    : rootReason);
+                    : "The verified source root could not be removed.");
     }
 
     private async Task<bool> TryRemoveVerifiedCopiedFileAsync(
         string sourceRoot,
         string destinationRoot,
         string sourceFile,
-        string destinationFile)
+        string destinationFile,
+        RegularFileIdentity expectedIdentity)
     {
-        var quarantinePath = $"{sourceFile}{CopyCleanupMarker}{Guid.NewGuid():N}";
         try
         {
             if (!FileSystemSafety.TryValidateMutationTarget(
@@ -144,11 +176,6 @@ public partial class FileMover
                     [destinationRoot],
                     out destinationFile,
                     out _)
-                || !FileSystemSafety.TryValidateMutationTarget(
-                    quarantinePath,
-                    [sourceRoot],
-                    out quarantinePath,
-                    out _)
                 || !File.Exists(destinationFile)
                 || (File.GetAttributes(sourceFile) & FileAttributes.ReparsePoint) != 0
                 || (File.GetAttributes(destinationFile) & FileAttributes.ReparsePoint) != 0)
@@ -156,62 +183,57 @@ public partial class FileMover
                 return false;
             }
 
-            File.Move(sourceFile, quarantinePath, overwrite: false);
-            if ((File.GetAttributes(quarantinePath) & FileAttributes.ReparsePoint) != 0
-                || !File.Exists(destinationFile)
-                || (File.GetAttributes(destinationFile) & FileAttributes.ReparsePoint) != 0
-                || !await FileSystemSafety.FilesHaveSameContentAsync(
-                    quarantinePath,
-                    destinationFile))
+            var sourceParentPath = Path.GetDirectoryName(sourceFile)
+                ?? throw new InvalidOperationException(
+                    "The copied source file parent is unavailable.");
+            var destinationParentPath = Path.GetDirectoryName(destinationFile)
+                ?? throw new InvalidOperationException(
+                    "The copied destination file parent is unavailable.");
+            using var sourceParent =
+                PinnedDirectoryCreation.OpenPinnedDirectoryNoFollow(sourceParentPath);
+            using var sourceEntry = sourceParent.OpenExistingFile(
+                Path.GetFileName(sourceFile),
+                requireDeleteAccess: true);
+            using var sourceHandle = sourceEntry.DuplicateHandleForOperation();
+            if (!TryGetRegularFileIdentity(sourceHandle, out var pinnedIdentity)
+                || pinnedIdentity != expectedIdentity)
             {
-                TryRestoreQuarantinedSourceFile(sourceFile, quarantinePath);
                 return false;
             }
 
-            File.Delete(quarantinePath);
+            using var destinationParent =
+                PinnedDirectoryCreation.OpenPinnedDirectoryNoFollow(destinationParentPath);
+            using var destinationEntry = destinationParent.OpenExistingFile(
+                Path.GetFileName(destinationFile),
+                requireDeleteAccess: false);
+            await using var sourceStream = sourceEntry.OpenReadStream(
+                bufferSize: 128 * 1024,
+                asynchronous: false);
+            var length = sourceStream.Length;
+            var hash = await SHA256.HashDataAsync(sourceStream);
+            if (!await destinationEntry.MatchesAsync(
+                    length,
+                    Convert.ToHexString(hash),
+                    CancellationToken.None)
+                || !sourceParent.VisiblePathMatches()
+                || !destinationParent.VisiblePathMatches()
+                || !sourceEntry.VisiblePathMatches()
+                || !destinationEntry.VisiblePathMatches())
+            {
+                return false;
+            }
+
+            sourceEntry.Delete();
             return true;
         }
         catch (Exception exception) when (exception is
             IOException or UnauthorizedAccessException or InvalidOperationException)
         {
-            TryRestoreQuarantinedSourceFile(sourceFile, quarantinePath);
             _logger.LogDebug(
                 exception,
                 "Preserved source file after directory copy because verified cleanup did not complete: {Source}",
                 LogRedaction.SanitizeFilePath(sourceFile));
             return false;
-        }
-    }
-
-    private void TryRestoreQuarantinedSourceFile(
-        string sourceFile,
-        string quarantinePath)
-    {
-        if (!File.Exists(quarantinePath))
-        {
-            return;
-        }
-
-        try
-        {
-            if (!File.Exists(sourceFile) && !Directory.Exists(sourceFile))
-            {
-                File.Move(quarantinePath, sourceFile, overwrite: false);
-                return;
-            }
-
-            _logger.LogWarning(
-                "Preserved quarantined source file {Quarantine} because the original path was recreated at {Source}",
-                LogRedaction.SanitizeFilePath(quarantinePath),
-                LogRedaction.SanitizeFilePath(sourceFile));
-        }
-        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
-        {
-            _logger.LogWarning(
-                exception,
-                "Unable to restore quarantined source file {Quarantine} to {Source}; both paths were preserved",
-                LogRedaction.SanitizeFilePath(quarantinePath),
-                LogRedaction.SanitizeFilePath(sourceFile));
         }
     }
 
@@ -228,6 +250,45 @@ public partial class FileMover
         var token = path[(markerIndex + CopyCleanupMarker.Length)..];
         return token.Length == 32
             && Guid.TryParseExact(token, "N", out _);
+    }
+
+    private static bool TryDeletePinnedEmptyDirectory(
+        string directoryPath,
+        RegularFileIdentity expectedIdentity)
+    {
+        try
+        {
+            var fullPath = Path.GetFullPath(directoryPath);
+            var parentPath = Path.GetDirectoryName(fullPath);
+            if (string.IsNullOrWhiteSpace(parentPath))
+            {
+                return false;
+            }
+
+            var childName = Path.GetFileName(fullPath);
+            using var directory = PinnedDirectoryCreation.OpenExistingForPublication(
+                parentPath,
+                childName);
+            using var anchor = directory.OpenCreatedDirectoryAnchor();
+            using var handle = anchor.DuplicateHandleForOperation();
+            if (!TryGetRegularFileIdentity(handle, out var currentIdentity)
+                || currentIdentity != expectedIdentity
+                || Directory.EnumerateFileSystemEntries(fullPath).Any()
+                || !directory.VisiblePathMatches()
+                || !anchor.VisiblePathMatches())
+            {
+                return false;
+            }
+
+            directory.DeletePinnedEmptyDirectory(childName);
+            return true;
+        }
+        catch (Exception exception) when (exception is
+            IOException or UnauthorizedAccessException or InvalidOperationException
+                or System.ComponentModel.Win32Exception)
+        {
+            return false;
+        }
     }
 
     private static bool TryMapCopiedPath(

@@ -54,6 +54,21 @@ internal sealed partial class PinnedDirectoryCreation
                     finalFileName);
                 published = true;
                 EnsureVisiblePathMatches();
+                using var finalHandle = OperatingSystem.IsWindows()
+                    ? OpenRelativeFileWindows(
+                        _handle,
+                        finalFileName,
+                        Path.Join(FullPath, finalFileName),
+                        requireDeleteAccess: false)
+                    : OpenRelativeFileUnix(
+                        _handle,
+                        finalFileName,
+                        Path.Join(FullPath, finalFileName));
+                if (!HandlesIdentifySameDirectory(fileHandle, finalHandle))
+                {
+                    throw new InvalidOperationException(
+                        "The published file does not identify the newly created pinned file.");
+                }
             }
             catch (Exception exception)
             {

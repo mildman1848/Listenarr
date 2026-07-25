@@ -94,7 +94,16 @@ internal sealed partial class AudiobookContentMoveService
         string destinationRoot)
     {
         ValidateExistingOwnedFile(path, destinationRoot);
-        File.Delete(path);
+        if (!FileSystemSafety.TryDeleteFile(
+                path,
+                [destinationRoot],
+                out var reason))
+        {
+            throw new MoveNeedsAttentionException(
+                string.IsNullOrWhiteSpace(reason)
+                    ? "An owned move file changed before pinned deletion."
+                    : reason);
+        }
     }
 
     private static async Task ValidateSourceCopyPathAsync(

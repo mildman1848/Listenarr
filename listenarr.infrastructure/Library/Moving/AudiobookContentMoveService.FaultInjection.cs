@@ -24,6 +24,7 @@ internal enum OwnershipMarkerWriteFaultPoint
     DuringFlush,
     AfterTemporaryFileWritten,
     BeforePublication,
+    BeforeRecoveredPublication,
     BeforeTemporaryFileDeletion
 }
 
@@ -33,6 +34,7 @@ internal enum SourceCleanupFaultPoint
     BeforeSourceFilePublication,
     BeforeQuarantineFileDelete,
     BeforeQuarantineFileRemoval,
+    BeforeEmptySourceDirectoryQuarantine,
     AfterEmptySourceDirectoryQuarantine
 }
 

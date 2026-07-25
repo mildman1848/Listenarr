@@ -27,27 +27,8 @@ public partial class FileMover
             return FileMoveFallbackOutcome.CopyFailed;
         }
 
-        var stagingPath = Path.Join(
-            destinationDirectory,
-            $".{Path.GetFileName(destinationFile)}.listenarr-move-{Guid.NewGuid():N}.partial");
-        var stagingCreated = false;
-        var destinationPublished = false;
         try
         {
-            File.Copy(sourceFile, stagingPath, overwrite: false);
-            stagingCreated = true;
-            if (IsLinkedOrUnverifiableEntry(sourceFile)
-                || IsLinkedOrUnverifiableEntry(stagingPath)
-                || !await FileSystemSafety.FilesHaveSameContentAsync(
-                    sourceFile,
-                    stagingPath))
-            {
-                return FileMoveFallbackOutcome.CopyFailed;
-            }
-
-            File.Move(stagingPath, destinationFile, overwrite: true);
-            stagingCreated = false;
-            destinationPublished = true;
             return await TryRemoveVerifiedFileMoveSourceAsync(
                 sourceFile,
                 destinationFile,
@@ -62,16 +43,7 @@ public partial class FileMover
                 "Verified file move fallback failed for {Source} -> {Destination}",
                 LogRedaction.SanitizeFilePath(sourceFile),
                 LogRedaction.SanitizeFilePath(destinationFile));
-            return destinationPublished
-                ? FileMoveFallbackOutcome.SourceRetained
-                : FileMoveFallbackOutcome.CopyFailed;
-        }
-        finally
-        {
-            if (stagingCreated)
-            {
-                TryDeleteFileMoveStagingPath(stagingPath);
-            }
+            return FileMoveFallbackOutcome.CopyFailed;
         }
     }
 
@@ -167,13 +139,13 @@ public partial class FileMover
                 return FileMoveFallbackOutcome.CopyFailed;
             }
 
-            File.Move(stagedFile, destinationFile, overwrite: true);
-            destinationPublished = true;
-            return await TryRemoveVerifiedFileMoveSourceAsync(
+            var outcome = await TryRemoveVerifiedFileMoveSourceAsync(
                 sourceFile,
                 destinationFile,
                 sourceIdentity,
                 destinationIdentity);
+            destinationPublished = outcome == FileMoveFallbackOutcome.Success;
+            return outcome;
         }
         catch (Exception exception) when (exception is not (
             OperationCanceledException or OutOfMemoryException or StackOverflowException))
@@ -293,8 +265,13 @@ public partial class FileMover
             destinationFile,
             sourceIdentity,
             destinationIdentity);
-        return removalOutcome == VerifiedFileMoveRemovalOutcome.Removed
-            ? FileMoveFallbackOutcome.Success
+        if (removalOutcome == VerifiedFileMoveRemovalOutcome.Removed)
+        {
+            return FileMoveFallbackOutcome.Success;
+        }
+
+        return File.Exists(sourceFile) && !File.Exists(destinationFile)
+            ? FileMoveFallbackOutcome.CopyFailed
             : FileMoveFallbackOutcome.SourceRetained;
     }
 

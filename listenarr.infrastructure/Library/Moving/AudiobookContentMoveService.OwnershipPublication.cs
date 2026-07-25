@@ -48,119 +48,16 @@ internal sealed partial class AudiobookContentMoveService
             return;
         }
 
-        try
-        {
-            await authorizeMutation();
-            ValidateNewOwnershipMarkerWritePath(writePath, markerDirectory);
-            faultInjector?.OnOwnershipMarkerWrite(
-                marker.JobId,
-                markerKind,
-                OwnershipMarkerWriteFaultPoint.BeforeTemporaryFileCreation);
-            using (var stream = new FileStream(
-                writePath,
-                FileMode.CreateNew,
-                FileAccess.Write,
-                FileShare.None,
-                bufferSize: 4096,
-                FileOptions.WriteThrough))
-            {
-                var split = Math.Max(1, payload.Length / 2);
-                stream.Write(payload.AsSpan(0, split));
-                faultInjector?.OnOwnershipMarkerWrite(
-                    marker.JobId,
-                    markerKind,
-                    OwnershipMarkerWriteFaultPoint.DuringJsonWrite);
-                stream.Write(payload.AsSpan(split));
-                faultInjector?.OnOwnershipMarkerWrite(
-                    marker.JobId,
-                    markerKind,
-                    OwnershipMarkerWriteFaultPoint.DuringFlush);
-                await authorizeMutation();
-                stream.Flush(flushToDisk: true);
-            }
-
-            faultInjector?.OnOwnershipMarkerWrite(
-                marker.JobId,
-                markerKind,
-                OwnershipMarkerWriteFaultPoint.AfterTemporaryFileWritten);
-            faultInjector?.OnOwnershipMarkerWrite(
-                marker.JobId,
-                markerKind,
-                OwnershipMarkerWriteFaultPoint.BeforePublication);
-            await authorizeMutation();
-
-            if (OperatingSystem.IsWindows())
-            {
-                File.SetAttributes(
-                    writePath,
-                    File.GetAttributes(writePath) | FileAttributes.Hidden);
-            }
-
-            ValidateOwnershipMarkerPublicationPaths(
-                markerDirectory,
-                writePath,
-                markerPath);
-            await authorizeMutation();
-            ValidateOwnershipMarkerPublicationPaths(
-                markerDirectory,
-                writePath,
-                markerPath);
-            File.Move(writePath, markerPath, overwrite: false);
-        }
-        catch (Exception exception) when (exception is MoveLeaseLostException or PersistenceException)
-        {
-            throw;
-        }
-        catch (Exception exception) when (WorkerExceptionClassifier.IsNonFatal(exception))
-        {
-            Exception? cleanupException = null;
-            try
-            {
-                faultInjector?.OnOwnershipMarkerWrite(
-                    marker.JobId,
-                    markerKind,
-                    OwnershipMarkerWriteFaultPoint.BeforeTemporaryFileDeletion);
-                if (File.Exists(writePath))
-                {
-                    await authorizeMutation();
-                    ValidateOwnershipMarkerWritePath(writePath, markerDirectory);
-                    File.Delete(writePath);
-                }
-            }
-            catch (Exception temporaryCleanupException) when (temporaryCleanupException is
-                MoveLeaseLostException or PersistenceException)
-            {
-                throw;
-            }
-            catch (Exception temporaryCleanupException) when (WorkerExceptionClassifier.IsNonFatal(temporaryCleanupException))
-            {
-                cleanupException = temporaryCleanupException;
-            }
-
-            if (exception is MoveNeedsAttentionException)
-            {
-                throw;
-            }
-
-            if (cleanupException is MoveNeedsAttentionException)
-            {
-                throw new MoveNeedsAttentionException(
-                    $"Ownership marker publication failed and its temporary file became ambiguous. "
-                    + $"Publication error: {exception.Message}. "
-                    + $"Temporary cleanup error: {cleanupException.Message}.");
-            }
-
-            if (cleanupException != null)
-            {
-                throw new IOException(
-                    $"Ownership marker publication failed and its validated temporary file could not be removed. "
-                    + $"Publication error: {exception.Message}. "
-                    + $"Temporary cleanup error: {cleanupException.Message}.",
-                    cleanupException);
-            }
-
-            throw;
-        }
+        using var markerDirectoryAnchor =
+            PinnedDirectoryCreation.OpenPinnedDirectoryNoFollow(markerDirectory);
+        await PublishPinnedOwnershipMarkerAsync(
+            markerDirectoryAnchor,
+            markerPath,
+            writePath,
+            payload,
+            marker,
+            markerKind,
+            authorizeMutation);
     }
 
     private async Task PublishPinnedOwnershipMarkerAsync(

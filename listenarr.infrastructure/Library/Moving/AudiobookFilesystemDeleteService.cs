@@ -232,37 +232,34 @@ namespace Listenarr.Infrastructure.Library.Moving
             return paths.ToList();
         }
 
-        private void TryDeleteFile(string path, AudiobookFilesystemDeleteResult result, IEnumerable<string>? allowedRoots = null)
+        private void TryDeleteFile(
+            string path,
+            AudiobookFilesystemDeleteResult result,
+            IEnumerable<string> allowedRoots)
         {
-            try
+            if (!File.Exists(path))
             {
-                if (!File.Exists(path))
-                {
-                    return;
-                }
-
-                var originalPath = path;
-                if (allowedRoots != null
-                    && !FileSystemSafety.TryValidateMutationTarget(path, allowedRoots, out path, out var reason))
-                {
-                    result.Warnings.Add("Refused to delete a file outside the allowed library roots.");
-                    _logger.LogWarning(
-                        "Blocked audiobook file delete for {Path}: {Reason}",
-                        LogRedaction.SanitizeFilePath(originalPath),
-                        LogRedaction.SanitizeText(reason));
-                    return;
-                }
-
-                File.Delete(path);
-                result.DeletedFiles++;
-                _logger.LogInformation("Deleted audiobook file {Path}", LogRedaction.SanitizeFilePath(path));
+                return;
             }
-            catch (Exception ex) when (ex is IOException || ex is UnauthorizedAccessException)
+
+            if (!FileSystemSafety.TryDeleteFile(
+                    path,
+                    allowedRoots,
+                    out var reason))
             {
                 var warning = $"Could not delete file '{Path.GetFileName(path)}'.";
                 result.Warnings.Add(warning);
-                _logger.LogWarning(ex, "Failed to delete audiobook file {Path}", LogRedaction.SanitizeFilePath(path));
+                _logger.LogWarning(
+                    "Blocked audiobook file delete for {Path}: {Reason}",
+                    LogRedaction.SanitizeFilePath(path),
+                    LogRedaction.SanitizeText(reason));
+                return;
             }
+
+            result.DeletedFiles++;
+            _logger.LogInformation(
+                "Deleted audiobook file {Path}",
+                LogRedaction.SanitizeFilePath(path));
         }
 
         private bool TryDeleteFolderContents(

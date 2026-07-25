@@ -225,32 +225,23 @@ internal sealed partial class AudiobookContentMoveService
         {
             if (File.Exists(atomicMarkerPath))
             {
-                ValidateMoveSourceRoot(source);
-                if (!FileSystemSafety.TryValidateMutationTarget(
-                        atomicMarkerPath,
-                        [source],
-                        out atomicMarkerPath,
-                        out var markerReason))
-                {
-                    throw new MoveNeedsAttentionException(markerReason);
-                }
-
-                if ((File.GetAttributes(atomicMarkerPath) & FileAttributes.ReparsePoint) != 0)
-                {
-                    throw new MoveNeedsAttentionException(
-                        "The failed atomic recovery marker became a symbolic link or reparse point.");
-                }
-
-                await EnsureMutationAuthorizedAsync(request, source, target, cancellationToken);
-                ValidateMoveSourceRoot(source);
-                ValidateExistingRecoveryMarkerForStage(
-                    source,
+                await RetirePinnedArtifactAsync(
                     atomicMarkerPath,
-                    request,
-                    source,
-                    target,
-                    AtomicRenameCompletedStage);
-                File.Delete(atomicMarkerPath);
+                    entry =>
+                    {
+                        ValidateMoveSourceRoot(source);
+                        ValidatePinnedAtomicMarker(
+                            entry,
+                            atomicMarkerPath,
+                            request,
+                            source,
+                            target);
+                    },
+                    () => EnsureMutationAuthorizedAsync(
+                        request,
+                        source,
+                        target,
+                        cancellationToken));
             }
         }
         catch (Exception exception) when (exception is MoveLeaseLostException or PersistenceException)

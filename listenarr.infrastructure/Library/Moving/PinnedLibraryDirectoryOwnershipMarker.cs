@@ -18,7 +18,7 @@ internal static class PinnedLibraryDirectoryOwnershipMarker
         if (!creation.Created || !creation.VisiblePathMatches())
         {
             throw new InvalidOperationException(
-                "The newly created directory is no longer reachable through its validated pathname.");
+                "The pinned directory is no longer reachable through its validated pathname.");
         }
 
         var payload = JsonSerializer.Serialize(
@@ -27,19 +27,95 @@ internal static class PinnedLibraryDirectoryOwnershipMarker
                 ownership.OwnershipToken,
                 ownership.CanonicalPath),
             JsonOptions);
-        await creation.WriteInsideFileAsync(
+        using var directory = creation.OpenCreatedDirectoryAnchor();
+        using var parent = creation.OpenParentDirectoryAnchor();
+        await EnsureMarkerAsync(
+            ownership,
+            directory,
             LibraryDirectoryOwnershipMarker.FileName,
             payload,
             cancellationToken);
-        await creation.WriteParentFileAsync(
+        await EnsureMarkerAsync(
+            ownership,
+            parent,
             $".listenarr-directory-owner-{ownership.OwnershipToken}.json",
             payload,
             cancellationToken);
 
-        if (!creation.VisiblePathMatches())
+        if (!creation.VisiblePathMatches()
+            || !directory.VisiblePathMatches()
+            || !parent.VisiblePathMatches())
         {
             throw new InvalidOperationException(
-                "The newly created directory pathname changed during ownership publication.");
+                "The pinned directory pathname changed during ownership publication.");
+        }
+    }
+
+    private static async Task EnsureMarkerAsync(
+        LibraryDirectoryOwnership ownership,
+        PinnedDirectoryCreation.PinnedDirectoryAnchor parent,
+        string fileName,
+        string payload,
+        CancellationToken cancellationToken)
+    {
+        var markerPath = Path.Join(parent.FullPath, fileName);
+        if (File.Exists(markerPath))
+        {
+            ValidateExistingMarker(ownership, parent, fileName);
+            return;
+        }
+
+        var temporaryName = fileName + $".writing-{Guid.NewGuid():N}";
+        try
+        {
+            await parent.PublishNewFileAsync(
+                temporaryName,
+                fileName,
+                () =>
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    return Task.CompletedTask;
+                },
+                async stream =>
+                {
+                    var bytes = System.Text.Encoding.UTF8.GetBytes(payload);
+                    await stream.WriteAsync(bytes, cancellationToken);
+                    await stream.FlushAsync(cancellationToken);
+                    stream.Flush(flushToDisk: true);
+                },
+                () =>
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    return Task.CompletedTask;
+                },
+                _ => false);
+        }
+        catch (Exception exception) when (
+            (exception is IOException
+                or InvalidOperationException
+                or System.ComponentModel.Win32Exception)
+            && File.Exists(markerPath))
+        {
+            ValidateExistingMarker(ownership, parent, fileName);
+            return;
+        }
+
+        ValidateExistingMarker(ownership, parent, fileName);
+    }
+
+    private static void ValidateExistingMarker(
+        LibraryDirectoryOwnership ownership,
+        PinnedDirectoryCreation.PinnedDirectoryAnchor parent,
+        string fileName)
+    {
+        using var marker = parent.OpenExistingFile(
+            fileName,
+            requireDeleteAccess: false);
+        LibraryDirectoryOwnershipMarker.ValidateMarkerFile(ownership, marker);
+        if (!parent.VisiblePathMatches() || !marker.VisiblePathMatches())
+        {
+            throw new InvalidOperationException(
+                "The durable ownership marker changed during pinned validation.");
         }
     }
 

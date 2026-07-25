@@ -231,7 +231,16 @@ internal sealed partial class AudiobookContentMoveService
                 "An empty source directory changed before deletion.");
         }
 
-        Directory.Delete(directory, recursive: false);
+        if (!FileSystemSafety.TryDeleteEmptyDirectory(
+                directory,
+                [source],
+                out reason))
+        {
+            throw new MoveNeedsAttentionException(
+                string.IsNullOrWhiteSpace(reason)
+                    ? "The empty source directory changed before pinned deletion."
+                    : reason);
+        }
     }
 
     private static void DeleteValidatedEmptyQuarantineDirectory(
@@ -247,7 +256,16 @@ internal sealed partial class AudiobookContentMoveService
                 "An empty quarantine directory changed before deletion.");
         }
 
-        Directory.Delete(directory, recursive: false);
+        if (!FileSystemSafety.TryDeleteEmptyDirectory(
+                directory,
+                [ownership.DirectoryPath],
+                out var reason))
+        {
+            throw new MoveNeedsAttentionException(
+                string.IsNullOrWhiteSpace(reason)
+                    ? "The empty quarantine directory changed before pinned deletion."
+                    : reason);
+        }
     }
 
 }

@@ -5,6 +5,31 @@ namespace Listenarr.Tests.Features.Infrastructure.Library.Moving;
 public partial class AudiobookContentMoveServiceTests
 {
     [Fact]
+    public async Task MoveContentsAsync_EmptySourceGenerationReplacedBeforeQuarantine_IsPreserved()
+    {
+        var source = FileService.GetTempDirectory("content-move-empty-root-replacement-src");
+        await FileService.GetFileAsync(source, "book.m4b", "verified audio");
+        var originalGeneration = source + $"-original-{Guid.NewGuid():N}";
+        var target = Path.Join(
+            FileService.GetTempPath(),
+            $"content-move-empty-root-replacement-dst-{Guid.NewGuid():N}");
+        var request = await CreateLeasedMoveRequestAsync(source, target);
+        var service = new AudiobookContentMoveService(
+            _provider.GetRequiredService<ILogger<AudiobookContentMoveService>>(),
+            _provider.GetRequiredService<IDbContextFactory<ListenArrDbContext>>(),
+            TimeProvider.System,
+            new ReplaceEmptySourceBeforeQuarantine(source, originalGeneration));
+
+        await Assert.ThrowsAsync<MoveNeedsAttentionException>(() =>
+            service.MoveContentsAsync(request, CancellationToken.None));
+
+        Assert.True(Directory.Exists(source));
+        Assert.Empty(Directory.EnumerateFileSystemEntries(source));
+        Assert.True(Directory.Exists(originalGeneration));
+        Assert.True(File.Exists(Path.Join(target, "book.m4b")));
+    }
+
+    [Fact]
     public async Task MoveContentsAsync_SourceRootReplacedBeforeQuarantineMove_PreservesExternalFile()
     {
         var capabilityParent = FileService.GetTempDirectory("content-move-cleanup-race-capability");
@@ -367,6 +392,28 @@ public partial class AudiobookContentMoveServiceTests
                 throw new IOException("The source replacement link could not be created.");
             }
 
+            _replaced = true;
+        }
+    }
+
+    private sealed class ReplaceEmptySourceBeforeQuarantine(
+        string source,
+        string originalGeneration) : IMoveFaultInjector
+    {
+        private bool _replaced;
+
+        public void OnSourceCleanupMutation(
+            Guid jobId,
+            SourceCleanupFaultPoint faultPoint)
+        {
+            if (_replaced
+                || faultPoint != SourceCleanupFaultPoint.BeforeEmptySourceDirectoryQuarantine)
+            {
+                return;
+            }
+
+            Directory.Move(source, originalGeneration);
+            Directory.CreateDirectory(source);
             _replaced = true;
         }
     }

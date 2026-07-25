@@ -79,7 +79,19 @@ internal sealed partial class AudiobookContentMoveService
         var markerPath = Path.Join(publishedRoot, ScaffoldOwnerFileName);
         if (File.Exists(markerPath))
         {
-            File.Delete(markerPath);
+            await RetirePinnedArtifactAsync(
+                markerPath,
+                entry => ValidateScaffoldMarker(
+                    ReadScaffoldMarker(entry),
+                    request.JobId,
+                    request.Target,
+                    publishedRoot,
+                    request.TargetSemantics),
+                () => EnsureMutationAuthorizedAsync(
+                    request,
+                    request.Source,
+                    request.Target,
+                    cancellationToken));
         }
     }
 
@@ -228,7 +240,19 @@ internal sealed partial class AudiobookContentMoveService
             var markerPath = Path.Join(publishedRoot, ScaffoldOwnerFileName);
             if (File.Exists(markerPath))
             {
-                File.Delete(markerPath);
+                await RetirePinnedArtifactAsync(
+                    markerPath,
+                    entry => ValidateScaffoldMarker(
+                        ReadScaffoldMarker(entry),
+                        request.JobId,
+                        request.Target,
+                        publishedRoot,
+                        request.TargetSemantics),
+                    () => EnsureMutationAuthorizedAsync(
+                        request,
+                        request.Source,
+                        request.Target,
+                        cancellationToken));
             }
             return;
         }
@@ -246,30 +270,40 @@ internal sealed partial class AudiobookContentMoveService
         faultInjector?.OnTargetScaffoldCleanup(
             request.JobId,
             TargetScaffoldCleanupFaultPoint.BeforeQuarantineRename);
-        await EnsureMutationAuthorizedAsync(
-            request,
-            request.Source,
-            request.Target,
-            cancellationToken);
-        IsSafeExistingScaffoldDirectory(
-            publishedRoot,
-            "published target scaffold");
-        ValidateScaffoldMarker(
-            ReadScaffoldMarker(publishedRoot),
-            request.JobId,
-            request.Target,
-            publishedRoot,
-            request.TargetSemantics);
-        if (!IsPublishedScaffoldEmpty(
-                publishedRoot,
-                scaffolding,
-                request.Target,
-                request.TargetSemantics))
+        using (var publication = PinnedDirectoryCreation.OpenExistingForPublication(
+            parent,
+            Path.GetFileName(publishedRoot)))
         {
-            throw new MoveNeedsAttentionException(
-                "Published target scaffolding changed before cleanup quarantine publication.");
+            using var publishedAnchor = publication.OpenCreatedDirectoryAnchor();
+            await EnsureMutationAuthorizedAsync(
+                request,
+                request.Source,
+                request.Target,
+                cancellationToken);
+            IsSafeExistingScaffoldDirectory(
+                publishedRoot,
+                "published target scaffold");
+            ValidateScaffoldMarker(
+                ReadScaffoldMarker(publishedRoot),
+                request.JobId,
+                request.Target,
+                publishedRoot,
+                request.TargetSemantics);
+            if (!IsPublishedScaffoldEmpty(
+                    publishedRoot,
+                    scaffolding,
+                    request.Target,
+                    request.TargetSemantics)
+                || !publishedAnchor.VisiblePathMatches())
+            {
+                throw new MoveNeedsAttentionException(
+                    "Published target scaffolding changed before cleanup quarantine publication.");
+            }
+
+            using var quarantineAnchor = publication.RepublishPinnedDirectory(
+                Path.GetFileName(publishedRoot),
+                Path.GetFileName(quarantine));
         }
-        Directory.Move(publishedRoot, quarantine);
         faultInjector?.OnTargetScaffoldCleanup(
             request.JobId,
             TargetScaffoldCleanupFaultPoint.AfterQuarantineRename);

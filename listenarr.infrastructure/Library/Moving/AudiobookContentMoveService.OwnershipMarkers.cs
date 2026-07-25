@@ -113,24 +113,11 @@ internal sealed partial class AudiobookContentMoveService
                         "A current or future-generation ownership-marker write file is truncated and was preserved.");
                 }
 
-                await authorizeMutation();
-                ValidateOwnershipMarkerWritePath(writePath, markerDirectory);
-                var currentRead = ReadOwnershipMarkerResult(writePath);
-                if (currentRead.State == MarkerReadState.TemporarilyUnreadable)
-                {
-                    throw new IOException(
-                        "A predecessor ownership-marker write file became temporarily unreadable and was preserved.",
-                        currentRead.Error);
-                }
-                if (currentRead.State != MarkerReadState.CorruptOrTruncated
-                    || !TryParseMarkerWriteIdentity(writePath, markerPath, out var currentIdentity)
-                    || currentIdentity != writeIdentity)
-                {
-                    throw new MoveNeedsAttentionException(
-                        "A truncated ownership-marker write file changed before cleanup.");
-                }
-
-                File.Delete(writePath);
+                await RetireCorruptOwnershipWriteAsync(
+                    writePath,
+                    markerPath,
+                    writeIdentity,
+                    authorizeMutation);
                 discardedTruncatedPredecessor = true;
                 continue;
             }
@@ -164,7 +151,7 @@ internal sealed partial class AudiobookContentMoveService
                 "The owned directory has multiple incomplete ownership marker publications.");
         }
 
-        var (validWritePath, validMarker) = validWrites[0];
+        var validWritePath = validWrites[0].Path;
         if (OperatingSystem.IsWindows())
         {
             await authorizeMutation();
@@ -174,17 +161,14 @@ internal sealed partial class AudiobookContentMoveService
                 File.GetAttributes(validWritePath) | FileAttributes.Hidden);
         }
 
-        ValidateOwnershipMarkerPublicationPaths(
-            markerDirectory,
+        return await PublishRecoveredOwnershipWriteAsync(
+            markerPath,
             validWritePath,
-            markerPath);
-        await authorizeMutation();
-        ValidateOwnershipMarkerPublicationPaths(
-            markerDirectory,
-            validWritePath,
-            markerPath);
-        File.Move(validWritePath, markerPath, overwrite: false);
-        return validMarker;
+            expected,
+            sourceSemantics,
+            targetSemantics,
+            directorySemantics,
+            authorizeMutation);
     }
 
     private static MoveOwnershipMarker ReadOwnershipMarker(string markerPath)
@@ -327,21 +311,11 @@ internal sealed partial class AudiobookContentMoveService
                         "A current or future-generation ownership-marker write file is truncated and was preserved.");
                 }
 
-                await authorizeMutation();
-                ValidateOwnershipMarkerWritePath(writePath, markerDirectory);
-                var currentRead = ReadOwnershipMarkerResult(writePath);
-                if (currentRead.State == MarkerReadState.TemporarilyUnreadable)
-                {
-                    throw new IOException(
-                        "A predecessor ownership-marker write file became temporarily unreadable and was preserved.",
-                        currentRead.Error);
-                }
-                if (currentRead.State != MarkerReadState.CorruptOrTruncated)
-                {
-                    throw new MoveNeedsAttentionException(
-                        "A predecessor ownership-marker write file changed before deletion.");
-                }
-                File.Delete(writePath);
+                await RetireCorruptOwnershipWriteAsync(
+                    writePath,
+                    markerPath,
+                    writeIdentity,
+                    authorizeMutation);
                 continue;
             }
 
@@ -353,26 +327,13 @@ internal sealed partial class AudiobookContentMoveService
                 sourceSemantics,
                 targetSemantics,
                 directorySemantics);
-            await authorizeMutation();
-            ValidateOwnershipMarkerWritePath(writePath, markerDirectory);
-            var currentReadAfterAuthorization = ReadOwnershipMarkerResult(writePath);
-            if (currentReadAfterAuthorization.State == MarkerReadState.TemporarilyUnreadable)
-            {
-                throw new IOException(
-                    "An ownership-marker write file became temporarily unreadable and was preserved.",
-                    currentReadAfterAuthorization.Error);
-            }
-            writeMarker = currentReadAfterAuthorization.State == MarkerReadState.Valid
-                ? currentReadAfterAuthorization.Marker!
-                : throw new MoveNeedsAttentionException(
-                    "An ownership-marker write file changed before deletion.");
-            ValidateOwnershipMarker(
-                writeMarker,
+            await RetireValidatedOwnershipWriteAsync(
+                writePath,
                 expected,
                 sourceSemantics,
                 targetSemantics,
-                directorySemantics);
-            File.Delete(writePath);
+                directorySemantics,
+                authorizeMutation);
         }
     }
 

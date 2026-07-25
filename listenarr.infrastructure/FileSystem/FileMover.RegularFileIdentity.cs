@@ -31,24 +31,53 @@ public partial class FileMover
                 FileAccess.Read,
                 FileShare.ReadWrite | FileShare.Delete,
                 FileOptions.None);
-            if (OperatingSystem.IsWindows())
-            {
-                return TryGetWindowsRegularFileIdentity(handle, out identity);
-            }
-            if (OperatingSystem.IsLinux())
-            {
-                return TryGetUnixRegularFileIdentity(handle, linux: true, out identity);
-            }
-            if (OperatingSystem.IsMacOS())
-            {
-                return TryGetUnixRegularFileIdentity(handle, linux: false, out identity);
-            }
-
-            return false;
+            return TryGetRegularFileIdentity(handle, out identity);
         }
         catch (Exception exception) when (exception is
             IOException or UnauthorizedAccessException or Win32Exception
                 or PlatformNotSupportedException or NotSupportedException)
+        {
+            return false;
+        }
+    }
+
+    private static bool TryGetRegularFileIdentity(
+        SafeFileHandle handle,
+        out RegularFileIdentity identity)
+    {
+        identity = default;
+        if (OperatingSystem.IsWindows())
+        {
+            return TryGetWindowsRegularFileIdentity(handle, out identity);
+        }
+        if (OperatingSystem.IsLinux())
+        {
+            return TryGetUnixRegularFileIdentity(handle, linux: true, out identity);
+        }
+        if (OperatingSystem.IsMacOS())
+        {
+            return TryGetUnixRegularFileIdentity(handle, linux: false, out identity);
+        }
+
+        return false;
+    }
+
+    private static bool TryGetDirectoryIdentity(
+        string path,
+        out RegularFileIdentity identity)
+    {
+        identity = default;
+        try
+        {
+            using var anchor =
+                PinnedDirectoryCreation.OpenPinnedDirectoryNoFollow(path);
+            using var handle = anchor.DuplicateHandleForOperation();
+            return TryGetRegularFileIdentity(handle, out identity);
+        }
+        catch (Exception exception) when (exception is
+            IOException or UnauthorizedAccessException or Win32Exception
+                or PlatformNotSupportedException or NotSupportedException
+                or InvalidOperationException)
         {
             return false;
         }

@@ -2,8 +2,11 @@ namespace Listenarr.Infrastructure.Library.Moving;
 
 internal sealed partial class AudiobookContentMoveService
 {
-    private const string EmptySourceQuarantineDirectoryName =
+    private const string LegacyEmptySourceQuarantineDirectoryName =
         ".listenarr-empty-source";
+    private const string EmptySourceQuarantineDirectoryName =
+        ".listenarr-empty-source.state";
+    private const string EmptySourceClaimDirectoryName = "source.claim";
 
     private async Task<bool> RecoverEmptySourceDirectoryQuarantineAsync(
         AudiobookContentMoveRequest request,
@@ -11,58 +14,96 @@ internal sealed partial class AudiobookContentMoveService
         string sourceParent,
         CancellationToken cancellationToken)
     {
-        var quarantinePath = Path.Join(
+        var legacyPath = Path.Join(
             ownership.DirectoryPath,
-            EmptySourceQuarantineDirectoryName);
-        ValidateQuarantineMutationPath(ownership, quarantinePath);
-        if (File.Exists(quarantinePath))
+            LegacyEmptySourceQuarantineDirectoryName);
+        if (File.Exists(legacyPath) || Directory.Exists(legacyPath))
         {
             throw new MoveNeedsAttentionException(
-                "The empty-source quarantine path is occupied by a file.");
+                "A legacy empty-source quarantine lacks exact-object recovery evidence and was preserved.");
+        }
+
+        var statePath = Path.Join(
+            ownership.DirectoryPath,
+            EmptySourceQuarantineDirectoryName);
+        ValidateQuarantineMutationPath(ownership, statePath);
+        if (File.Exists(statePath))
+        {
+            throw new MoveNeedsAttentionException(
+                "The empty-source cleanup state path is occupied by a file.");
         }
 
         var sourceExists = Directory.Exists(request.Source);
-        if (!Directory.Exists(quarantinePath))
+        if (!Directory.Exists(statePath))
         {
             return sourceExists;
         }
-
         if (sourceExists)
         {
             throw new MoveNeedsAttentionException(
-                "Both the source directory and its interrupted cleanup quarantine exist; both were preserved.");
+                "Both the source directory and its interrupted cleanup claim exist; both were preserved.");
         }
 
-        if ((File.GetAttributes(quarantinePath) & FileAttributes.ReparsePoint) != 0)
+        using var state = PinnedDirectoryCreation.OpenExistingForPublication(
+            ownership.DirectoryPath,
+            EmptySourceQuarantineDirectoryName);
+        using var stateAnchor = state.OpenCreatedDirectoryAnchor();
+        if (!state.VisiblePathMatches() || !stateAnchor.VisiblePathMatches())
         {
             throw new MoveNeedsAttentionException(
-                "The interrupted source-directory quarantine is a symbolic link or reparse point.");
+                "The empty-source cleanup state changed while it was being pinned.");
         }
 
-        if (Directory.EnumerateFileSystemEntries(quarantinePath).Any())
+        var entries = Directory.EnumerateFileSystemEntries(statePath).ToList();
+        var claimPath = Path.Join(statePath, EmptySourceClaimDirectoryName);
+        if (entries.Count == 0)
         {
-            if (!FileSystemSafety.TryValidateMutationTarget(
-                    request.Source,
-                    [sourceParent],
-                    out var restoredSource,
-                    out var reason))
-            {
-                throw new MoveNeedsAttentionException(reason);
-            }
-
             await EnsureMutationAuthorizedAsync(
                 request,
                 request.Source,
                 request.Target,
                 cancellationToken);
-            ValidateQuarantineMutationPath(ownership, quarantinePath);
-            if (File.Exists(restoredSource) || Directory.Exists(restoredSource))
+            if (Directory.Exists(request.Source)
+                || !stateAnchor.VisiblePathMatches())
             {
                 throw new MoveNeedsAttentionException(
-                    "The source path was recreated while interrupted source cleanup was being restored; both paths were preserved.");
+                    "The source or empty-source cleanup state changed before recovery.");
             }
 
-            Directory.Move(quarantinePath, restoredSource);
+            state.DeletePinnedEmptyDirectory(EmptySourceQuarantineDirectoryName);
+            return false;
+        }
+        if (entries.Count != 1
+            || !string.Equals(
+                Path.GetFullPath(entries[0]),
+                Path.GetFullPath(claimPath),
+                OperatingSystem.IsWindows()
+                    ? StringComparison.OrdinalIgnoreCase
+                    : StringComparison.Ordinal)
+            || File.Exists(claimPath)
+            || !Directory.Exists(claimPath))
+        {
+            throw new MoveNeedsAttentionException(
+                "The empty-source cleanup state contains unexpected content.");
+        }
+
+        using var claim = stateAnchor.OpenExistingChildForPublication(
+            EmptySourceClaimDirectoryName);
+        using var claimAnchor = claim.OpenCreatedDirectoryAnchor();
+        if (!claim.VisiblePathMatches() || !claimAnchor.VisiblePathMatches())
+        {
+            throw new MoveNeedsAttentionException(
+                "The interrupted empty-source claim changed while it was being pinned.");
+        }
+
+        if (Directory.EnumerateFileSystemEntries(claimPath).Any())
+        {
+            await RestorePinnedEmptySourceClaimAsync(
+                request,
+                sourceParent,
+                state,
+                claim,
+                cancellationToken);
             return true;
         }
 
@@ -71,14 +112,19 @@ internal sealed partial class AudiobookContentMoveService
             request.Source,
             request.Target,
             cancellationToken);
-        ValidateQuarantineMutationPath(ownership, quarantinePath);
-        if (Directory.EnumerateFileSystemEntries(quarantinePath).Any())
+        if (Directory.Exists(request.Source)
+            || Directory.EnumerateFileSystemEntries(claimPath).Any()
+            || !claimAnchor.VisiblePathMatches()
+            || !stateAnchor.VisiblePathMatches())
         {
             throw new MoveNeedsAttentionException(
-                "The interrupted source-directory quarantine gained content and was preserved.");
+                "The source path or empty-source claim changed before deletion.");
         }
 
-        Directory.Delete(quarantinePath, recursive: false);
+        claim.DeletePinnedEmptyDirectory(EmptySourceClaimDirectoryName);
+        claimAnchor.Dispose();
+        claim.Dispose();
+        state.DeletePinnedEmptyDirectory(EmptySourceQuarantineDirectoryName);
         return false;
     }
 
@@ -88,14 +134,14 @@ internal sealed partial class AudiobookContentMoveService
         string sourceParent,
         CancellationToken cancellationToken)
     {
-        var quarantinePath = Path.Join(
+        var statePath = Path.Join(
             ownership.DirectoryPath,
             EmptySourceQuarantineDirectoryName);
-        ValidateQuarantineMutationPath(ownership, quarantinePath);
-        if (File.Exists(quarantinePath) || Directory.Exists(quarantinePath))
+        ValidateQuarantineMutationPath(ownership, statePath);
+        if (File.Exists(statePath) || Directory.Exists(statePath))
         {
             throw new MoveNeedsAttentionException(
-                "The empty-source quarantine path is already occupied.");
+                "The empty-source cleanup state path is already occupied.");
         }
 
         if (!FileSystemSafety.TryValidateMutationTarget(
@@ -107,38 +153,76 @@ internal sealed partial class AudiobookContentMoveService
             throw new MoveNeedsAttentionException(reason);
         }
 
-        if (!Directory.Exists(safeSource)
-            || (File.GetAttributes(safeSource) & FileAttributes.ReparsePoint) != 0
-            || Directory.EnumerateFileSystemEntries(safeSource).Any())
+        using var source = PinnedDirectoryCreation.OpenExistingForPublication(
+            sourceParent,
+            Path.GetFileName(safeSource));
+        using var sourceAnchor = source.OpenCreatedDirectoryAnchor();
+        if (Directory.EnumerateFileSystemEntries(safeSource).Any()
+            || !source.VisiblePathMatches()
+            || !sourceAnchor.VisiblePathMatches())
         {
             throw new MoveNeedsAttentionException(
                 "The empty source directory changed before quarantine.");
         }
 
+        using var quarantineAnchor =
+            PinnedDirectoryCreation.OpenPinnedDirectoryNoFollow(
+                ownership.DirectoryPath);
+        using var state = quarantineAnchor.TryCreateChildForPublication(
+            EmptySourceQuarantineDirectoryName);
+        if (!state.Created || !state.VisiblePathMatches())
+        {
+            throw new MoveNeedsAttentionException(
+                "The empty-source private cleanup state could not be created exclusively.");
+        }
+        if (!OperatingSystem.IsWindows())
+        {
+            File.SetUnixFileMode(
+                statePath,
+                UnixFileMode.UserRead
+                | UnixFileMode.UserWrite
+                | UnixFileMode.UserExecute);
+        }
+        if (!state.VisiblePathMatches())
+        {
+            throw new MoveNeedsAttentionException(
+                "The empty-source cleanup state changed while permissions were restricted.");
+        }
+
+        using var stateAnchor = state.OpenCreatedDirectoryAnchor();
         await EnsureMutationAuthorizedAsync(
             request,
             request.Source,
             request.Target,
             cancellationToken);
-        ValidateQuarantineMutationPath(ownership, quarantinePath);
-        if (!Directory.Exists(safeSource)
-            || (File.GetAttributes(safeSource) & FileAttributes.ReparsePoint) != 0
-            || Directory.EnumerateFileSystemEntries(safeSource).Any())
+        faultInjector?.OnSourceCleanupMutation(
+            request.JobId,
+            SourceCleanupFaultPoint.BeforeEmptySourceDirectoryQuarantine);
+        if (Directory.EnumerateFileSystemEntries(safeSource).Any()
+            || !sourceAnchor.VisiblePathMatches()
+            || !stateAnchor.VisiblePathMatches())
         {
             throw new MoveNeedsAttentionException(
                 "The empty source directory changed during final authorization.");
         }
 
-        Directory.Move(safeSource, quarantinePath);
+        using var claim = source.MovePinnedDirectoryTo(
+            stateAnchor,
+            EmptySourceClaimDirectoryName);
+        using var claimAnchor = claim.OpenCreatedDirectoryAnchor();
         faultInjector?.OnSourceCleanupMutation(
             request.JobId,
             SourceCleanupFaultPoint.AfterEmptySourceDirectoryQuarantine);
-        ValidateQuarantineMutationPath(ownership, quarantinePath);
-        if (Directory.EnumerateFileSystemEntries(quarantinePath).Any())
+        if (Directory.EnumerateFileSystemEntries(claim.FullPath).Any())
         {
-            TryRestoreEmptySourceDirectory(safeSource, quarantinePath);
+            await RestorePinnedEmptySourceClaimAsync(
+                request,
+                sourceParent,
+                state,
+                claim,
+                cancellationToken);
             throw new MoveNeedsAttentionException(
-                "The source directory gained content during quarantine and was preserved.");
+                "The source directory gained content during quarantine and was restored.");
         }
 
         await EnsureMutationAuthorizedAsync(
@@ -146,28 +230,52 @@ internal sealed partial class AudiobookContentMoveService
             request.Source,
             request.Target,
             cancellationToken);
-        ValidateQuarantineMutationPath(ownership, quarantinePath);
-        if (Directory.EnumerateFileSystemEntries(quarantinePath).Any())
+        if (Directory.Exists(safeSource)
+            || Directory.EnumerateFileSystemEntries(claim.FullPath).Any()
+            || !claimAnchor.VisiblePathMatches()
+            || !stateAnchor.VisiblePathMatches())
         {
-            TryRestoreEmptySourceDirectory(safeSource, quarantinePath);
             throw new MoveNeedsAttentionException(
-                "The source-directory quarantine gained content before deletion and was preserved.");
+                "The source path or empty-source claim changed before deletion.");
         }
 
-        Directory.Delete(quarantinePath, recursive: false);
+        claim.DeletePinnedEmptyDirectory(EmptySourceClaimDirectoryName);
+        claimAnchor.Dispose();
+        claim.Dispose();
+        sourceAnchor.Dispose();
+        source.Dispose();
+        state.DeletePinnedEmptyDirectory(EmptySourceQuarantineDirectoryName);
     }
 
-    private static void TryRestoreEmptySourceDirectory(
-        string source,
-        string quarantinePath)
+    private async Task RestorePinnedEmptySourceClaimAsync(
+        AudiobookContentMoveRequest request,
+        string sourceParent,
+        PinnedDirectoryCreation state,
+        PinnedDirectoryCreation claim,
+        CancellationToken cancellationToken)
     {
-        if (!Directory.Exists(quarantinePath)
-            || File.Exists(source)
-            || Directory.Exists(source))
+        await EnsureMutationAuthorizedAsync(
+            request,
+            request.Source,
+            request.Target,
+            cancellationToken);
+        if (File.Exists(request.Source) || Directory.Exists(request.Source))
         {
-            return;
+            throw new MoveNeedsAttentionException(
+                "The source path was recreated while its cleanup claim existed; both paths were preserved.");
         }
 
-        Directory.Move(quarantinePath, source);
+        using var sourceParentAnchor =
+            PinnedDirectoryCreation.OpenPinnedDirectoryNoFollow(sourceParent);
+        using var restored = claim.MovePinnedDirectoryTo(
+            sourceParentAnchor,
+            Path.GetFileName(request.Source));
+        if (!restored.VisiblePathMatches())
+        {
+            throw new MoveNeedsAttentionException(
+                "The empty-source claim could not be restored to the source path.");
+        }
+
+        state.DeletePinnedEmptyDirectory(EmptySourceQuarantineDirectoryName);
     }
 }

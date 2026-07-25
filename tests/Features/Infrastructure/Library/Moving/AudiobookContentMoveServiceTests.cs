@@ -942,7 +942,7 @@ namespace Listenarr.Tests.Features.Infrastructure.Library.Moving
             var result = await service.MoveContentsAsync(request, CancellationToken.None);
             File.Delete(Path.Join(oldTitle, LibraryDirectoryOwnershipMarker.FileName));
 
-            var exception = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            var exception = await Assert.ThrowsAsync<MoveNeedsAttentionException>(() =>
                 service.FinalizeMoveAsync(request, result, CancellationToken.None));
 
             Assert.Contains("marker is missing", exception.Message, StringComparison.OrdinalIgnoreCase);
@@ -1028,7 +1028,8 @@ namespace Listenarr.Tests.Features.Infrastructure.Library.Moving
             var quarantinedSource = Path.Join(
                 Path.GetDirectoryName(source)!,
                 $".listenarr-quarantine-{request.JobId:N}",
-                ".listenarr-empty-source");
+                ".listenarr-empty-source.state",
+                "source.claim");
             Assert.False(Directory.Exists(source));
             Assert.True(Directory.Exists(quarantinedSource));
 
@@ -1069,7 +1070,8 @@ namespace Listenarr.Tests.Features.Infrastructure.Library.Moving
             var quarantinedSource = Path.Join(
                 Path.GetDirectoryName(source)!,
                 $".listenarr-quarantine-{request.JobId:N}",
-                ".listenarr-empty-source");
+                ".listenarr-empty-source.state",
+                "source.claim");
             Assert.True(Directory.Exists(source));
             Assert.True(Directory.Exists(quarantinedSource));
 

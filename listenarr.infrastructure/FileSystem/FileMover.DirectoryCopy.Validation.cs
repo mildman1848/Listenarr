@@ -31,21 +31,46 @@ public partial class FileMover
         if (!snapshot.RelativeDirectories.SequenceEqual(
                 currentSnapshot.RelativeDirectories,
                 comparer)
-            || !snapshot.RelativeFiles.SequenceEqual(
-                currentSnapshot.RelativeFiles,
-                comparer))
+            || snapshot.SourceRootIdentity != currentSnapshot.SourceRootIdentity
+            || snapshot.Files.Count != currentSnapshot.Files.Count)
         {
             return false;
         }
 
-        foreach (var relativeFile in snapshot.RelativeFiles)
+        foreach (var relativeDirectory in snapshot.RelativeDirectories)
         {
+            if (!snapshot.DirectoryIdentities.TryGetValue(
+                    relativeDirectory,
+                    out var expectedIdentity)
+                || !currentSnapshot.DirectoryIdentities.TryGetValue(
+                    relativeDirectory,
+                    out var currentIdentity)
+                || expectedIdentity != currentIdentity)
+            {
+                return false;
+            }
+        }
+
+        for (var index = 0; index < snapshot.Files.Count; index++)
+        {
+            var fileSnapshot = snapshot.Files[index];
+            var currentFileSnapshot = currentSnapshot.Files[index];
+            if (!comparer.Equals(
+                    fileSnapshot.RelativePath,
+                    currentFileSnapshot.RelativePath)
+                || fileSnapshot.Identity != currentFileSnapshot.Identity)
+            {
+                return false;
+            }
+
             var sourceFile = ResolveSnapshotPath(
                 snapshot.SourceRoot,
-                relativeFile,
+                fileSnapshot.RelativePath,
                 "source file");
             if (!File.Exists(sourceFile)
-                || IsLinkedOrUnverifiableEntry(sourceFile))
+                || IsLinkedOrUnverifiableEntry(sourceFile)
+                || !TryGetRegularFileIdentity(sourceFile, out var currentIdentity)
+                || currentIdentity != fileSnapshot.Identity)
             {
                 return false;
             }
@@ -82,25 +107,29 @@ public partial class FileMover
             .OrderBy(path => path, comparer)
             .ToArray();
         if (!snapshot.RelativeDirectories.SequenceEqual(relativeDirectories, comparer)
-            || !snapshot.RelativeFiles.SequenceEqual(relativeFiles, comparer))
+            || !snapshot.Files
+                .Select(file => file.RelativePath)
+                .SequenceEqual(relativeFiles, comparer))
         {
             return false;
         }
 
-        foreach (var relativeFile in snapshot.RelativeFiles)
+        foreach (var fileSnapshot in snapshot.Files)
         {
             var sourceFile = ResolveSnapshotPath(
                 snapshot.SourceRoot,
-                relativeFile,
+                fileSnapshot.RelativePath,
                 "source file");
             var candidateFile = ResolveSnapshotPath(
                 candidateRoot,
-                relativeFile,
+                fileSnapshot.RelativePath,
                 "candidate file");
             if (!File.Exists(sourceFile)
                 || !File.Exists(candidateFile)
                 || IsLinkedOrUnverifiableEntry(sourceFile)
                 || IsLinkedOrUnverifiableEntry(candidateFile)
+                || !TryGetRegularFileIdentity(sourceFile, out var currentIdentity)
+                || currentIdentity != fileSnapshot.Identity
                 || !await FileSystemSafety.FilesHaveSameContentAsync(
                     sourceFile,
                     candidateFile))
@@ -129,7 +158,9 @@ public partial class FileMover
                 return;
             }
 
-            var expectedFiles = snapshot.RelativeFiles.ToHashSet(
+            var expectedFiles = snapshot.Files
+                .Select(file => file.RelativePath)
+                .ToHashSet(
                 OperatingSystem.IsWindows()
                     ? StringComparer.OrdinalIgnoreCase
                     : StringComparer.Ordinal);

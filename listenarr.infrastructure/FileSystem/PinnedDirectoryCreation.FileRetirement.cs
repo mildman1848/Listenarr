@@ -1,0 +1,160 @@
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+using Microsoft.Win32.SafeHandles;
+
+namespace Listenarr.Infrastructure.FileSystem;
+
+internal sealed partial class PinnedDirectoryCreation
+{
+    internal sealed partial class PinnedFileEntry
+    {
+        internal void Delete()
+        {
+            ThrowIfDisposed();
+            if (!VisiblePathMatches())
+            {
+                throw new InvalidOperationException(
+                    "The pinned file changed before deletion.");
+            }
+
+            if (OperatingSystem.IsWindows())
+            {
+                DeleteOpenedFileWindows(_fileHandle);
+                return;
+            }
+
+            var retirementDirectoryName = $".listenarr-retire-{Guid.NewGuid():N}.state";
+            using var parent = new PinnedDirectoryAnchor(
+                DuplicateSafeHandle(_parentHandle),
+                _parentPath,
+                followVisibleFinalLink: false);
+            using var retirementDirectory = parent.TryCreateChild(retirementDirectoryName);
+            if (!retirementDirectory.Created
+                || !retirementDirectory.VisiblePathMatches())
+            {
+                throw new InvalidOperationException(
+                    "Could not create an exclusive private retirement directory.");
+            }
+
+            File.SetUnixFileMode(
+                retirementDirectory.FullPath,
+                System.IO.UnixFileMode.UserRead
+                | System.IO.UnixFileMode.UserWrite
+                | System.IO.UnixFileMode.UserExecute);
+            if (!retirementDirectory.VisiblePathMatches())
+            {
+                throw new InvalidOperationException(
+                    "The private retirement directory changed while its permissions were restricted.");
+            }
+
+            {
+                using var retirementAnchor = retirementDirectory.OpenCreatedDirectoryAnchor();
+                const string retirementName = "entry.claim";
+                MoveTo(retirementAnchor, retirementName);
+                using var claimedEntry = retirementAnchor.OpenExistingFile(
+                    retirementName,
+                    requireDeleteAccess: false);
+                claimedEntry.DeleteFromPrivateDirectoryUnix();
+                if (Directory.EnumerateFileSystemEntries(retirementDirectory.FullPath).Any())
+                {
+                    throw new InvalidOperationException(
+                        "The private retirement directory contains unexpected entries.");
+                }
+            }
+
+            retirementDirectory.DeleteCreatedEmptyDirectoryUnix();
+        }
+
+        private void DeleteFromPrivateDirectoryUnix()
+        {
+            ThrowIfDisposed();
+            if (OperatingSystem.IsWindows())
+            {
+                throw new PlatformNotSupportedException(
+                    "Private-directory unlink is only used on Unix-like platforms.");
+            }
+            if (!VisiblePathMatches())
+            {
+                throw new InvalidOperationException(
+                    "The private claimed file changed before retirement.");
+            }
+            if (UnlinkAt(
+                    _parentHandle.DangerousGetHandle().ToInt32(),
+                    _fileName,
+                    flags: 0) != 0)
+            {
+                throw new Win32Exception(
+                    Marshal.GetLastWin32Error(),
+                    "Could not remove the verified private file claim.");
+            }
+        }
+    }
+
+    private void DeleteCreatedEmptyDirectoryUnix()
+    {
+        ThrowIfDisposed();
+        if (OperatingSystem.IsWindows())
+        {
+            throw new PlatformNotSupportedException(
+                "Private-directory retirement is only used on Unix-like platforms.");
+        }
+        if (!Created || _directoryHandle == null || _directoryHandle.IsInvalid)
+        {
+            throw new InvalidOperationException(
+                "A pinned created directory is required for retirement.");
+        }
+        if (!VisiblePathMatches())
+        {
+            throw new InvalidOperationException(
+                "The private retirement directory changed before deletion.");
+        }
+
+        var retirementName = $".listenarr-retired-{Guid.NewGuid():N}.state";
+        RenameRelativeEntry(
+            _parentHandle,
+            _directoryHandle,
+            _childName,
+            _parentHandle,
+            retirementName);
+        using var reopened = OpenDirectoryAtUnix(_parentHandle, retirementName);
+        if (!HandlesIdentifySameDirectory(_directoryHandle, reopened))
+        {
+            throw new InvalidOperationException(
+                "The renamed retirement directory no longer identifies the pinned directory.");
+        }
+
+        var flags = OperatingSystem.IsMacOS() ? AtRemovedirMac : AtRemovedirLinux;
+        if (UnlinkAt(
+                _parentHandle.DangerousGetHandle().ToInt32(),
+                retirementName,
+                flags) != 0)
+        {
+            throw new Win32Exception(
+                Marshal.GetLastWin32Error(),
+                "Could not delete the verified private retirement directory.");
+        }
+    }
+
+    private static void DeleteOpenedFileWindows(SafeFileHandle fileHandle)
+    {
+        var deleteInformation = Marshal.AllocHGlobal(sizeof(int));
+        try
+        {
+            Marshal.WriteInt32(deleteInformation, 1);
+            if (!SetFileInformationByHandle(
+                    fileHandle,
+                    FileInformationClass.FileDispositionInfo,
+                    deleteInformation,
+                    sizeof(int)))
+            {
+                throw new Win32Exception(
+                    Marshal.GetLastWin32Error(),
+                    "Could not delete the verified pinned file handle.");
+            }
+        }
+        finally
+        {
+            Marshal.FreeHGlobal(deleteInformation);
+        }
+    }
+}

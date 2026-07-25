@@ -123,13 +123,25 @@ internal sealed partial class PinnedDirectoryCreation
         }
 
         internal PinnedDirectoryCreation TryCreateChild(string childName)
+            => TryCreateChild(childName, requireDirectoryDeleteAccess: false);
+
+        internal PinnedDirectoryCreation TryCreateChildForPublication(string childName)
+            => TryCreateChild(childName, requireDirectoryDeleteAccess: true);
+
+        private PinnedDirectoryCreation TryCreateChild(
+            string childName,
+            bool requireDirectoryDeleteAccess)
         {
             ThrowIfDisposed();
             ValidateLeafName(childName);
             var childPath = Path.Join(FullPath, childName);
             ExclusiveDirectoryCreator.InvokeBeforeCreateHook(childPath);
             EnsureVisiblePathMatches();
-            return TryCreateRelative(_handle, FullPath, childName);
+            return TryCreateRelative(
+                _handle,
+                FullPath,
+                childName,
+                requireDirectoryDeleteAccess);
         }
 
         internal async Task CopyNewFileFromAsync(
@@ -191,14 +203,20 @@ internal sealed partial class PinnedDirectoryCreation
     private static PinnedDirectoryCreation TryCreateRelative(
         SafeFileHandle parentHandle,
         string parentPath,
-        string childName) => OperatingSystem.IsWindows()
-            ? TryCreateRelativeWindows(parentHandle, parentPath, childName)
+        string childName,
+        bool requireDirectoryDeleteAccess) => OperatingSystem.IsWindows()
+            ? TryCreateRelativeWindows(
+                parentHandle,
+                parentPath,
+                childName,
+                requireDirectoryDeleteAccess)
             : TryCreateRelativeUnix(parentHandle, parentPath, childName);
 
     private static PinnedDirectoryCreation TryCreateRelativeWindows(
         SafeFileHandle parentHandle,
         string parentPath,
-        string childName)
+        string childName,
+        bool requireDirectoryDeleteAccess)
     {
         var ownedParentHandle = DuplicateSafeHandle(parentHandle);
         try
@@ -208,7 +226,7 @@ internal sealed partial class PinnedDirectoryCreation
                 childName,
                 directory: true,
                 hiddenFile: false,
-                requireDirectoryDeleteAccess: false,
+                requireDirectoryDeleteAccess,
                 out var rawHandle);
             if (status == StatusObjectNameCollision)
             {

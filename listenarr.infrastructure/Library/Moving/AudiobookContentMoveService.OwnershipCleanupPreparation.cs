@@ -146,24 +146,38 @@ internal sealed partial class AudiobookContentMoveService
             markerKind,
             OwnershipCleanupFaultPoint.BeforeCleanupDirectoryMove);
 
-        await authorizeMutation();
-        ValidateExistingMoveDirectory(
-            originalDirectory,
-            "original owned cleanup directory");
-        originalMarker = ReadOwnershipMarker(originalMarkerPath);
-        ValidateOwnershipMarker(
-            originalMarker,
-            expectedDirectoryMarker,
-            sourceSemantics,
-            targetSemantics,
-            directorySemantics);
-        if (Directory.Exists(cleanupDirectory) || File.Exists(cleanupDirectory))
+        var originalParent = Path.GetDirectoryName(originalDirectory)
+            ?? throw new MoveNeedsAttentionException(
+                "The original owned cleanup directory has no parent.");
+        using (var publication = PinnedDirectoryCreation.OpenExistingForPublication(
+            originalParent,
+            Path.GetFileName(originalDirectory)))
         {
-            throw new MoveNeedsAttentionException(
-                "The renamed cleanup path appeared before the owned directory could be isolated.");
+            using var originalAnchor = publication.OpenCreatedDirectoryAnchor();
+            await authorizeMutation();
+            ValidateExistingMoveDirectory(
+                originalDirectory,
+                "original owned cleanup directory");
+            originalMarker = ReadOwnershipMarker(originalMarkerPath);
+            ValidateOwnershipMarker(
+                originalMarker,
+                expectedDirectoryMarker,
+                sourceSemantics,
+                targetSemantics,
+                directorySemantics);
+            if (Directory.Exists(cleanupDirectory)
+                || File.Exists(cleanupDirectory)
+                || !originalAnchor.VisiblePathMatches())
+            {
+                throw new MoveNeedsAttentionException(
+                    "The renamed cleanup path appeared or the owned directory changed before isolation.");
+            }
+
+            using var cleanupAnchor = publication.RepublishPinnedDirectory(
+                Path.GetFileName(originalDirectory),
+                Path.GetFileName(cleanupDirectory));
         }
 
-        Directory.Move(originalDirectory, cleanupDirectory);
         ValidateExistingMoveDirectory(
             cleanupDirectory,
             "renamed owned cleanup directory");

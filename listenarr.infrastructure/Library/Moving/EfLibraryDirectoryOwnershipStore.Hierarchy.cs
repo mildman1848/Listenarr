@@ -73,24 +73,28 @@ internal sealed partial class EfLibraryDirectoryOwnershipStore
                 PinnedDirectoryCreation.PinnedDirectoryAnchor nextAnchor;
                 if (!creation.Created)
                 {
-                    nextAnchor = currentAnchor.OpenExistingChild(childName);
+                    using var existingPublication =
+                        currentAnchor.OpenExistingChildForPublication(childName);
+                    nextAnchor = existingPublication.OpenCreatedDirectoryAnchor();
                     try
                     {
                         EnsureVisibleAnchor(nextAnchor);
-                        var existingResolution = await ResolveOwnedAsync(
+                        var existingResolution = await ResolveOwnedCoreAsync(
                             directory,
                             semantics,
+                            validateProof: false,
                             cancellationToken);
                         EnsureVisibleAnchor(nextAnchor);
                         if (existingResolution.State == LibraryDirectoryOwnershipResolutionState.Owned)
                         {
-                            await RecordCreatedAsync(
+                            await RepairPinnedExistingAsync(
                                 new LibraryDirectoryOwnershipClaim(
                                     directory,
                                     semantics,
                                     creationWorkflow,
                                     creationOperationId,
                                     audiobookId),
+                                existingPublication,
                                 cancellationToken);
                             EnsureVisibleAnchor(nextAnchor);
                         }

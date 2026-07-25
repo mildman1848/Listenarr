@@ -34,7 +34,9 @@ internal sealed partial class AudiobookContentMoveService
             markerPath,
             request.JobId,
             request.LeaseGeneration);
-        FileAttributes? previousMarkerAttributes = null;
+        var retiredExistingMarker = false;
+        PinnedDirectoryCreation.PinnedDirectoryAnchor? markerParent = null;
+        PinnedDirectoryCreation.PinnedFileEntry? writeEntry = null;
 
         faultInjector?.OnRecoveryMarkerWrite(
             request.JobId,
@@ -44,13 +46,14 @@ internal sealed partial class AudiobookContentMoveService
         {
             await EnsureMutationAuthorizedAsync(request, source, target, cancellationToken);
             ValidateNewRecoveryMarkerWritePath(writePath, markerDirectory);
-            using (var stream = new FileStream(
-                writePath,
-                FileMode.CreateNew,
-                FileAccess.Write,
-                FileShare.None,
+            markerParent = PinnedDirectoryCreation.OpenPinnedDirectoryNoFollow(
+                markerDirectory);
+            writeEntry = markerParent.CreateNewFile(
+                Path.GetFileName(writePath),
+                hiddenFile: OperatingSystem.IsWindows());
+            using (var stream = writeEntry.OpenWriteStream(
                 bufferSize: 4096,
-                FileOptions.WriteThrough))
+                asynchronous: false))
             {
                 var split = Math.Max(1, payload.Length / 2);
                 stream.Write(payload.AsSpan(0, split));
@@ -73,59 +76,52 @@ internal sealed partial class AudiobookContentMoveService
                 RecoveryMarkerWriteFaultPoint.BeforePublication);
             await EnsureMutationAuthorizedAsync(request, source, target, cancellationToken);
 
-            if (OperatingSystem.IsWindows())
-            {
-                File.SetAttributes(
-                    writePath,
-                    File.GetAttributes(writePath) | FileAttributes.Hidden);
-                if (File.Exists(markerPath))
-                {
-                    ValidateExistingRecoveryMarkerForStage(
-                        markerDirectory,
-                        markerPath,
-                        request,
-                        source,
-                        target,
-                        stage);
-                    previousMarkerAttributes = File.GetAttributes(markerPath);
-                    await EnsureMutationAuthorizedAsync(request, source, target, cancellationToken);
-                    File.SetAttributes(
-                        markerPath,
-                        previousMarkerAttributes.Value & ~FileAttributes.Hidden);
-                }
-            }
-
             ValidateRecoveryMarkerPublicationPaths(
                 markerDirectory,
                 writePath,
                 markerPath);
-            if (File.Exists(markerPath))
+            var candidate = ReadRecoveryMarker(writeEntry, writePath);
+            ValidateRecoveryMarker(candidate, request, source, target);
+            if (!string.Equals(candidate.Stage, stage, StringComparison.Ordinal))
             {
-                ValidateExistingRecoveryMarkerForStage(
-                    markerDirectory,
-                    markerPath,
-                    request,
-                    source,
-                    target,
-                    stage);
+                throw new MoveNeedsAttentionException(
+                    "The recovery-marker write file changed before publication.");
             }
 
             await EnsureMutationAuthorizedAsync(request, source, target, cancellationToken);
-            ValidateRecoveryMarkerPublicationPaths(
-                markerDirectory,
-                writePath,
-                markerPath);
             if (File.Exists(markerPath))
             {
-                ValidateExistingRecoveryMarkerForStage(
-                    markerDirectory,
-                    markerPath,
-                    request,
-                    source,
-                    target,
-                    stage);
+                using (var existingEntry = markerParent.OpenExistingFile(
+                    Path.GetFileName(markerPath),
+                    requireDeleteAccess: true))
+                {
+                    var existing = ReadRecoveryMarker(existingEntry, markerPath);
+                    ValidateRecoveryMarker(existing, request, source, target);
+                    if (!CanAdvanceRecoveryStage(existing.Stage, stage))
+                    {
+                        throw new MoveNeedsAttentionException(
+                            "The existing recovery marker is already at a later or incompatible stage.");
+                    }
+                    if (!markerParent.VisiblePathMatches()
+                        || !writeEntry.VisiblePathMatches()
+                        || !existingEntry.VisiblePathMatches())
+                    {
+                        throw new MoveNeedsAttentionException(
+                            "Recovery-marker publication paths changed at the mutation boundary.");
+                    }
+
+                    existingEntry.Delete();
+                }
+                retiredExistingMarker = true;
             }
-            File.Move(writePath, markerPath, overwrite: true);
+
+            if (!markerParent.VisiblePathMatches()
+                || !writeEntry.VisiblePathMatches())
+            {
+                throw new MoveNeedsAttentionException(
+                    "The recovery-marker write file changed before publication.");
+            }
+            writeEntry.MoveWithinParent(Path.GetFileName(markerPath));
         }
         catch (Exception exception) when (exception is MoveLeaseLostException or PersistenceException)
         {
@@ -133,54 +129,42 @@ internal sealed partial class AudiobookContentMoveService
         }
         catch (Exception exception) when (WorkerExceptionClassifier.IsNonFatal(exception))
         {
-            Exception? restorationException = null;
-            if (OperatingSystem.IsWindows()
-                && previousMarkerAttributes.HasValue
-                && File.Exists(markerPath))
+            Exception? cleanupException = null;
+            if (!retiredExistingMarker)
             {
                 try
                 {
-                    await EnsureMutationAuthorizedAsync(request, source, target, cancellationToken);
-                    ValidateExistingRecoveryMarker(
-                        markerDirectory,
-                        markerPath,
-                        request,
-                        source,
-                        target);
-                    File.SetAttributes(markerPath, previousMarkerAttributes.Value);
+                    faultInjector?.OnRecoveryMarkerWrite(
+                        request.JobId,
+                        RecoveryMarkerWriteFaultPoint.BeforeTemporaryFileDeletion);
+                    if (File.Exists(writePath))
+                    {
+                        await EnsureMutationAuthorizedAsync(
+                            request,
+                            source,
+                            target,
+                            cancellationToken);
+                        if (markerParent == null
+                            || writeEntry == null
+                            || !markerParent.VisiblePathMatches()
+                            || !writeEntry.VisiblePathMatches())
+                        {
+                            throw new MoveNeedsAttentionException(
+                                "The recovery-marker write file changed before cleanup.");
+                        }
+
+                        writeEntry.Delete();
+                    }
                 }
-                catch (Exception restoreException) when (restoreException is
+                catch (Exception temporaryCleanupException) when (temporaryCleanupException is
                     MoveLeaseLostException or PersistenceException)
                 {
                     throw;
                 }
-                catch (Exception restoreException) when (WorkerExceptionClassifier.IsNonFatal(restoreException))
+                catch (Exception temporaryCleanupException) when (WorkerExceptionClassifier.IsNonFatal(temporaryCleanupException))
                 {
-                    restorationException = restoreException;
+                    cleanupException = temporaryCleanupException;
                 }
-            }
-
-            Exception? cleanupException = null;
-            try
-            {
-                faultInjector?.OnRecoveryMarkerWrite(
-                    request.JobId,
-                    RecoveryMarkerWriteFaultPoint.BeforeTemporaryFileDeletion);
-                if (File.Exists(writePath))
-                {
-                    await EnsureMutationAuthorizedAsync(request, source, target, cancellationToken);
-                    ValidateRecoveryMarkerWritePath(writePath, markerDirectory);
-                    File.Delete(writePath);
-                }
-            }
-            catch (Exception temporaryCleanupException) when (temporaryCleanupException is
-                MoveLeaseLostException or PersistenceException)
-            {
-                throw;
-            }
-            catch (Exception temporaryCleanupException) when (WorkerExceptionClassifier.IsNonFatal(temporaryCleanupException))
-            {
-                cleanupException = temporaryCleanupException;
             }
 
             if (exception is MoveNeedsAttentionException)
@@ -188,27 +172,29 @@ internal sealed partial class AudiobookContentMoveService
                 throw;
             }
 
-            if (restorationException is MoveNeedsAttentionException
-                || cleanupException is MoveNeedsAttentionException)
+            if (cleanupException is MoveNeedsAttentionException)
             {
                 throw new MoveNeedsAttentionException(
                     $"Recovery marker publication failed and recovery state became ambiguous. "
                     + $"Publication error: {exception.Message}. "
-                    + $"Attribute restoration error: {restorationException?.Message ?? "none"}. "
                     + $"Temporary cleanup error: {cleanupException?.Message ?? "none"}.");
             }
 
-            if (restorationException != null || cleanupException != null)
+            if (cleanupException != null)
             {
                 throw new IOException(
                     $"Recovery marker publication failed and its validated recovery state could not be restored cleanly. "
                     + $"Publication error: {exception.Message}. "
-                    + $"Attribute restoration error: {restorationException?.Message ?? "none"}. "
                     + $"Temporary cleanup error: {cleanupException?.Message ?? "none"}.",
-                    restorationException ?? cleanupException);
+                    cleanupException);
             }
 
             throw;
+        }
+        finally
+        {
+            writeEntry?.Dispose();
+            markerParent?.Dispose();
         }
     }
 }

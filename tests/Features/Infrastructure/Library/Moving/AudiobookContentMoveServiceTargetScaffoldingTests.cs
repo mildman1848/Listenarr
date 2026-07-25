@@ -226,6 +226,28 @@ public partial class AudiobookContentMoveServiceTests
     }
 
     [Fact]
+    public async Task CleanupTerminalTargetScaffoldingAsync_ReplacedQuarantineGeneration_IsPreserved()
+    {
+        var state = await CreateEmptyTargetScaffoldAsync();
+        var originalGeneration = state.Quarantine + $"-original-{Guid.NewGuid():N}";
+        var replacementFile = Path.Join(state.Quarantine, "operator-file.txt");
+        var service = CreateMoveService(
+            new ReplaceScaffoldRootBeforeRetirement(
+                state.Quarantine,
+                originalGeneration,
+                replacementFile));
+
+        await Assert.ThrowsAsync<MoveNeedsAttentionException>(() =>
+            service.CleanupTerminalTargetScaffoldingAsync(
+                state.Request,
+                CancellationToken.None));
+
+        Assert.True(Directory.Exists(originalGeneration));
+        Assert.Equal("preserve", await File.ReadAllTextAsync(replacementFile));
+        await AssertScaffoldingNotRemovedAsync(state.Request.JobId);
+    }
+
+    [Fact]
     public async Task CleanupTerminalTargetScaffoldingAsync_PartialStateUpdate_ResumesRemainingRows()
     {
         var state = await CreateEmptyTargetScaffoldAsync();
@@ -597,6 +619,34 @@ public partial class AudiobookContentMoveServiceTests
             {
                 throw new IOException("Injected partial target scaffold state update failure.");
             }
+        }
+    }
+
+    private sealed class ReplaceScaffoldRootBeforeRetirement(
+        string quarantinePath,
+        string originalGeneration,
+        string replacementFile) : IMoveFaultInjector
+    {
+        private int _invocations;
+
+        public void OnTargetScaffoldCleanup(
+            Guid jobId,
+            TargetScaffoldCleanupFaultPoint faultPoint)
+        {
+            if (faultPoint != TargetScaffoldCleanupFaultPoint.DuringQuarantineDelete)
+            {
+                return;
+            }
+
+            _invocations++;
+            if (_invocations != 3)
+            {
+                return;
+            }
+
+            Directory.Move(quarantinePath, originalGeneration);
+            Directory.CreateDirectory(quarantinePath);
+            File.WriteAllText(replacementFile, "preserve");
         }
     }
 }

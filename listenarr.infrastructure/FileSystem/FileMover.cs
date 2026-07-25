@@ -15,7 +15,6 @@
  * You should have received a copy of the GNU Affero General Public License
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
-using System.Security.Principal;
 using System.Runtime.InteropServices;
 using System.Diagnostics.CodeAnalysis;
 using Listenarr.Domain.Audiobooks.Enumerations;
@@ -56,7 +55,7 @@ namespace Listenarr.Infrastructure.FileSystem
         private readonly ILogger<FileMover> _logger;
         private readonly IProcessRunner? _processRunner;
         private readonly FileMoverOptions _options;
-        private readonly IFileSystemSemanticsResolver? _semanticsResolver;
+        private readonly IFileSystemSemanticsResolver _semanticsResolver;
 
         internal Func<Task>? AfterSourceStateCreatedForTestAsync { get; init; }
         internal Func<string, string, Task>? AfterSourceQuarantinedForTestAsync { get; init; }
@@ -66,6 +65,7 @@ namespace Listenarr.Infrastructure.FileSystem
         internal Func<string, Task>? AfterDestinationPublishedForTestAsync { get; init; }
         internal Func<Task>? AfterSourceClaimDeletedForTestAsync { get; init; }
         internal Func<Task>? AfterFileMoveStateCleanedForTestAsync { get; init; }
+        internal Func<Task>? AfterPreparedDestinationCapturedForTestAsync { get; init; }
         internal Func<Task>? AfterDirectoryCopyPreflightForTestAsync { get; init; }
         internal Action? BeforeDirectoryTreePreflightForTest { get; init; }
 
@@ -78,7 +78,7 @@ namespace Listenarr.Infrastructure.FileSystem
             _logger = logger;
             _processRunner = processRunner;
             _options = options?.Value ?? new FileMoverOptions();
-            _semanticsResolver = semanticsResolver;
+            _semanticsResolver = semanticsResolver ?? new FileSystemSemanticsResolver();
         }
 
         public async Task<bool> MoveDirectoryAsync(string sourceDir, string destDir)
@@ -119,52 +119,19 @@ namespace Listenarr.Infrastructure.FileSystem
                 return false;
             }
 
-            // Try move with retries
-            var attempt = 0;
-            var delay = 1000;
-
-            for (; attempt < _options.MaxRetries; attempt++)
+            // Public directory pathnames cannot be bound to the directory object
+            // across a managed Directory.Move call. Always use the verified
+            // snapshot/copy/cleanup protocol below.
+            try
             {
-                try
-                {
-                    BeforeDirectoryMoveAttemptForTest?.Invoke();
-                    Directory.Move(sourceDir, destDir);
-                    LogMutation(FileMutationOutcome.Success, FileAction.Move, sourceDir, destDir);
-                    return true;
-                }
-                catch (Exception ex) when (ex is not OperationCanceledException && ex is not OutOfMemoryException && ex is not StackOverflowException)
-                {
-                    _logger.LogWarning(ex, "Directory.Move attempt {Attempt} failed: {Source} -> {Dest}", attempt + 1, sourceDir, destDir);
-                    try
-                    {
-                        var files = Directory.GetFiles(sourceDir, "*.*", SearchOption.AllDirectories);
-                        _logger.LogWarning("Directory listing sample: {Sample}", string.Join(", ", files.Take(5).Select(f => Path.GetFileName(f))));
-                    }
-                    catch (Exception diagEx) when (diagEx is not OperationCanceledException && diagEx is not OutOfMemoryException && diagEx is not StackOverflowException)
-                    {
-                        _logger.LogDebug(diagEx, "Failed to collect directory listing diagnostics for {Source}", sourceDir);
-                    }
-
-                    try
-                    {
-                        if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
-                        {
-                            var dirSec = new DirectoryInfo(sourceDir).GetAccessControl();
-                            var owner = dirSec.GetOwner(typeof(NTAccount))?.ToString() ?? "unknown";
-                            _logger.LogWarning("Directory owner: {Owner}", owner);
-                        }
-                    }
-                    catch (Exception ownerEx) when (ownerEx is not OperationCanceledException && ownerEx is not OutOfMemoryException && ownerEx is not StackOverflowException)
-                    {
-                        _logger.LogDebug(ownerEx, "Failed to resolve directory owner diagnostics for {Source}", sourceDir);
-                    }
-
-                    if (attempt < _options.MaxRetries - 1)
-                    {
-                        await Task.Delay(Math.Min(delay, _options.MaxBackoffMs));
-                        delay = Math.Min(delay * 2, _options.MaxBackoffMs);
-                    }
-                }
+                BeforeDirectoryMoveAttemptForTest?.Invoke();
+            }
+            catch (Exception exception) when (exception is not (
+                OperationCanceledException or OutOfMemoryException or StackOverflowException))
+            {
+                _logger.LogDebug(
+                    exception,
+                    "The direct-directory-move test boundary requested the verified fallback.");
             }
 
             if (pathEquivalence == null || pathsOverlap != false)
@@ -202,7 +169,9 @@ namespace Listenarr.Infrastructure.FileSystem
             {
                 await CopyDirectorySnapshotAsync(copySnapshot, destinationRoot);
 
-                var cleanup = await CleanupCopiedSourceTreeAsync(sourceDir, destinationRoot);
+                var cleanup = await CleanupCopiedSourceTreeAsync(
+                    copySnapshot,
+                    destinationRoot);
                 if (!cleanup.DestinationVerified)
                 {
                     _logger.LogWarning(
@@ -277,7 +246,7 @@ namespace Listenarr.Infrastructure.FileSystem
                         if (!pr.TimedOut && pr.ExitCode <= 7 && pr.ExitCode >= 0)
                         {
                             var cleanup = await CleanupCopiedSourceTreeAsync(
-                                sourceDir,
+                                copySnapshot,
                                 destinationRoot);
                             if (!cleanup.DestinationVerified)
                             {

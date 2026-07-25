@@ -7,8 +7,6 @@
  * by the Free Software Foundation, either version 3 of the License, or
  * (at your option) any later version.
  */
-using System.Runtime.InteropServices;
-using System.Security.Principal;
 using Listenarr.Domain.Audiobooks.Enumerations;
 using Microsoft.Extensions.Logging;
 
@@ -76,9 +74,6 @@ namespace Listenarr.Infrastructure.FileSystem
                 return true;
             }
 
-            var attempt = 0;
-            var delay = 1000;
-
             var idempotentOutcome = await TryCompleteIdempotentFileMoveAsync(
                 sourceFile,
                 destFile,
@@ -98,49 +93,6 @@ namespace Listenarr.Infrastructure.FileSystem
                     destFile,
                     "Source path was recreated while completing an idempotent move");
                 return false;
-            }
-
-            for (; attempt < _options.MaxRetries; attempt++)
-            {
-                try
-                {
-                    File.Move(sourceFile, destFile, true);
-                    LogMutation(FileMutationOutcome.Success, FileAction.Move, sourceFile, destFile);
-                    return true;
-                }
-                catch (Exception ex) when (ex is not OperationCanceledException && ex is not OutOfMemoryException && ex is not StackOverflowException)
-                {
-                    _logger.LogWarning(ex, "File.Move attempt {Attempt} failed: {Source} -> {Dest}", attempt + 1, sourceFile, destFile);
-                    try
-                    {
-                        using var stream = File.Open(sourceFile, FileMode.Open, FileAccess.Read, FileShare.Read);
-                        _logger.LogDebug("Able to open source file for read during diagnostic: {File}", sourceFile);
-                    }
-                    catch (Exception diagEx) when (diagEx is not OperationCanceledException && diagEx is not OutOfMemoryException && diagEx is not StackOverflowException)
-                    {
-                        _logger.LogDebug(diagEx, "Failed to collect file diagnostics for {Source}", sourceFile);
-                    }
-
-                    if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
-                    {
-                        try
-                        {
-                            var fileSec = new FileInfo(sourceFile).GetAccessControl();
-                            var owner = fileSec.GetOwner(typeof(NTAccount))?.ToString() ?? "unknown";
-                            _logger.LogWarning("File owner for {File}: {Owner}", sourceFile, owner);
-                        }
-                        catch (Exception ownerEx) when (ownerEx is not OperationCanceledException && ownerEx is not OutOfMemoryException && ownerEx is not StackOverflowException)
-                        {
-                            _logger.LogDebug(ownerEx, "Failed to resolve file owner diagnostics for {Source}", sourceFile);
-                        }
-                    }
-
-                    if (attempt < _options.MaxRetries - 1)
-                    {
-                        await Task.Delay(Math.Min(delay, _options.MaxBackoffMs));
-                        delay = Math.Min(delay * 2, _options.MaxBackoffMs);
-                    }
-                }
             }
 
             if (pathEquivalence == null

@@ -8,7 +8,18 @@ internal sealed partial class EfLibraryDirectoryOwnershipStore
     public async Task<LibraryDirectoryOwnershipResolution> ResolveOwnedAsync(
         string path,
         FileSystemPathSemantics semantics,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default) =>
+        await ResolveOwnedCoreAsync(
+            path,
+            semantics,
+            validateProof: true,
+            cancellationToken);
+
+    private async Task<LibraryDirectoryOwnershipResolution> ResolveOwnedCoreAsync(
+        string path,
+        FileSystemPathSemantics semantics,
+        bool validateProof,
+        CancellationToken cancellationToken)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(path);
         EnsureResolved(semantics);
@@ -88,12 +99,40 @@ internal sealed partial class EfLibraryDirectoryOwnershipStore
                 Reason: "Durable directory ownership exists but is unavailable for safe use.");
         }
 
-        return compatible.Count == 1
-            ? new LibraryDirectoryOwnershipResolution(
-                LibraryDirectoryOwnershipResolutionState.Owned,
-                compatible[0])
-            : new LibraryDirectoryOwnershipResolution(
+        if (compatible.Count != 1)
+        {
+            return new LibraryDirectoryOwnershipResolution(
                 LibraryDirectoryOwnershipResolutionState.Unowned);
+        }
+
+        var resolved = compatible[0];
+        if (validateProof
+            && resolved.State is (
+                LibraryDirectoryOwnershipState.Owned
+                or LibraryDirectoryOwnershipState.Retained))
+        {
+            try
+            {
+                LibraryDirectoryOwnershipMarker.Validate(
+                    resolved,
+                    resolved.CanonicalPath);
+            }
+            catch (Exception exception) when (exception is
+                ArgumentException or IOException or UnauthorizedAccessException
+                    or InvalidOperationException or NotSupportedException
+                    or PathTooLongException)
+            {
+                return new LibraryDirectoryOwnershipResolution(
+                    LibraryDirectoryOwnershipResolutionState.Unavailable,
+                    Reason: $"Durable directory ownership proof is unavailable: {exception.Message}");
+            }
+        }
+
+        // Removing has separate restart semantics: its inside marker may already
+        // have been retired after the durable state transition.
+        return new LibraryDirectoryOwnershipResolution(
+            LibraryDirectoryOwnershipResolutionState.Owned,
+            resolved);
     }
 
     public async Task<IReadOnlyList<LibraryDirectoryOwnership>> GetOwnedWithinAsync(

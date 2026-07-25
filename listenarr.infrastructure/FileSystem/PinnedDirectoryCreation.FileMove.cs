@@ -124,6 +124,12 @@ internal sealed partial class PinnedDirectoryCreation
 
         internal string FileName => _fileName;
 
+        internal SafeFileHandle DuplicateHandleForOperation()
+        {
+            ThrowIfDisposed();
+            return DuplicateSafeHandle(_fileHandle);
+        }
+
         internal FileStream OpenReadStream(int bufferSize, bool asynchronous)
         {
             ThrowIfDisposed();
@@ -284,49 +290,6 @@ internal sealed partial class PinnedDirectoryCreation
             }
         }
 
-        internal void Delete()
-        {
-            ThrowIfDisposed();
-            if (!VisiblePathMatches())
-            {
-                throw new InvalidOperationException(
-                    "The pinned file changed before deletion.");
-            }
-
-            if (OperatingSystem.IsWindows())
-            {
-                DeleteOpenedFileWindows(_fileHandle);
-                return;
-            }
-
-            var deletionName = $".listenarr-delete-{Guid.NewGuid():N}";
-            RenameRelativeEntry(
-                _parentHandle,
-                _fileHandle,
-                _fileName,
-                _parentHandle,
-                deletionName);
-            using var published = OpenRelativeFileUnix(
-                _parentHandle,
-                deletionName,
-                Path.Join(_parentPath, deletionName));
-            if (!HandlesIdentifySameDirectory(_fileHandle, published))
-            {
-                throw new InvalidOperationException(
-                    "The quarantine deletion tombstone does not identify the opened file.");
-            }
-
-            if (UnlinkAt(
-                    _parentHandle.DangerousGetHandle().ToInt32(),
-                    deletionName,
-                    flags: 0) != 0)
-            {
-                throw new Win32Exception(
-                    Marshal.GetLastWin32Error(),
-                    "Could not remove the verified quarantine deletion tombstone.");
-            }
-        }
-
         public void Dispose()
         {
             if (_disposed)
@@ -366,29 +329,7 @@ internal sealed partial class PinnedDirectoryCreation
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
         }
-    }
 
-    private static void DeleteOpenedFileWindows(SafeFileHandle fileHandle)
-    {
-        var deleteInformation = Marshal.AllocHGlobal(sizeof(int));
-        try
-        {
-            Marshal.WriteInt32(deleteInformation, 1);
-            if (!SetFileInformationByHandle(
-                    fileHandle,
-                    FileInformationClass.FileDispositionInfo,
-                    deleteInformation,
-                    sizeof(int)))
-            {
-                throw new Win32Exception(
-                    Marshal.GetLastWin32Error(),
-                    "Could not delete the verified pinned file handle.");
-            }
-        }
-        finally
-        {
-            Marshal.FreeHGlobal(deleteInformation);
-        }
     }
 
     private static SafeFileHandle CreateRelativeReadWriteFileUnix(

@@ -59,6 +59,103 @@ internal sealed partial class PinnedDirectoryCreation
         return PublishCreatedDirectoryTo(parentAnchor, finalName);
     }
 
+    internal PinnedDirectoryAnchor RepublishPinnedDirectory(
+        string currentName,
+        string finalName)
+    {
+        ThrowIfDisposed();
+        ValidateLeafName(currentName);
+        ValidateLeafName(finalName);
+        if (!Created || _directoryHandle == null || _directoryHandle.IsInvalid)
+        {
+            throw new InvalidOperationException(
+                "A pinned directory handle is required for publication.");
+        }
+
+        var currentPath = Path.Join(_parentPath, currentName);
+        using var currentAnchor = new PinnedDirectoryAnchor(
+            DuplicateSafeHandle(_directoryHandle),
+            currentPath,
+            followVisibleFinalLink: false);
+        if (!currentAnchor.VisiblePathMatches())
+        {
+            throw new InvalidOperationException(
+                "The current directory path no longer identifies the pinned directory.");
+        }
+
+        RenameRelativeEntry(
+            _parentHandle,
+            _directoryHandle,
+            currentName,
+            _parentHandle,
+            finalName);
+        var publishedPath = Path.Join(_parentPath, finalName);
+        var publishedAnchor = new PinnedDirectoryAnchor(
+            DuplicateSafeHandle(_directoryHandle),
+            publishedPath,
+            followVisibleFinalLink: false);
+        if (publishedAnchor.VisiblePathMatches())
+        {
+            return publishedAnchor;
+        }
+
+        publishedAnchor.Dispose();
+        throw new InvalidOperationException(
+            "The republished directory does not identify the pinned directory.");
+    }
+
+    internal void DeletePinnedEmptyDirectory(string currentName)
+    {
+        ThrowIfDisposed();
+        ValidateLeafName(currentName);
+        if (!Created || _directoryHandle == null || _directoryHandle.IsInvalid)
+        {
+            throw new InvalidOperationException(
+                "A pinned directory handle is required for deletion.");
+        }
+
+        var currentPath = Path.Join(_parentPath, currentName);
+        using var currentAnchor = new PinnedDirectoryAnchor(
+            DuplicateSafeHandle(_directoryHandle),
+            currentPath,
+            followVisibleFinalLink: false);
+        if (!currentAnchor.VisiblePathMatches())
+        {
+            throw new InvalidOperationException(
+                "The directory changed before pinned deletion.");
+        }
+        if (OperatingSystem.IsWindows())
+        {
+            DeleteOpenedFileWindows(_directoryHandle);
+            return;
+        }
+
+        var retiredName = $".listenarr-retired-directory-{Guid.NewGuid():N}.state";
+        RenameRelativeEntry(
+            _parentHandle,
+            _directoryHandle,
+            currentName,
+            _parentHandle,
+            retiredName);
+        using var reopened = OpenDirectoryAtUnix(_parentHandle, retiredName);
+        if (!HandlesIdentifySameDirectory(_directoryHandle, reopened))
+        {
+            throw new InvalidOperationException(
+                "The retired directory no longer identifies the pinned directory.");
+        }
+
+        var flags = OperatingSystem.IsMacOS() ? AtRemovedirMac : AtRemovedirLinux;
+        if (UnlinkAt(
+                _parentHandle.DangerousGetHandle().ToInt32(),
+                retiredName,
+                flags) != 0)
+        {
+            throw new System.ComponentModel.Win32Exception(
+                System.Runtime.InteropServices.Marshal.GetLastWin32Error(),
+                "Could not remove the verified empty directory.");
+        }
+    }
+
     internal PinnedDirectoryAnchor PublishCreatedDirectoryTo(
         PinnedDirectoryAnchor destinationParent,
         string finalName)
@@ -102,5 +199,54 @@ internal sealed partial class PinnedDirectoryCreation
         publishedAnchor.Dispose();
         throw new InvalidOperationException(
             "The published directory does not identify the prepared pinned directory.");
+    }
+
+    internal PinnedDirectoryCreation MovePinnedDirectoryTo(
+        PinnedDirectoryAnchor destinationParent,
+        string finalName)
+    {
+        ThrowIfDisposed();
+        ArgumentNullException.ThrowIfNull(destinationParent);
+        ValidateLeafName(finalName);
+        if (!Created || _directoryHandle == null || _directoryHandle.IsInvalid)
+        {
+            throw new InvalidOperationException(
+                "A pinned directory handle is required for relocation.");
+        }
+        if (!VisiblePathMatches() || !destinationParent.VisiblePathMatches())
+        {
+            throw new InvalidOperationException(
+                "A directory relocation endpoint changed before publication.");
+        }
+
+        var destinationHandle = destinationParent.DuplicateHandleForOperation();
+        try
+        {
+            RenameRelativeEntry(
+                _parentHandle,
+                _directoryHandle,
+                _childName,
+                destinationHandle,
+                finalName);
+            var relocated = new PinnedDirectoryCreation(
+                destinationHandle,
+                DuplicateSafeHandle(_directoryHandle),
+                destinationParent.FullPath,
+                finalName,
+                created: true);
+            if (relocated.VisiblePathMatches())
+            {
+                return relocated;
+            }
+
+            relocated.Dispose();
+            throw new InvalidOperationException(
+                "The relocated directory does not identify the pinned directory.");
+        }
+        catch
+        {
+            destinationHandle.Dispose();
+            throw;
+        }
     }
 }

@@ -146,27 +146,25 @@ namespace Listenarr.Infrastructure.Library.Moving
                 return;
             }
 
-            if (Directory.Exists(deleteTarget.FolderPath))
+            cancellationToken.ThrowIfCancellationRequested();
+            // Unowned exact audiobook folders may still be removed because the user
+            // explicitly requested folder deletion. Implicit parent deletion remains
+            // ownership-gated below.
+            if (!FileSystemSafety.TryDeleteEmptyDirectory(
+                    deleteTarget.FolderPath,
+                    deleteTarget.AllowedMutationRoots,
+                    out var reason))
             {
-                cancellationToken.ThrowIfCancellationRequested();
-                // Unowned exact audiobook folders may still be removed because the user
-                // explicitly requested folder deletion. Implicit parent deletion remains
-                // ownership-gated below.
-                if (!FileSystemSafety.TryDeleteEmptyDirectory(
-                        deleteTarget.FolderPath,
-                        deleteTarget.AllowedMutationRoots,
-                        out var reason))
-                {
-                    result.Warnings.Add("Failed to delete the audiobook folder.");
-                    _logger.LogWarning(
-                        "Failed to safely delete audiobook folder {FolderPath}: {Reason}",
-                        LogRedaction.SanitizeFilePath(deleteTarget.FolderPath),
-                        LogRedaction.SanitizeText(reason));
-                    return;
-                }
+                result.Warnings.Add("Failed to delete the audiobook folder.");
+                _logger.LogWarning(
+                    "Failed to safely delete audiobook folder {FolderPath}: {Reason}",
+                    LogRedaction.SanitizeFilePath(deleteTarget.FolderPath),
+                    LogRedaction.SanitizeText(reason));
+                return;
             }
 
-            result.DeletedFolder = !Directory.Exists(deleteTarget.FolderPath);
+            result.DeletedFolder = !Directory.Exists(deleteTarget.FolderPath)
+                && !File.Exists(deleteTarget.FolderPath);
             _logger.LogInformation("Deleted audiobook folder {FolderPath}", LogRedaction.SanitizeFilePath(deleteTarget.FolderPath));
             await TryDeleteEmptyAuthorFolderAsync(
                 audiobook,

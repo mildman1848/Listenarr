@@ -13,10 +13,16 @@ namespace Listenarr.Infrastructure.FileSystem;
 
 public partial class FileMover
 {
+    private sealed record DirectoryCopyFileSnapshot(
+        string RelativePath,
+        RegularFileIdentity Identity);
+
     private sealed record DirectoryCopySnapshot(
         string SourceRoot,
+        RegularFileIdentity SourceRootIdentity,
         IReadOnlyList<string> RelativeDirectories,
-        IReadOnlyList<string> RelativeFiles);
+        IReadOnlyDictionary<string, RegularFileIdentity> DirectoryIdentities,
+        IReadOnlyList<DirectoryCopyFileSnapshot> Files);
 
     private static bool TryCaptureDirectoryCopySnapshot(
         string sourceDirectory,
@@ -36,19 +42,56 @@ public partial class FileMover
             {
                 return false;
             }
+            if (!TryGetDirectoryIdentity(sourceRoot, out var sourceRootIdentity))
+            {
+                reason = "The source directory generation could not be identified safely.";
+                return false;
+            }
 
             var relativeDirectories = directories
                 .Select(path => GetVerifiedRelativePath(sourceRoot, path))
                 .OrderBy(PathDepth)
                 .ThenBy(path => path, StringComparer.Ordinal)
                 .ToArray();
-            var relativeFiles = files
-                .Select(path => GetVerifiedRelativePath(sourceRoot, path))
-                .OrderBy(path => path, StringComparer.Ordinal)
-                .ToArray();
+            var directoryIdentities =
+                new Dictionary<string, RegularFileIdentity>(StringComparer.Ordinal);
+            foreach (var relativeDirectory in relativeDirectories)
+            {
+                var directoryPath = ResolveSnapshotPath(
+                    sourceRoot,
+                    relativeDirectory,
+                    "source directory");
+                if (!TryGetDirectoryIdentity(directoryPath, out var identity))
+                {
+                    reason = "A source directory generation could not be identified safely.";
+                    return false;
+                }
+
+                directoryIdentities.Add(relativeDirectory, identity);
+            }
+
+            var relativeFiles = new List<DirectoryCopyFileSnapshot>(files.Count);
+            foreach (var path in files)
+            {
+                if (!TryGetRegularFileIdentity(path, out var identity))
+                {
+                    reason = "A source file generation could not be identified safely.";
+                    return false;
+                }
+
+                relativeFiles.Add(new DirectoryCopyFileSnapshot(
+                    GetVerifiedRelativePath(sourceRoot, path),
+                    identity));
+            }
+
+            relativeFiles.Sort((left, right) => StringComparer.Ordinal.Compare(
+                left.RelativePath,
+                right.RelativePath));
             snapshot = new DirectoryCopySnapshot(
                 sourceRoot,
+                sourceRootIdentity,
                 relativeDirectories,
+                directoryIdentities,
                 relativeFiles);
             return true;
         }
@@ -103,7 +146,8 @@ public partial class FileMover
 
         var stagingName = $".{Path.GetFileName(destinationRoot)}.listenarr-copy-{Guid.NewGuid():N}";
         var stagingRoot = Path.Join(destinationParent, stagingName);
-        using var stagingCreation = destinationParentAnchor.TryCreateChild(stagingName);
+        using var stagingCreation =
+            destinationParentAnchor.TryCreateChildForPublication(stagingName);
         if (!stagingCreation.Created || !stagingCreation.VisiblePathMatches())
         {
             throw new IOException(
@@ -141,9 +185,12 @@ public partial class FileMover
 
             try
             {
-                Directory.Move(stagingRoot, destinationRoot);
+                using var publishedAnchor = stagingCreation.PublishCreatedDirectoryTo(
+                    destinationParentAnchor,
+                    Path.GetFileName(destinationRoot));
                 published = true;
-                if (!stagingAnchor.VisiblePathMatches(destinationRoot))
+                if (!publishedAnchor.VisiblePathMatches()
+                    || !stagingAnchor.VisiblePathMatches(destinationRoot))
                 {
                     throw new IOException(
                         "The published destination does not identify the pinned staging directory.");
@@ -237,8 +284,9 @@ public partial class FileMover
                 await AfterDirectoryCopyStagingDirectoriesCreatedForTestAsync(stagingAnchor.FullPath);
             }
 
-            foreach (var relativeFile in snapshot.RelativeFiles)
+            foreach (var fileSnapshot in snapshot.Files)
             {
+                var relativeFile = fileSnapshot.RelativePath;
                 var sourceFile = ResolveSnapshotPath(
                     snapshot.SourceRoot,
                     relativeFile,

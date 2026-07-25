@@ -107,6 +107,12 @@ After the quarantine is removed, the row is committed as `Removed` while the ext
 
 Ownership markers are infrastructure, not audiobook content. A move validates and retires source ownership markers instead of copying them, and an existing owned target is accepted only after its marker pair is revalidated at every mutation checkpoint. Atomic rename is disabled when source ownership markers require explicit retirement. An exact unowned source root is also never deleted by its user-visible path after cleanup. Once empty, it is atomically renamed beneath the job-owned quarantine and deleted there. Restart recovery completes that deterministic quarantine, while recreation of the original path preserves both directories and requires operator attention.
 
+### Filesystem mutation threat boundary
+
+User-visible source, destination, marker, tombstone, and quarantine pathnames are untrusted between every validation and mutation. A destructive operation must therefore remain bound to an opened filesystem object, or first move that exact opened object into a private deterministic state directory and operate on the private claim. Reopening a public leaf after publication must prove that it is the same object; a replacement generation is preserved and blocks cleanup.
+
+Named publication, move, and empty-source `.state` directories support process-crash recovery and are restricted to the owning operating-system account (`0700` on Unix-like systems). Listenarr supports one process per SQLite database and treats another malicious process running as that same account as outside this protocol's threat model: such a process can already mutate the database, configuration, and every managed media path. Unexpected entries or unverifiable objects inside private state fail closed. An interrupted one-shot Unix retirement can leave private evidence for operator review rather than deleting through an uncertain public pathname. The durable named protocols provide process-crash consistency; they do not claim power-loss durability for directory entries on every supported filesystem.
+
 ### Durable completion and realtime publication
 
 The durable completion boundary atomically records terminal move state, the idempotent move-history event, and the unique `MoveScanHandoff`. Lease heartbeat and the per-audiobook mutation lock stop after that commit. Webhooks, toasts, scan dispatch, and SignalR publication are post-commit effects and must not make an already completed move appear to lose its lease or roll back filesystem state.

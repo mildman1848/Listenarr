@@ -267,24 +267,28 @@ internal sealed partial class AudiobookContentMoveService
                 continue;
             }
 
-            await EnsureMutationAuthorizedAsync(
-                request,
-                request.Source,
-                request.Target,
-                cancellationToken);
-            EnsurePublishedScaffoldNotRecreated(
-                publishedRoot,
-                artifactRoot,
-                injectQuarantineDeleteFaults);
-            ValidateExistingMoveDirectory(directory, "target scaffold cleanup directory");
-            if (Directory.EnumerateFileSystemEntries(directory).Any())
-            {
-                throw new MoveNeedsAttentionException(
-                    "Target scaffold cleanup directory contains unexpected content.");
-            }
-
-            InjectTargetScaffoldDeleteFault(request.JobId, injectQuarantineDeleteFaults);
-            Directory.Delete(directory, recursive: false);
+            await RetirePinnedEmptyScaffoldDirectoryAsync(
+                directory,
+                () =>
+                {
+                    EnsurePublishedScaffoldNotRecreated(
+                        publishedRoot,
+                        artifactRoot,
+                        injectQuarantineDeleteFaults);
+                    if (Directory.EnumerateFileSystemEntries(directory).Any())
+                    {
+                        throw new MoveNeedsAttentionException(
+                            "Target scaffold cleanup directory contains unexpected content.");
+                    }
+                },
+                () => EnsureMutationAuthorizedAsync(
+                    request,
+                    request.Source,
+                    request.Target,
+                    cancellationToken),
+                () => InjectTargetScaffoldDeleteFault(
+                    request.JobId,
+                    injectQuarantineDeleteFaults));
         }
 
         await EnsureMutationAuthorizedAsync(
@@ -305,24 +309,49 @@ internal sealed partial class AudiobookContentMoveService
         var markerPath = Path.Join(artifactRoot, ScaffoldOwnerFileName);
         if (File.Exists(markerPath))
         {
-            InjectTargetScaffoldDeleteFault(request.JobId, injectQuarantineDeleteFaults);
-            ValidateScaffoldMarker(
-                ReadScaffoldMarker(artifactRoot),
-                request.JobId,
-                request.Target,
-                publishedRoot,
-                request.TargetSemantics);
-            File.Delete(markerPath);
+            await RetirePinnedArtifactAsync(
+                markerPath,
+                entry => ValidateScaffoldMarker(
+                    ReadScaffoldMarker(entry),
+                    request.JobId,
+                    request.Target,
+                    publishedRoot,
+                    request.TargetSemantics),
+                async () =>
+                {
+                    await EnsureMutationAuthorizedAsync(
+                        request,
+                        request.Source,
+                        request.Target,
+                        cancellationToken);
+                    InjectTargetScaffoldDeleteFault(
+                        request.JobId,
+                        injectQuarantineDeleteFaults);
+                });
         }
 
-        InjectTargetScaffoldDeleteFault(request.JobId, injectQuarantineDeleteFaults);
-        ValidateExistingMoveDirectory(artifactRoot, "target scaffold cleanup root");
-        if (Directory.EnumerateFileSystemEntries(artifactRoot).Any())
-        {
-            throw new MoveNeedsAttentionException(
-                "Target scaffold cleanup root contains unexpected content.");
-        }
-        Directory.Delete(artifactRoot, recursive: false);
+        await RetirePinnedEmptyScaffoldDirectoryAsync(
+            artifactRoot,
+            () =>
+            {
+                EnsurePublishedScaffoldNotRecreated(
+                    publishedRoot,
+                    artifactRoot,
+                    injectQuarantineDeleteFaults);
+                if (Directory.EnumerateFileSystemEntries(artifactRoot).Any())
+                {
+                    throw new MoveNeedsAttentionException(
+                        "Target scaffold cleanup root contains unexpected content.");
+                }
+            },
+            () => EnsureMutationAuthorizedAsync(
+                request,
+                request.Source,
+                request.Target,
+                cancellationToken),
+            () => InjectTargetScaffoldDeleteFault(
+                request.JobId,
+                injectQuarantineDeleteFaults));
     }
 
     private async Task DeleteTargetScaffoldCleanupTombstoneAsync(
@@ -342,7 +371,23 @@ internal sealed partial class AudiobookContentMoveService
         ValidateExistingMoveDirectory(parent, "target scaffold cleanup tombstone directory");
         if (File.Exists(tombstonePath))
         {
-            File.Delete(tombstonePath);
+            await RetirePinnedArtifactAsync(
+                tombstonePath,
+                entry =>
+                {
+                    var marker = ReadOwnershipMarker(entry, tombstonePath);
+                    ValidateOwnershipMarker(
+                        marker,
+                        expectedTombstone,
+                        request.SourceSemantics,
+                        request.TargetSemantics,
+                        request.TargetSemantics);
+                },
+                () => EnsureMutationAuthorizedAsync(
+                    request,
+                    request.Source,
+                    request.Target,
+                    cancellationToken));
         }
     }
 

@@ -311,9 +311,10 @@ internal sealed partial class AudiobookContentMoveService
 
             foreach (var file in ownedFiles)
             {
-                await authorizeMutation();
-                ValidateOwnedCleanupEntry(file, directoryPath);
-                File.Delete(file);
+                await RetirePinnedArtifactAsync(
+                    file,
+                    _ => ValidateOwnedCleanupEntry(file, directoryPath),
+                    authorizeMutation);
             }
 
             foreach (var directory in directories.OrderByDescending(path => path.Length))
@@ -343,16 +344,20 @@ internal sealed partial class AudiobookContentMoveService
                     sourceSemantics,
                     targetSemantics,
                     directorySemantics);
-                await authorizeMutation();
-                ValidateOwnedCleanupEntry(markerPath, directoryPath);
-                directoryMarker = ReadOwnershipMarker(markerPath);
-                ValidateOwnershipMarker(
-                    directoryMarker,
-                    expectedDirectoryMarker,
-                    sourceSemantics,
-                    targetSemantics,
-                    directorySemantics);
-                File.Delete(markerPath);
+                await RetirePinnedArtifactAsync(
+                    markerPath,
+                    entry =>
+                    {
+                        ValidateOwnedCleanupEntry(markerPath, directoryPath);
+                        directoryMarker = ReadOwnershipMarker(entry, markerPath);
+                        ValidateOwnershipMarker(
+                            directoryMarker,
+                            expectedDirectoryMarker,
+                            sourceSemantics,
+                            targetSemantics,
+                            directorySemantics);
+                    },
+                    authorizeMutation);
             }
 
             ValidateExistingMoveDirectory(directoryPath, "owned cleanup directory");
@@ -405,16 +410,20 @@ internal sealed partial class AudiobookContentMoveService
             sourceSemantics,
             targetSemantics,
             directorySemantics);
-        await authorizeMutation();
-        RejectRecreatedOriginalOwnedPath(expectedTombstone);
-        validatedTombstone = ReadOwnershipMarker(tombstonePath);
-        ValidateOwnershipMarker(
-            validatedTombstone,
-            expectedTombstone,
-            sourceSemantics,
-            targetSemantics,
-            directorySemantics);
-        File.Delete(tombstonePath);
+        await RetirePinnedArtifactAsync(
+            tombstonePath,
+            entry =>
+            {
+                RejectRecreatedOriginalOwnedPath(expectedTombstone);
+                validatedTombstone = ReadOwnershipMarker(entry, tombstonePath);
+                ValidateOwnershipMarker(
+                    validatedTombstone,
+                    expectedTombstone,
+                    sourceSemantics,
+                    targetSemantics,
+                    directorySemantics);
+            },
+            authorizeMutation);
     }
 
     private static bool TryGetExistingPathAttributes(

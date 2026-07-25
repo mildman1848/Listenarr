@@ -16,6 +16,7 @@ internal sealed partial class EfLibraryDirectoryOwnershipStore(
         RecordCreatedCoreAsync(
             claim,
             pinnedCreation: null,
+            pinnedCreationIsNew: false,
             cancellationToken);
 
     internal Task<LibraryDirectoryOwnership> RecordPinnedCreatedAsync(
@@ -25,11 +26,23 @@ internal sealed partial class EfLibraryDirectoryOwnershipStore(
         RecordCreatedCoreAsync(
             claim,
             pinnedCreation,
+            pinnedCreationIsNew: true,
+            cancellationToken);
+
+    private Task<LibraryDirectoryOwnership> RepairPinnedExistingAsync(
+        LibraryDirectoryOwnershipClaim claim,
+        PinnedDirectoryCreation pinnedCreation,
+        CancellationToken cancellationToken = default) =>
+        RecordCreatedCoreAsync(
+            claim,
+            pinnedCreation,
+            pinnedCreationIsNew: false,
             cancellationToken);
 
     private async Task<LibraryDirectoryOwnership> RecordCreatedCoreAsync(
         LibraryDirectoryOwnershipClaim claim,
         PinnedDirectoryCreation? pinnedCreation,
+        bool pinnedCreationIsNew,
         CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(claim);
@@ -40,18 +53,25 @@ internal sealed partial class EfLibraryDirectoryOwnershipStore(
         var canonicalPath = FileSystemPathIdentity.Canonicalize(
             claim.Path,
             claim.Semantics.Syntax);
-        if (pinnedCreation != null)
+        using var existingPinnedCreation = pinnedCreation == null
+            ? PinnedDirectoryCreation.OpenExistingForPublication(
+                Path.GetDirectoryName(canonicalPath)
+                    ?? throw new InvalidOperationException(
+                        "The claimed directory has no parent directory."),
+                Path.GetFileName(canonicalPath))
+            : null;
+        var markerCreation = pinnedCreation ?? existingPinnedCreation
+            ?? throw new InvalidOperationException(
+                "The claimed directory could not be pinned.");
+        if (!markerCreation.Created
+            || !FileSystemPathIdentity.AreEquivalent(
+                markerCreation.FullPath,
+                canonicalPath,
+                claim.Semantics)
+            || !markerCreation.VisiblePathMatches())
         {
-            if (!pinnedCreation.Created
-                || !FileSystemPathIdentity.AreEquivalent(
-                    pinnedCreation.FullPath,
-                    canonicalPath,
-                    claim.Semantics)
-                || !pinnedCreation.VisiblePathMatches())
-            {
-                throw new InvalidOperationException(
-                    "The newly created directory no longer matches its validated pathname.");
-            }
+            throw new InvalidOperationException(
+                "The claimed directory no longer matches its validated pathname.");
         }
 
         var lookupKey = FileSystemPathIdentity.CreateLookupKey(
@@ -95,7 +115,7 @@ internal sealed partial class EfLibraryDirectoryOwnershipStore(
             }
         }
 
-        if (pinnedCreation != null && (compatible.Count > 0 || conflicts.Count > 0))
+        if (pinnedCreationIsNew && (compatible.Count > 0 || conflicts.Count > 0))
         {
             throw new InvalidOperationException(
                 "The newly created directory conflicts with an existing durable ownership claim.");
@@ -104,6 +124,11 @@ internal sealed partial class EfLibraryDirectoryOwnershipStore(
         if (compatible.Count == 1 && conflicts.Count == 0)
         {
             var existing = compatible[0];
+            await PinnedLibraryDirectoryOwnershipMarker.EnsureAsync(
+                existing,
+                markerCreation,
+                cancellationToken);
+            ValidatePinnedOwnership(existing, markerCreation);
             existing.State = LibraryDirectoryOwnershipState.Owned;
             existing.StateReason = null;
             existing.UpdatedAt = now;
@@ -116,7 +141,6 @@ internal sealed partial class EfLibraryDirectoryOwnershipStore(
                 retiredCandidates,
                 canonicalPath,
                 claim.Semantics);
-            await LibraryDirectoryOwnershipMarker.EnsureAsync(existing, cancellationToken);
             return existing;
         }
 
@@ -159,28 +183,25 @@ internal sealed partial class EfLibraryDirectoryOwnershipStore(
         try
         {
             await db.SaveChangesAsync(cancellationToken);
-            if (pinnedCreation != null)
+            try
             {
-                try
+                await PinnedLibraryDirectoryOwnershipMarker.EnsureAsync(
+                    ownership,
+                    markerCreation,
+                    cancellationToken);
+            }
+            catch
+            {
+                if (transaction != null)
                 {
-                    await PinnedLibraryDirectoryOwnershipMarker.EnsureAsync(
-                        ownership,
-                        pinnedCreation,
-                        cancellationToken);
+                    await transaction.RollbackAsync(CancellationToken.None);
                 }
-                catch
+                else
                 {
-                    if (transaction != null)
-                    {
-                        await transaction.RollbackAsync(CancellationToken.None);
-                    }
-                    else
-                    {
-                        db.LibraryDirectoryOwnerships.Remove(ownership);
-                        await db.SaveChangesAsync(CancellationToken.None);
-                    }
-                    throw;
+                    db.LibraryDirectoryOwnerships.Remove(ownership);
+                    await db.SaveChangesAsync(CancellationToken.None);
                 }
+                throw;
             }
 
             if (transaction != null)
@@ -191,10 +212,6 @@ internal sealed partial class EfLibraryDirectoryOwnershipStore(
                 retiredCandidates,
                 canonicalPath,
                 claim.Semantics);
-            if (pinnedCreation == null)
-            {
-                await LibraryDirectoryOwnershipMarker.EnsureAsync(ownership, cancellationToken);
-            }
             return ownership;
         }
         catch (UniqueConstraintViolationException)
@@ -218,15 +235,35 @@ internal sealed partial class EfLibraryDirectoryOwnershipStore(
             if (concurrent != null
                 && Compare(concurrent, canonicalPath, claim.Semantics) == OwnershipComparison.Compatible)
             {
+                await PinnedLibraryDirectoryOwnershipMarker.EnsureAsync(
+                    concurrent,
+                    markerCreation,
+                    cancellationToken);
+                ValidatePinnedOwnership(concurrent, markerCreation);
                 CleanupRetiredSiblingMarkers(
                     retiredCandidates,
                     canonicalPath,
                     claim.Semantics);
-                await LibraryDirectoryOwnershipMarker.EnsureAsync(concurrent, cancellationToken);
                 return concurrent;
             }
             throw;
         }
+    }
+
+    private static void ValidatePinnedOwnership(
+        LibraryDirectoryOwnership ownership,
+        PinnedDirectoryCreation creation)
+    {
+        using var directory = creation.OpenCreatedDirectoryAnchor();
+        var parentPath = Path.GetDirectoryName(ownership.CanonicalPath)
+            ?? throw new InvalidOperationException(
+                "The durable ownership path has no parent directory.");
+        using var parent = PinnedDirectoryCreation.OpenPinnedDirectoryNoFollow(
+            parentPath);
+        LibraryDirectoryOwnershipMarker.Validate(
+            ownership,
+            directory,
+            parent);
     }
 
     private static void CleanupRetiredSiblingMarkers(

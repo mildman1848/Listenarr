@@ -39,6 +39,7 @@ public partial class FileMover
             destinationStateDirectory,
             Path.Join(sourceStateDirectory, "source.claim"),
             Path.Join(destinationStateDirectory, "destination.stage"),
+            Path.Join(destinationStateDirectory, "destination.previous"),
             Path.Join(sourceStateDirectory, "replacement-generation.fence"));
     }
 
@@ -130,10 +131,12 @@ public partial class FileMover
 
     private void RestoreUncommittedFileMove(
         string sourceFile,
+        string destinationFile,
         FileMoveStatePaths state)
     {
         TryRestoreStateFile(state.SourceClaim, sourceFile);
         TryDeleteFile(state.DestinationStage);
+        TryRestoreStateFile(state.DestinationPrevious, destinationFile);
         TryDeleteEmptyStateDirectories(state);
     }
 
@@ -193,7 +196,8 @@ public partial class FileMover
         string destinationFile,
         FileMoveStatePaths state) =>
         (PathEntryExists(sourceFile) && File.Exists(state.SourceClaim))
-        || (PathEntryExists(destinationFile) && File.Exists(state.DestinationStage));
+        || (PathEntryExists(destinationFile) && File.Exists(state.DestinationStage))
+        || (PathEntryExists(destinationFile) && File.Exists(state.DestinationPrevious));
 
     private static void TryDeleteEmptyStateDirectories(FileMoveStatePaths state)
     {

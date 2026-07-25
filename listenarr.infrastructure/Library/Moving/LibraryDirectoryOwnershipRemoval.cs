@@ -1,5 +1,3 @@
-using Listenarr.Domain.Common;
-
 namespace Listenarr.Infrastructure.Library.Moving;
 
 internal enum LibraryDirectoryRemovalOutcome
@@ -92,12 +90,21 @@ internal static class LibraryDirectoryOwnershipRemoval
                 "Both the owned directory and its removal quarantine exist.");
         }
 
+        PinnedDirectoryCreation? pinnedDirectory = null;
+        PinnedDirectoryCreation.PinnedDirectoryAnchor? quarantineAnchor = null;
+        using var parentAnchor = PinnedDirectoryCreation.OpenPinnedDirectoryNoFollow(
+            parentPath);
         if (originalExists)
         {
+            pinnedDirectory = parentAnchor.OpenExistingChildForPublication(
+                Path.GetFileName(originalPath));
+            using var originalAnchor = pinnedDirectory.OpenCreatedDirectoryAnchor();
             if (!LibraryDirectoryOwnershipMarker.ContainsOnlyInsideMarker(
                     ownership,
-                    originalPath))
+                    originalAnchor,
+                    parentAnchor))
             {
+                pinnedDirectory.Dispose();
                 return LibraryDirectoryRemovalOutcome.Retained;
             }
 
@@ -107,20 +114,9 @@ internal static class LibraryDirectoryOwnershipRemoval
                     "The owned directory removal quarantine path is already occupied.");
             }
 
-            Directory.Move(originalPath, quarantinePath);
-            try
-            {
-                LibraryDirectoryOwnershipMarker.Validate(
-                    ownership,
-                    quarantinePath);
-            }
-            catch (Exception exception) when (exception is
-                ArgumentException or IOException or UnauthorizedAccessException
-                    or InvalidOperationException or NotSupportedException)
-            {
-                TryRestoreQuarantine(originalPath, quarantinePath);
-                throw;
-            }
+            quarantineAnchor = pinnedDirectory.RepublishPinnedDirectory(
+                Path.GetFileName(originalPath),
+                Path.GetFileName(quarantinePath));
             quarantineExists = true;
         }
 
@@ -135,67 +131,65 @@ internal static class LibraryDirectoryOwnershipRemoval
             return LibraryDirectoryRemovalOutcome.AlreadyRemoved;
         }
 
-        LibraryDirectoryOwnershipMarker.Validate(ownership, quarantinePath);
-        var insideMarkerPath = Path.Join(
-            quarantinePath,
-            LibraryDirectoryOwnershipMarker.FileName);
-        if (Directory.EnumerateFileSystemEntries(quarantinePath)
-            .Any(path => !string.Equals(path, insideMarkerPath, StringComparison.Ordinal)))
+        pinnedDirectory ??= parentAnchor.OpenExistingChildForPublication(
+            Path.GetFileName(quarantinePath));
+        quarantineAnchor ??= pinnedDirectory.OpenCreatedDirectoryAnchor();
+        try
         {
-            TryRestoreQuarantine(originalPath, quarantinePath);
-            return LibraryDirectoryRemovalOutcome.Retained;
-        }
-
-        if (!FileSystemSafety.TryValidateMutationTarget(
+            LibraryDirectoryOwnershipMarker.Validate(
+                ownership,
+                quarantineAnchor,
+                parentAnchor);
+            var insideMarkerPath = Path.Join(
                 quarantinePath,
-                [parentPath],
-                out var validatedQuarantinePath,
-                out var validationReason)
-            || !FileSystemPathIdentity.AreEquivalent(
-                validatedQuarantinePath,
-                Path.GetFullPath(quarantinePath),
-                ownership.GetIdentity().Semantics))
-        {
-            throw new InvalidOperationException(
-                $"The owned directory removal quarantine is unsafe: {validationReason}");
-        }
+                LibraryDirectoryOwnershipMarker.FileName);
+            if (Directory.EnumerateFileSystemEntries(quarantinePath)
+                .Any(path => !string.Equals(path, insideMarkerPath, StringComparison.Ordinal))
+                || !quarantineAnchor.VisiblePathMatches())
+            {
+                RestorePinnedQuarantine(
+                    pinnedDirectory,
+                    originalPath,
+                    quarantinePath);
+                return LibraryDirectoryRemovalOutcome.Retained;
+            }
 
-        cancellationToken.ThrowIfCancellationRequested();
-        LibraryDirectoryOwnershipMarker.DeleteInsideMarker(
-            ownership,
-            quarantinePath);
-        if (Directory.EnumerateFileSystemEntries(quarantinePath).Any())
-        {
-            throw new InvalidOperationException(
-                "The owned directory removal quarantine changed after its inside marker was removed.");
-        }
+            cancellationToken.ThrowIfCancellationRequested();
+            LibraryDirectoryOwnershipMarker.DeleteInsideMarker(
+                ownership,
+                quarantineAnchor,
+                parentAnchor);
+            if (Directory.EnumerateFileSystemEntries(quarantinePath).Any()
+                || !quarantineAnchor.VisiblePathMatches())
+            {
+                throw new InvalidOperationException(
+                    "The owned directory removal quarantine changed after its inside marker was removed.");
+            }
 
-        if (!FileSystemSafety.TryDeleteEmptyDirectory(
-                quarantinePath,
-                [parentPath],
-                out var deleteReason))
-        {
-            throw new InvalidOperationException(
-                $"The owned directory removal quarantine could not be deleted safely: {deleteReason}");
+            pinnedDirectory.DeletePinnedEmptyDirectory(
+                Path.GetFileName(quarantinePath));
+            return LibraryDirectoryRemovalOutcome.Removed;
         }
-
-        return LibraryDirectoryRemovalOutcome.Removed;
+        finally
+        {
+            quarantineAnchor?.Dispose();
+            pinnedDirectory?.Dispose();
+        }
     }
 
-    private static void TryRestoreQuarantine(
+    private static void RestorePinnedQuarantine(
+        PinnedDirectoryCreation pinnedDirectory,
         string originalPath,
         string quarantinePath)
     {
-        if (!Directory.Exists(quarantinePath))
-        {
-            return;
-        }
         if (File.Exists(originalPath) || Directory.Exists(originalPath))
         {
             throw new InvalidOperationException(
                 "The original owned directory path was recreated while its quarantine was active.");
         }
 
-        Directory.Move(quarantinePath, originalPath);
+        using var restored = pinnedDirectory.RepublishPinnedDirectory(
+            Path.GetFileName(quarantinePath),
+            Path.GetFileName(originalPath));
     }
 }

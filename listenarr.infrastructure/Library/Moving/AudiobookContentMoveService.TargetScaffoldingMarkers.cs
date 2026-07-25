@@ -87,6 +87,32 @@ internal sealed partial class AudiobookContentMoveService
         }
     }
 
+    private static ScaffoldOwnershipMarker ReadScaffoldMarker(
+        PinnedDirectoryCreation.PinnedFileEntry markerEntry)
+    {
+        try
+        {
+            using var stream = markerEntry.OpenReadStream(
+                bufferSize: 4096,
+                asynchronous: false);
+            if (stream.Length <= 0 || stream.Length > MaximumScaffoldMarkerBytes)
+            {
+                throw new MoveNeedsAttentionException(
+                    "The target scaffold ownership marker has an invalid size.");
+            }
+
+            stream.Position = 0;
+            return JsonSerializer.Deserialize<ScaffoldOwnershipMarker>(stream)
+                ?? throw new MoveNeedsAttentionException(
+                    "The target scaffold ownership marker is invalid.");
+        }
+        catch (JsonException exception)
+        {
+            throw new MoveNeedsAttentionException(
+                $"The target scaffold ownership marker is invalid: {exception.Message}");
+        }
+    }
+
     private static void ValidateScaffoldMarker(
         ScaffoldOwnershipMarker? marker,
         Guid jobId,

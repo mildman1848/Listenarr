@@ -104,6 +104,116 @@ public class LibraryController_DeleteLinkSafetyTests : BaseTests
             || warning.Contains("reparse point", StringComparison.OrdinalIgnoreCase));
     }
 
+    [Fact]
+    public async Task FilesystemDelete_ParentReplacedAfterValidation_PreservesBothGenerations()
+    {
+        var tempRoot = FileService.GetTempDirectory("listenarr-delete-parent-race");
+        var bookFolder = Path.Join(tempRoot, "Book");
+        var displacedFolder = Path.Join(tempRoot, "Book-displaced");
+        var externalFolder = FileService.GetTempDirectory("listenarr-delete-parent-race-external");
+        var localFile = Path.Join(bookFolder, "book.m4b");
+        var displacedFile = Path.Join(displacedFolder, "book.m4b");
+        var externalFile = Path.Join(externalFolder, "book.m4b");
+        Directory.CreateDirectory(bookFolder);
+        await File.WriteAllTextAsync(localFile, "owned audio");
+        await File.WriteAllTextAsync(externalFile, "external audio");
+
+        var audiobook = await _audiobookRepository.AddAsync(new AudiobookBuilder()
+            .WithTitle("Replacement Race Book")
+            .WithBasePath(bookFolder)
+            .WithFilePath(localFile)
+            .Build());
+        await _audiobookFileRepository.AddAsync(new AudiobookFileBuilder()
+            .WithAudiobook(audiobook)
+            .WithPath(localFile)
+            .Build());
+
+        var replaced = false;
+        using var hook = ExclusiveDirectoryCreator.PushBeforeOpenParentHook(path =>
+        {
+            if (replaced || !string.Equals(path, bookFolder, StringComparison.Ordinal))
+            {
+                return;
+            }
+
+            Directory.Move(bookFolder, displacedFolder);
+            if (!TryCreateDirectoryLink(bookFolder, externalFolder))
+            {
+                Directory.Move(displacedFolder, bookFolder);
+                return;
+            }
+
+            replaced = true;
+        });
+
+        var service = _provider.GetRequiredService<IAudiobookFilesystemDeleteService>();
+        var result = await service.DeleteAsync(audiobook, deleteFolder: true);
+
+        if (!replaced)
+        {
+            return;
+        }
+
+        Assert.True(File.Exists(displacedFile));
+        Assert.Equal("owned audio", await File.ReadAllTextAsync(displacedFile));
+        Assert.True(File.Exists(externalFile));
+        Assert.Equal("external audio", await File.ReadAllTextAsync(externalFile));
+        Assert.False(result.DeletedFolder);
+        Assert.Contains(result.Warnings, warning =>
+            warning.Contains("delete", StringComparison.OrdinalIgnoreCase));
+        Directory.Delete(bookFolder, recursive: false);
+        Directory.Move(displacedFolder, bookFolder);
+    }
+
+    [Fact]
+    public async Task FilesystemDelete_FolderReplacedByFile_DoesNotReportSuccess()
+    {
+        var tempRoot = FileService.GetTempDirectory("listenarr-delete-folder-file-race");
+        var bookFolder = Path.Join(tempRoot, "Book");
+        var displacedFolder = Path.Join(tempRoot, "Book-displaced");
+        var localFile = Path.Join(bookFolder, "book.m4b");
+        var displacedFile = Path.Join(displacedFolder, "book.m4b");
+        Directory.CreateDirectory(bookFolder);
+        await File.WriteAllTextAsync(localFile, "owned audio");
+
+        var audiobook = await _audiobookRepository.AddAsync(new AudiobookBuilder()
+            .WithTitle("Folder File Race Book")
+            .WithBasePath(bookFolder)
+            .WithFilePath(localFile)
+            .Build());
+        await _audiobookFileRepository.AddAsync(new AudiobookFileBuilder()
+            .WithAudiobook(audiobook)
+            .WithPath(localFile)
+            .Build());
+
+        var replaced = false;
+        using var hook = ExclusiveDirectoryCreator.PushBeforeOpenParentHook(path =>
+        {
+            if (replaced || !string.Equals(path, bookFolder, StringComparison.Ordinal))
+            {
+                return;
+            }
+
+            Directory.Move(bookFolder, displacedFolder);
+            File.WriteAllText(bookFolder, "replacement");
+            replaced = true;
+        });
+
+        var service = _provider.GetRequiredService<IAudiobookFilesystemDeleteService>();
+        var result = await service.DeleteAsync(audiobook, deleteFolder: true);
+
+        Assert.True(replaced);
+        Assert.True(File.Exists(displacedFile));
+        Assert.Equal("owned audio", await File.ReadAllTextAsync(displacedFile));
+        Assert.True(File.Exists(bookFolder));
+        Assert.Equal("replacement", await File.ReadAllTextAsync(bookFolder));
+        Assert.False(result.DeletedFolder);
+        Assert.Contains(result.Warnings, warning =>
+            warning.Contains("delete", StringComparison.OrdinalIgnoreCase));
+        File.Delete(bookFolder);
+        Directory.Move(displacedFolder, bookFolder);
+    }
+
     private static bool TryCreateDirectoryLink(string linkPath, string targetPath)
     {
         try

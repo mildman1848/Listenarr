@@ -243,19 +243,14 @@ namespace Listenarr.Infrastructure.FileSystem
                         }
                     }
 
-                    File.Move(tempDest, destFile, overwrite: true);
+                    await PublishPreparedFileReplacingCapturedDestinationAsync(
+                        tempDest,
+                        destFile);
                     LogMutation(FileMutationOutcome.Success, FileAction.HardlinkCopy, sourceFile, destFile);
                     return true;
                 }
                 catch (Exception linkEx) when (linkEx is not OperationCanceledException && linkEx is not OutOfMemoryException && linkEx is not StackOverflowException)
                 {
-                    try { if (File.Exists(tempDest)) File.Delete(tempDest); }
-                    catch (Exception cleanupEx) when (cleanupEx is not OperationCanceledException
-                                                   && cleanupEx is not OutOfMemoryException
-                                                   && cleanupEx is not StackOverflowException)
-                    {
-                    }
-
                     var isCrossDevice = linkEx is IOException ioEx && ioEx.Message.Contains("error code 17");
                     if (!isCrossDevice)
                         isCrossDevice = linkEx is IOException ioEx2 && ioEx2.Message.Contains("error code 18");
@@ -269,19 +264,18 @@ namespace Listenarr.Infrastructure.FileSystem
                     var tempCopyPath = Path.Join(destDir, tempCopyName);
                     try
                     {
-                        File.Copy(sourceFile, tempCopyPath, overwrite: true);
-                        File.Move(tempCopyPath, destFile, overwrite: true);
+                        File.Copy(sourceFile, tempCopyPath, overwrite: false);
+                        await PublishPreparedFileReplacingCapturedDestinationAsync(
+                            tempCopyPath,
+                            destFile);
                         LogMutation(FileMutationOutcome.Success, FileAction.HardlinkCopy, sourceFile, destFile, "Copied after hardlink failure");
                         return true;
                     }
-                    finally
+                    catch
                     {
-                        try { if (File.Exists(tempCopyPath)) File.Delete(tempCopyPath); }
-                        catch (Exception cleanupEx) when (cleanupEx is not OperationCanceledException
-                                                       && cleanupEx is not OutOfMemoryException
-                                                       && cleanupEx is not StackOverflowException)
-                        {
-                        }
+                        // The temporary pathname is public and may have been replaced.
+                        // Preserve an uncertain entry instead of deleting through it.
+                        throw;
                     }
                 }
             }
@@ -408,7 +402,7 @@ namespace Listenarr.Infrastructure.FileSystem
                 destinationIdentity);
             if (removalOutcome == VerifiedFileMoveRemovalOutcome.NotRemoved)
             {
-                return IdempotentFileMoveOutcome.NotApplicable;
+                return IdempotentFileMoveOutcome.SourcePathRecreated;
             }
 
             if (removalOutcome == VerifiedFileMoveRemovalOutcome.PathRecreated)

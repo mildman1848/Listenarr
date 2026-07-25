@@ -241,18 +241,18 @@ internal sealed partial class AudiobookContentMoveService
             result.RecoveryMarkerPath,
             result.Target,
             request.TargetSemantics);
-        ValidateRecoveryMarker(
-            ReadRecoveryMarker(result.RecoveryMarkerPath),
-            request,
-            result.Source,
-            result.Target);
-        if (!File.Exists(result.RecoveryMarkerPath)
-            || (File.GetAttributes(result.RecoveryMarkerPath) & FileAttributes.ReparsePoint) != 0)
-        {
-            throw new MoveNeedsAttentionException(
-                "The completed recovery marker changed before deletion.");
-        }
-        File.Delete(result.RecoveryMarkerPath);
+        await RetirePinnedArtifactAsync(
+            result.RecoveryMarkerPath,
+            entry => ValidateRecoveryMarker(
+                ReadRecoveryMarker(entry, result.RecoveryMarkerPath),
+                request,
+                result.Source,
+                result.Target),
+            () => EnsureMutationAuthorizedAsync(
+                request,
+                result.Source,
+                result.Target,
+                cancellationToken));
         await RetainTargetScaffoldingAsync(request, cancellationToken);
     }
 

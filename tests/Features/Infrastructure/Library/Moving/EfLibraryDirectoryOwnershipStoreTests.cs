@@ -251,8 +251,12 @@ public sealed class EfLibraryDirectoryOwnershipStoreTests : BaseTests
         Assert.Equal(ownership.Id, resolution.Ownership?.Id);
     }
 
-    [Fact]
-    public async Task EnsureCreatedHierarchyAsync_RepairsMarkersOnlyForExistingDurableClaim()
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    [InlineData(2)]
+    public async Task EnsureCreatedHierarchyAsync_RepairsMarkersOnlyForExistingDurableClaim(
+        int missingMarker)
     {
         var destination = Path.Join(_root, "Author", "Book");
         var ownerships = await _store.EnsureCreatedHierarchyAsync(
@@ -265,7 +269,13 @@ public sealed class EfLibraryDirectoryOwnershipStoreTests : BaseTests
                 item.CanonicalPath,
                 destination,
                 FileSystemPathSemantics.CurrentHostDefault));
-        foreach (var markerPath in LibraryDirectoryOwnershipMarker.GetMarkerPaths(ownership))
+        var markerPaths = LibraryDirectoryOwnershipMarker
+            .GetMarkerPaths(ownership)
+            .ToList();
+        IReadOnlyList<string> pathsToDelete = missingMarker == 2
+            ? markerPaths
+            : [markerPaths[missingMarker]];
+        foreach (var markerPath in pathsToDelete)
         {
             if (OperatingSystem.IsWindows())
             {
@@ -407,9 +417,13 @@ public sealed class EfLibraryDirectoryOwnershipStoreTests : BaseTests
 
         var quarantineException = Assert.Throws<InvalidOperationException>(() =>
             LibraryDirectoryOwnershipRemoval.GetQuarantinePath(ownership));
+        using var publication = PinnedDirectoryCreation.OpenExistingForPublication(
+            Path.GetDirectoryName(directory)!,
+            Path.GetFileName(directory));
         var markerException = await Assert.ThrowsAsync<InvalidOperationException>(() =>
-            LibraryDirectoryOwnershipMarker.EnsureAsync(
+            PinnedLibraryDirectoryOwnershipMarker.EnsureAsync(
                 ownership,
+                publication,
                 CancellationToken.None));
 
         Assert.Contains("token is invalid", quarantineException.Message, StringComparison.OrdinalIgnoreCase);
