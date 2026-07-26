@@ -1,3 +1,5 @@
+using Listenarr.Domain.Common;
+
 namespace Listenarr.Infrastructure.Library.Moving;
 
 internal enum LibraryDirectoryRemovalOutcome
@@ -66,6 +68,7 @@ internal static class LibraryDirectoryOwnershipRemoval
 
     public static LibraryDirectoryRemovalOutcome RemoveEmptyDirectory(
         LibraryDirectoryOwnership ownership,
+        PinnedDirectoryCreation.PinnedDirectoryAnchor parentAnchor,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(ownership);
@@ -92,13 +95,21 @@ internal static class LibraryDirectoryOwnershipRemoval
 
         PinnedDirectoryCreation? pinnedDirectory = null;
         PinnedDirectoryCreation.PinnedDirectoryAnchor? quarantineAnchor = null;
-        using var parentAnchor = PinnedDirectoryCreation.OpenPinnedDirectoryNoFollow(
-            parentPath);
+        if (!FileSystemPathIdentity.AreEquivalent(
+                parentAnchor.FullPath,
+                parentPath,
+                ownership.GetIdentity().Semantics)
+            || !parentAnchor.VisiblePathMatches())
+        {
+            throw new InvalidOperationException(
+                "The authorized ownership parent no longer matches the persisted path.");
+        }
         if (originalExists)
         {
             pinnedDirectory = parentAnchor.OpenExistingChildForPublication(
                 Path.GetFileName(originalPath));
             using var originalAnchor = pinnedDirectory.OpenCreatedDirectoryAnchor();
+            EnsurePhysicalIdentity(ownership, originalAnchor);
             if (!LibraryDirectoryOwnershipMarker.ContainsOnlyInsideMarker(
                     ownership,
                     originalAnchor,
@@ -136,6 +147,7 @@ internal static class LibraryDirectoryOwnershipRemoval
         quarantineAnchor ??= pinnedDirectory.OpenCreatedDirectoryAnchor();
         try
         {
+            EnsurePhysicalIdentity(ownership, quarantineAnchor);
             LibraryDirectoryOwnershipMarker.Validate(
                 ownership,
                 quarantineAnchor,
@@ -174,6 +186,23 @@ internal static class LibraryDirectoryOwnershipRemoval
         {
             quarantineAnchor?.Dispose();
             pinnedDirectory?.Dispose();
+        }
+    }
+
+    private static void EnsurePhysicalIdentity(
+        LibraryDirectoryOwnership ownership,
+        PinnedDirectoryCreation.PinnedDirectoryAnchor directory)
+    {
+        if (ownership.DirectoryObjectIdentityVersion != 1
+            || string.IsNullOrWhiteSpace(ownership.DirectoryObjectIdentity)
+            || !string.Equals(
+                directory.GetDirectoryObjectIdentity(),
+                ownership.DirectoryObjectIdentity,
+                StringComparison.Ordinal)
+            || !directory.VisiblePathMatches())
+        {
+            throw new InvalidOperationException(
+                "The owned directory no longer matches its enrolled physical identity.");
         }
     }
 

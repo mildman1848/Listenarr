@@ -20,10 +20,13 @@ public sealed class LibraryDirectoryOwnershipConfiguration
         builder.Property(ownership => ownership.OwnershipToken).HasMaxLength(64);
         builder.Property(ownership => ownership.State).HasConversion<string>().HasMaxLength(16);
         builder.Property(ownership => ownership.CreationWorkflow).HasMaxLength(64);
+        builder.Property(ownership => ownership.DirectoryObjectIdentity).HasMaxLength(256);
+        builder.Property(ownership => ownership.DirectoryObjectIdentityUnavailableReason).HasMaxLength(1024);
         builder.Property(ownership => ownership.StateReason).HasMaxLength(1024);
 
         builder.HasIndex(ownership => ownership.PathIdentityLookupKey);
         builder.HasIndex(ownership => ownership.OwnershipToken).IsUnique();
+        builder.HasIndex(ownership => ownership.ManagedRootFolderId);
         builder.HasIndex(ownership => ownership.PathOwnershipKey)
             .IsUnique()
             .HasFilter("\"PathOwnershipKey\" IS NOT NULL");

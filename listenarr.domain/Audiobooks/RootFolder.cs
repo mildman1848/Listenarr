@@ -44,6 +44,14 @@ namespace Listenarr.Domain.Audiobooks
 
         public PathIdentityState PathIdentityState { get; set; } = PathIdentityState.Unavailable;
 
+        public int? DirectoryObjectIdentityVersion { get; set; }
+
+        [MaxLength(256)]
+        public string? DirectoryObjectIdentity { get; set; }
+
+        [MaxLength(1024)]
+        public string? DirectoryObjectIdentityUnavailableReason { get; set; }
+
         public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
 
         public DateTime? UpdatedAt { get; set; }

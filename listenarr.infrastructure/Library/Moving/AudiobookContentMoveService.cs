@@ -47,13 +47,17 @@ internal sealed partial class AudiobookContentMoveService(
     TimeProvider timeProvider,
     IMoveFaultInjector? faultInjector = null,
     IMoveExecutionStore? moveExecutionStore = null,
-    ILibraryDirectoryOwnershipStore? directoryOwnershipStore = null)
+    ILibraryDirectoryOwnershipStore? directoryOwnershipStore = null,
+    LibraryDirectoryOwnershipBoundaryAuthorizer? ownershipAuthorizer = null)
 {
     private const int MaxCopyAttempts = 5;
     private readonly IMoveExecutionStore executionStore =
         moveExecutionStore ?? new EfMoveExecutionStore(dbContextFactory, timeProvider);
     private readonly ILibraryDirectoryOwnershipStore directoryOwnershipStore =
         directoryOwnershipStore ?? new EfLibraryDirectoryOwnershipStore(dbContextFactory, timeProvider);
+    private readonly LibraryDirectoryOwnershipBoundaryAuthorizer ownershipAuthorizer =
+        ownershipAuthorizer
+        ?? new LibraryDirectoryOwnershipBoundaryAuthorizer(dbContextFactory);
 
     internal void OnCompletionHandoff(
         Guid jobId,

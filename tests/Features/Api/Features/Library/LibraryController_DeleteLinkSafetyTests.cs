@@ -31,6 +31,7 @@ public class LibraryController_DeleteLinkSafetyTests : BaseTests
         Directory.CreateDirectory(bookFolder);
         await File.WriteAllTextAsync(localFile, "audio");
         await File.WriteAllTextAsync(externalFile, "external");
+        await AddAuthorizedRootAsync(tempRoot);
 
         if (!TryCreateDirectoryLink(linkedDirectory, externalFolder))
         {
@@ -72,6 +73,7 @@ public class LibraryController_DeleteLinkSafetyTests : BaseTests
         Directory.CreateDirectory(bookFolder);
         await File.WriteAllTextAsync(localFile, "audio");
         await File.WriteAllTextAsync(externalFile, "external");
+        await AddAuthorizedRootAsync(tempRoot);
 
         try
         {
@@ -116,6 +118,7 @@ public class LibraryController_DeleteLinkSafetyTests : BaseTests
         var externalFile = Path.Join(externalFolder, "book.m4b");
         Directory.CreateDirectory(bookFolder);
         await File.WriteAllTextAsync(localFile, "owned audio");
+        await AddAuthorizedRootAsync(tempRoot);
         await File.WriteAllTextAsync(externalFile, "external audio");
 
         var audiobook = await _audiobookRepository.AddAsync(new AudiobookBuilder()
@@ -175,6 +178,7 @@ public class LibraryController_DeleteLinkSafetyTests : BaseTests
         var displacedFile = Path.Join(displacedFolder, "book.m4b");
         Directory.CreateDirectory(bookFolder);
         await File.WriteAllTextAsync(localFile, "owned audio");
+        await AddAuthorizedRootAsync(tempRoot);
 
         var audiobook = await _audiobookRepository.AddAsync(new AudiobookBuilder()
             .WithTitle("Folder File Race Book")

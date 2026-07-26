@@ -115,6 +115,63 @@ internal sealed partial class PinnedDirectoryCreation
             "Pinned directory identity is supported only on Windows, Linux, and macOS.");
     }
 
+    private static string GetDirectoryObjectIdentity(SafeFileHandle handle)
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            var identity = GetWindowsIdentity(handle);
+            if (!GetFileBasicInformationByHandleEx(
+                    handle,
+                    FileInformationClass.FileBasicInfo,
+                    out var basic,
+                    (uint)Marshal.SizeOf<FileBasicInformation>()))
+            {
+                throw new Win32Exception(Marshal.GetLastWin32Error());
+            }
+
+            return FormattableString.Invariant(
+                $"windows:{identity.VolumeSerialNumber:x16}:{identity.LowPart:x16}:{identity.HighPart:x16}:{basic.CreationTime:x16}");
+        }
+
+        if (OperatingSystem.IsLinux())
+        {
+            const uint requiredMask = 0x00000100 | 0x00000800;
+            if (Statx(
+                    handle.DangerousGetHandle().ToInt32(),
+                    string.Empty,
+                    0x1000,
+                    requiredMask,
+                    out var information) != 0)
+            {
+                throw new Win32Exception(Marshal.GetLastWin32Error());
+            }
+            if ((information.Mask & requiredMask) != requiredMask)
+            {
+                throw new PlatformNotSupportedException(
+                    "The filesystem does not expose complete directory generation identity.");
+            }
+
+            return FormattableString.Invariant(
+                $"linux:{information.DeviceMajor:x8}:{information.DeviceMinor:x8}:{information.Inode:x16}:{information.BirthTime.Seconds:x16}:{information.BirthTime.Nanoseconds:x8}");
+        }
+
+        if (OperatingSystem.IsMacOS())
+        {
+            if (FStatMac(
+                    handle.DangerousGetHandle().ToInt32(),
+                    out var information) != 0)
+            {
+                throw new Win32Exception(Marshal.GetLastWin32Error());
+            }
+
+            return FormattableString.Invariant(
+                $"macos:{information.Device:x8}:{information.Inode:x16}:{information.BirthTime.Seconds:x16}:{information.BirthTime.Nanoseconds:x16}:{information.Generation:x8}");
+        }
+
+        throw new PlatformNotSupportedException(
+            "Directory object identity is supported only on Windows, Linux, and macOS.");
+    }
+
     private static WindowsFileIdentity GetWindowsIdentity(SafeFileHandle handle)
     {
         if (!GetFileInformationByHandleEx(

@@ -1,3 +1,5 @@
+using Microsoft.Win32.SafeHandles;
+
 namespace Listenarr.Infrastructure.FileSystem;
 
 internal sealed partial class PinnedDirectoryCreation
@@ -38,6 +40,29 @@ internal sealed partial class PinnedDirectoryCreation
                 FileAccess.Write,
                 bufferSize,
                 asynchronous);
+        }
+
+        private FileStream OpenVerifiedIndependentStream(
+            SafeFileHandle handle,
+            FileAccess access,
+            int bufferSize,
+            bool asynchronous)
+        {
+            try
+            {
+                if (!HandlesIdentifySameDirectory(_fileHandle, handle))
+                {
+                    throw new InvalidOperationException(
+                        "The reopened pinned file does not identify the validated file object.");
+                }
+
+                return new FileStream(handle, access, bufferSize, asynchronous);
+            }
+            catch
+            {
+                handle.Dispose();
+                throw;
+            }
         }
     }
 }

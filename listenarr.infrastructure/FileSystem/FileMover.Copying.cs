@@ -337,7 +337,7 @@ namespace Listenarr.Infrastructure.FileSystem
             }
 
             var directory = Path.GetDirectoryName(destination);
-            if (!string.IsNullOrEmpty(directory))
+            if (action != FileAction.Move && !string.IsNullOrEmpty(directory))
             {
                 Directory.CreateDirectory(directory);
             }
@@ -347,16 +347,7 @@ namespace Listenarr.Infrastructure.FileSystem
                 switch (action)
                 {
                     case FileAction.Move:
-                        if (await MoveFileAsync(source, destination))
-                        {
-                            var sourceDirectory = Path.GetDirectoryName(source);
-                            if (sourceDirectory != null)
-                            {
-                                FileSystemSafety.DeleteEmptyDirectories(sourceDirectory);
-                            }
-                            return true;
-                        }
-                        return false;
+                        return await MoveFileAsync(source, destination);
                     case FileAction.HardlinkCopy:
                         return await HardlinkFileAsync(source, destination);
                     case FileAction.Copy:
@@ -373,11 +364,10 @@ namespace Listenarr.Infrastructure.FileSystem
         }
 
         private async Task<IdempotentFileMoveOutcome> TryCompleteIdempotentFileMoveAsync(
-            string sourceFile,
-            string destFile,
-            string sourceIdentity,
-            string destinationIdentity)
+            FileMoveGateLease lease)
         {
+            var sourceFile = lease.SourcePath;
+            var destFile = lease.DestinationPath;
             var equivalence = await TryDetermineFilesystemPathEquivalenceAsync(
                 sourceFile,
                 destFile);
@@ -386,20 +376,21 @@ namespace Listenarr.Infrastructure.FileSystem
                 return IdempotentFileMoveOutcome.Completed;
             }
 
+            using var sourceEntry = lease.SourceParent.TryOpenExistingFile(
+                lease.SourceName,
+                requireDeleteAccess: false);
+            using var destinationEntry = lease.DestinationParent.TryOpenExistingFile(
+                lease.DestinationName,
+                requireDeleteAccess: false);
             if (equivalence == null
-                || IsLinkedOrUnverifiableEntry(sourceFile)
-                || IsLinkedOrUnverifiableEntry(destFile)
-                || !File.Exists(sourceFile)
-                || !File.Exists(destFile))
+                || sourceEntry == null
+                || destinationEntry == null)
             {
                 return IdempotentFileMoveOutcome.NotApplicable;
             }
 
             var removalOutcome = await TryRemoveVerifiedFileMoveSourceWithClaimsAsync(
-                sourceFile,
-                destFile,
-                sourceIdentity,
-                destinationIdentity);
+                lease);
             if (removalOutcome == VerifiedFileMoveRemovalOutcome.NotRemoved)
             {
                 return IdempotentFileMoveOutcome.SourcePathRecreated;

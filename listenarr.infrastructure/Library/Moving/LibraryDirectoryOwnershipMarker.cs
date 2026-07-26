@@ -6,7 +6,7 @@ namespace Listenarr.Infrastructure.Library.Moving;
 internal static class LibraryDirectoryOwnershipMarker
 {
     internal const string FileName = ".listenarr-directory-owner.json";
-    private const int Version = 1;
+    internal const int Version = 2;
     private const long MaximumBytes = 16 * 1024;
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
 
@@ -187,7 +187,10 @@ internal static class LibraryDirectoryOwnershipMarker
             new MarkerPayload(
                 Version,
                 ownership.OwnershipToken,
-                ownership.CanonicalPath),
+                ownership.CanonicalPath,
+                ownership.ManagedRootFolderId,
+                ownership.DirectoryObjectIdentityVersion,
+                ownership.DirectoryObjectIdentity),
             markerPath,
             ownership.GetIdentity().Semantics);
 
@@ -243,7 +246,10 @@ internal static class LibraryDirectoryOwnershipMarker
         var expected = new MarkerPayload(
             Version,
             ownership.OwnershipToken,
-            ownership.CanonicalPath);
+            ownership.CanonicalPath,
+            ownership.ManagedRootFolderId,
+            ownership.DirectoryObjectIdentityVersion,
+            ownership.DirectoryObjectIdentity);
         var semantics = ownership.GetIdentity().Semantics;
         var pathsMatch = marker != null
             && FileSystemPathIdentity.AreEquivalent(
@@ -255,6 +261,13 @@ internal static class LibraryDirectoryOwnershipMarker
             || !string.Equals(
                 marker.OwnershipToken,
                 expected.OwnershipToken,
+                StringComparison.Ordinal)
+            || marker.ManagedRootFolderId != expected.ManagedRootFolderId
+            || marker.DirectoryObjectIdentityVersion
+                != expected.DirectoryObjectIdentityVersion
+            || !string.Equals(
+                marker.DirectoryObjectIdentity,
+                expected.DirectoryObjectIdentity,
                 StringComparison.Ordinal)
             || !pathsMatch)
         {
@@ -314,6 +327,13 @@ internal static class LibraryDirectoryOwnershipMarker
         if (marker == null
             || marker.Version != Version
             || !string.Equals(marker.OwnershipToken, expected.OwnershipToken, StringComparison.Ordinal)
+            || marker.ManagedRootFolderId != expected.ManagedRootFolderId
+            || marker.DirectoryObjectIdentityVersion
+                != expected.DirectoryObjectIdentityVersion
+            || !string.Equals(
+                marker.DirectoryObjectIdentity,
+                expected.DirectoryObjectIdentity,
+                StringComparison.Ordinal)
             || !pathsMatch)
         {
             throw new InvalidOperationException(
@@ -359,8 +379,81 @@ internal static class LibraryDirectoryOwnershipMarker
         }
     }
 
-    private sealed record MarkerPayload(
+    internal static string SerializePayload(LibraryDirectoryOwnership ownership) =>
+        JsonSerializer.Serialize(
+            new MarkerPayload(
+                Version,
+                ownership.OwnershipToken,
+                ownership.CanonicalPath,
+                ownership.ManagedRootFolderId,
+                ownership.DirectoryObjectIdentityVersion,
+                ownership.DirectoryObjectIdentity),
+            JsonOptions);
+
+    internal static MarkerPayload ReadPayload(
+        PinnedDirectoryCreation.PinnedFileEntry markerEntry)
+    {
+        using var stream = markerEntry.OpenReadStream(
+            bufferSize: 4096,
+            asynchronous: false);
+        if (stream.Length <= 0 || stream.Length > MaximumBytes)
+        {
+            throw new InvalidOperationException(
+                "The durable directory ownership marker has an invalid size.");
+        }
+
+        try
+        {
+            return JsonSerializer.Deserialize<MarkerPayload>(stream, JsonOptions)
+                ?? throw new InvalidOperationException(
+                    "The durable directory ownership marker is empty.");
+        }
+        catch (JsonException exception)
+        {
+            throw new InvalidOperationException(
+                "The durable directory ownership marker is invalid.",
+                exception);
+        }
+    }
+
+    internal static bool MatchesLegacyPayload(
+        LibraryDirectoryOwnership ownership,
+        MarkerPayload payload) =>
+        payload.Version == 1
+        && string.Equals(
+            payload.OwnershipToken,
+            ownership.OwnershipToken,
+            StringComparison.Ordinal)
+        && FileSystemPathIdentity.AreEquivalent(
+            payload.CanonicalPath,
+            ownership.CanonicalPath,
+            ownership.GetIdentity().Semantics);
+
+    internal static bool MatchesCurrentPayload(
+        LibraryDirectoryOwnership ownership,
+        MarkerPayload payload) =>
+        payload.Version == Version
+        && string.Equals(
+            payload.OwnershipToken,
+            ownership.OwnershipToken,
+            StringComparison.Ordinal)
+        && FileSystemPathIdentity.AreEquivalent(
+            payload.CanonicalPath,
+            ownership.CanonicalPath,
+            ownership.GetIdentity().Semantics)
+        && payload.ManagedRootFolderId == ownership.ManagedRootFolderId
+        && payload.DirectoryObjectIdentityVersion
+            == ownership.DirectoryObjectIdentityVersion
+        && string.Equals(
+            payload.DirectoryObjectIdentity,
+            ownership.DirectoryObjectIdentity,
+            StringComparison.Ordinal);
+
+    internal sealed record MarkerPayload(
         int Version,
         string OwnershipToken,
-        string CanonicalPath);
+        string CanonicalPath,
+        int? ManagedRootFolderId = null,
+        int? DirectoryObjectIdentityVersion = null,
+        string? DirectoryObjectIdentity = null);
 }

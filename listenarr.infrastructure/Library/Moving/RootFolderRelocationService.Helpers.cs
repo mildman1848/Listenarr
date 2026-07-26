@@ -233,6 +233,24 @@ public sealed partial class RootFolderRelocationService
             relocation.Error = "Target filesystem identity became unavailable during finalization.";
             return;
         }
+        var currentObjectIdentity =
+            await ResolveExistingDirectoryObjectIdentityAsync(
+                relocation.TargetPath,
+                cancellationToken);
+        if (!relocation.TargetDirectoryObjectIdentityVersion.HasValue
+            || !currentObjectIdentity.IsAvailable
+                || currentObjectIdentity.Version
+                    != relocation.TargetDirectoryObjectIdentityVersion
+                || !string.Equals(
+                    currentObjectIdentity.Value,
+                    relocation.TargetDirectoryObjectIdentity,
+                    StringComparison.Ordinal))
+        {
+            relocation.Status = RootFolderRelocationStatus.NeedsAttention;
+            relocation.Error =
+                "The target directory changed after the path change was authorized.";
+            return;
+        }
 
         var command = new RootFolderPathChangeCommand(
             relocation.TargetPath,
@@ -247,6 +265,10 @@ public sealed partial class RootFolderRelocationService
             relocation.TargetPath,
             resolution,
             FileSystemPathIdentity.CreateKey("root", relocation.TargetPath, resolution.Semantics));
+        root.DirectoryObjectIdentityVersion = currentObjectIdentity.Version;
+        root.DirectoryObjectIdentity = currentObjectIdentity.Value;
+        root.DirectoryObjectIdentityUnavailableReason =
+            currentObjectIdentity.UnavailableReason;
         if (relocation.DesiredIsDefault)
         {
             await ClearOtherDefaultsAsync(db, root.Id, cancellationToken);
@@ -426,4 +448,5 @@ public sealed partial class RootFolderRelocationService
                 exception.Message);
         }
     }
+
 }

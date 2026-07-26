@@ -33,10 +33,7 @@ namespace Listenarr.Infrastructure.FileSystem
             }
 
             var recoveryOutcome = await TryRecoverInterruptedFileMoveClaimsAsync(
-                sourceFile,
-                destFile,
-                pathLock.SourceIdentity,
-                pathLock.DestinationIdentity);
+                pathLock);
             if (recoveryOutcome == FileMoveClaimRecoveryOutcome.Completed)
             {
                 return true;
@@ -48,18 +45,13 @@ namespace Listenarr.Infrastructure.FileSystem
             }
 
             return await MoveFileWithLocksAsync(
-                sourceFile,
-                destFile,
-                pathLock.SourceIdentity,
-                pathLock.DestinationIdentity);
+                pathLock);
         }
 
-        private async Task<bool> MoveFileWithLocksAsync(
-            string sourceFile,
-            string destFile,
-            string sourceIdentity,
-            string destinationIdentity)
+        private async Task<bool> MoveFileWithLocksAsync(FileMoveGateLease lease)
         {
+            var sourceFile = lease.SourcePath;
+            var destFile = lease.DestinationPath;
             var pathEquivalence = await TryDetermineFilesystemPathEquivalenceAsync(
                 sourceFile,
                 destFile);
@@ -75,10 +67,7 @@ namespace Listenarr.Infrastructure.FileSystem
             }
 
             var idempotentOutcome = await TryCompleteIdempotentFileMoveAsync(
-                sourceFile,
-                destFile,
-                sourceIdentity,
-                destinationIdentity);
+                lease);
             if (idempotentOutcome == IdempotentFileMoveOutcome.Completed)
             {
                 return true;
@@ -107,10 +96,7 @@ namespace Listenarr.Infrastructure.FileSystem
             }
 
             var managedFallback = await TryManagedFileMoveFallbackAsync(
-                sourceFile,
-                destFile,
-                sourceIdentity,
-                destinationIdentity);
+                lease);
             if (managedFallback == FileMoveFallbackOutcome.Success)
             {
                 LogMutation(
@@ -133,30 +119,12 @@ namespace Listenarr.Infrastructure.FileSystem
                 return false;
             }
 
-            var robocopyFallback = await TryRobocopyFileMoveFallbackAsync(
-                sourceFile,
-                destFile,
-                sourceIdentity,
-                destinationIdentity);
-            if (robocopyFallback == FileMoveFallbackOutcome.Success)
-            {
-                LogMutation(
-                    FileMutationOutcome.Success,
-                    FileAction.Move,
-                    sourceFile,
-                    destFile,
-                    "Verified robocopy fallback");
-                return true;
-            }
-
             LogMutation(
                 FileMutationOutcome.Failed,
                 FileAction.Move,
                 sourceFile,
                 destFile,
-                robocopyFallback == FileMoveFallbackOutcome.SourceRetained
-                    ? "Robocopy published the destination but the verified source could not be removed"
-                    : "No verified file move fallback completed");
+                "No verified anchored file move fallback completed");
             return false;
         }
 

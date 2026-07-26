@@ -64,6 +64,8 @@ public sealed class RootFolderRelocationConfiguration : IEntityTypeConfiguration
             .HasMaxLength(16)
             .HasDefaultValue(FileSystemCaseSensitivityMode.Auto);
         builder.Property(relocation => relocation.TargetCaseSensitivityMode).HasConversion<string>().HasMaxLength(16);
+        builder.Property(relocation => relocation.TargetDirectoryObjectIdentity).HasMaxLength(256);
+        builder.Property(relocation => relocation.TargetDirectoryObjectIdentityUnavailableReason).HasMaxLength(1024);
         builder.HasIndex(relocation => relocation.ActiveRootFolderId)
             .IsUnique()
             .HasFilter("\"ActiveRootFolderId\" IS NOT NULL");

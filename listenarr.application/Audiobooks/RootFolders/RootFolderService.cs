@@ -29,6 +29,7 @@ namespace Listenarr.Application.Audiobooks.RootFolders
         private readonly IRootFolderRelocationService _relocationService;
         private readonly IFilesystemMutationCoordinator _mutationCoordinator;
         private readonly IAudiobookOperationCoordinator _audiobookOperationCoordinator;
+        private readonly IDirectoryObjectIdentityResolver? _directoryObjectIdentityResolver;
 
         public RootFolderService(
             IRootFolderRepository repo,
@@ -37,7 +38,8 @@ namespace Listenarr.Application.Audiobooks.RootFolders
             IMoveQueueService moveQueue,
             IRootFolderRelocationService relocationService,
             IFilesystemMutationCoordinator mutationCoordinator,
-            IAudiobookOperationCoordinator audiobookOperationCoordinator)
+            IAudiobookOperationCoordinator audiobookOperationCoordinator,
+            IDirectoryObjectIdentityResolver? directoryObjectIdentityResolver = null)
         {
             _repo = repo;
             _logger = logger;
@@ -47,6 +49,7 @@ namespace Listenarr.Application.Audiobooks.RootFolders
             _relocationService = relocationService ?? throw new ArgumentNullException(nameof(relocationService));
             _audiobookOperationCoordinator = audiobookOperationCoordinator
                 ?? throw new ArgumentNullException(nameof(audiobookOperationCoordinator));
+            _directoryObjectIdentityResolver = directoryObjectIdentityResolver;
         }
 
         public async Task<RootFolder?> GetDefaultAsync()
@@ -66,6 +69,7 @@ namespace Listenarr.Application.Audiobooks.RootFolders
 
             var resolution = await ResolveSemanticsAsync(root.Path, root.CaseSensitivityMode);
             ApplyIdentity(root, resolution);
+            await CaptureInitialDirectoryObjectIdentityAsync(root);
             if (await _relocationService.IsBoundaryProtectedAsync(root.Path, resolution.Semantics))
             {
                 throw new InvalidOperationException(
@@ -167,6 +171,7 @@ namespace Listenarr.Application.Audiobooks.RootFolders
             }
 
             await EnsureNoActiveMoveJobsTouchRootAsync(existing.Path, existingResolution.Semantics);
+            await ValidateExistingDirectoryObjectIdentityAsync(existing);
             existing.Name = root.Name;
             existing.IsDefault = root.IsDefault;
             existing.CaseSensitivityMode = root.CaseSensitivityMode;
@@ -287,6 +292,43 @@ namespace Listenarr.Application.Audiobooks.RootFolders
                 "root",
                 root.Path,
                 resolution.Semantics);
+        }
+
+        private async Task CaptureInitialDirectoryObjectIdentityAsync(RootFolder root)
+        {
+            var resolution = _directoryObjectIdentityResolver == null
+                ? DirectoryObjectIdentityResolution.Unavailable(
+                    "Directory object identity resolution is unavailable.")
+                : await _directoryObjectIdentityResolver.ResolveAsync(root.Path);
+            root.DirectoryObjectIdentityVersion = resolution.Version;
+            root.DirectoryObjectIdentity = resolution.Value;
+            root.DirectoryObjectIdentityUnavailableReason = resolution.UnavailableReason;
+        }
+
+        private async Task ValidateExistingDirectoryObjectIdentityAsync(RootFolder root)
+        {
+            if (root.DirectoryObjectIdentityVersion == null
+                || string.IsNullOrWhiteSpace(root.DirectoryObjectIdentity))
+            {
+                return;
+            }
+            if (_directoryObjectIdentityResolver == null)
+            {
+                throw new InvalidOperationException(
+                    "Root folder physical identity cannot be validated.");
+            }
+
+            var current = await _directoryObjectIdentityResolver.ResolveAsync(root.Path);
+            if (!current.IsAvailable
+                || current.Version != root.DirectoryObjectIdentityVersion
+                || !string.Equals(
+                    current.Value,
+                    root.DirectoryObjectIdentity,
+                    StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException(
+                    "The configured root folder now identifies a different physical directory; use an explicit path-change operation to reauthorize it.");
+            }
         }
 
         private async Task EnsureNoActiveRelocationAsync(int rootFolderId)

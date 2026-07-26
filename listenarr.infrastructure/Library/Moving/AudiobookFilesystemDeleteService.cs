@@ -30,6 +30,7 @@ namespace Listenarr.Infrastructure.Library.Moving
         private readonly IFileSystemSemanticsResolver _semanticsResolver;
         private readonly ILibraryDirectoryOwnershipStore _directoryOwnershipStore;
         private readonly ILogger<AudiobookFilesystemDeleteService> _logger;
+        private readonly LibraryDirectoryOwnershipBoundaryAuthorizer? _ownershipAuthorizer;
 
         public AudiobookFilesystemDeleteService(
             IAudiobookRepository audiobookRepository,
@@ -38,7 +39,8 @@ namespace Listenarr.Infrastructure.Library.Moving
             IConfigurationService configurationService,
             IFileSystemSemanticsResolver semanticsResolver,
             ILibraryDirectoryOwnershipStore directoryOwnershipStore,
-            ILogger<AudiobookFilesystemDeleteService> logger)
+            ILogger<AudiobookFilesystemDeleteService> logger,
+            LibraryDirectoryOwnershipBoundaryAuthorizer? ownershipAuthorizer = null)
         {
             _audiobookRepository = audiobookRepository;
             _audioFileRepository = audioFileRepository;
@@ -47,6 +49,7 @@ namespace Listenarr.Infrastructure.Library.Moving
             _semanticsResolver = semanticsResolver;
             _directoryOwnershipStore = directoryOwnershipStore;
             _logger = logger;
+            _ownershipAuthorizer = ownershipAuthorizer;
         }
 
         public async Task<AudiobookFilesystemDeleteResult> DeleteAsync(
@@ -83,9 +86,23 @@ namespace Listenarr.Infrastructure.Library.Moving
             {
                 cancellationToken.ThrowIfCancellationRequested();
                 var mutationToken = CancellationToken.None;
-                var contentsDeleted = TryDeleteFolderContents(
+                var targetAuthorization = await AuthorizeDeleteTargetAsync(
                     deleteTarget,
-                    result);
+                    result,
+                    cancellationToken);
+                if (targetAuthorization == null)
+                {
+                    return result;
+                }
+
+                bool contentsDeleted;
+                using (targetAuthorization)
+                {
+                    contentsDeleted = TryDeleteFolderContents(
+                        deleteTarget,
+                        targetAuthorization,
+                        result);
+                }
 
                 if (deleteFolder && contentsDeleted)
                 {
@@ -264,6 +281,7 @@ namespace Listenarr.Infrastructure.Library.Moving
 
         private bool TryDeleteFolderContents(
             DeleteFolderTarget deleteTarget,
+            PinnedDirectoryCreation.PinnedDirectoryAnchor targetAuthorization,
             AudiobookFilesystemDeleteResult result)
         {
             var folderPath = deleteTarget.FolderPath;
@@ -292,6 +310,12 @@ namespace Listenarr.Infrastructure.Library.Moving
                 .ToHashSet(deleteTarget.Semantics.Comparer);
             foreach (var filePath in files)
             {
+                if (!targetAuthorization.VisiblePathMatches())
+                {
+                    result.Warnings.Add(
+                        "Refused to continue deleting audiobook contents because the authorized folder changed.");
+                    return false;
+                }
                 if (!ownershipMarkerPaths.Contains(filePath))
                 {
                     TryDeleteFile(filePath, result, deleteTarget.AllowedMutationRoots);
@@ -306,6 +330,12 @@ namespace Listenarr.Infrastructure.Library.Moving
                         deleteTarget.Semantics)))
                 .OrderByDescending(path => path.Length))
             {
+                if (!targetAuthorization.VisiblePathMatches())
+                {
+                    result.Warnings.Add(
+                        "Refused to continue deleting audiobook contents because the authorized folder changed.");
+                    return false;
+                }
                 if (!FileSystemSafety.TryDeleteEmptyDirectory(
                         directoryPath,
                         deleteTarget.AllowedMutationRoots,

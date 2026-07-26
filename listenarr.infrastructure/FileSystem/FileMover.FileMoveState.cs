@@ -1,12 +1,3 @@
-/*
- * Listenarr - Audiobook Management System
- * Copyright (C) 2024-2026 Listenarr Contributors
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Affero General Public License as published
- * by the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
- */
 using System.Security.Cryptography;
 using System.Text;
 using Microsoft.Extensions.Logging;
@@ -68,8 +59,6 @@ public partial class FileMover
                 throw new IOException("Temporary file-move state is unsafe.");
             }
 
-            // Directory.Move is the exclusive ownership claim: it fails if another
-            // process already owns the deterministic state directory.
             Directory.Move(temporaryPath, path);
         }
         finally
@@ -140,8 +129,6 @@ public partial class FileMover
         TryDeleteEmptyStateDirectories(state);
     }
 
-    // This protocol provides process-crash recovery. It does not claim
-    // power-loss durability for directory entries on every supported filesystem.
     private static void WriteGenerationFence(string path)
     {
         using var stream = new FileStream(
@@ -222,4 +209,81 @@ public partial class FileMover
 
     private static bool PathEntryExists(string path) =>
         File.Exists(path) || Directory.Exists(path);
+
+    private static PinnedDirectoryCreation CreateAnchoredFileMoveStateDirectory(
+        PinnedDirectoryCreation.PinnedDirectoryAnchor parent,
+        string stateName)
+    {
+        var creation = parent.TryCreateChildForPublication(stateName);
+        try
+        {
+            if (!creation.Created || !creation.VisiblePathMatches())
+            {
+                throw new IOException(
+                    "The deterministic file-move state directory is already occupied.");
+            }
+            if (!OperatingSystem.IsWindows())
+            {
+                File.SetUnixFileMode(
+                    creation.FullPath,
+                    UnixFileMode.UserRead
+                    | UnixFileMode.UserWrite
+                    | UnixFileMode.UserExecute);
+                if (!creation.VisiblePathMatches())
+                {
+                    throw new IOException(
+                        "The file-move state directory changed while permissions were restricted.");
+                }
+            }
+
+            return creation;
+        }
+        catch
+        {
+            creation.Dispose();
+            throw;
+        }
+    }
+
+    private static bool AnchoredStateContainsOnly(
+        PinnedDirectoryCreation.PinnedDirectoryAnchor state,
+        params string[] allowedNames)
+    {
+        if (!state.VisiblePathMatches())
+        {
+            return false;
+        }
+        var comparer = OperatingSystem.IsWindows()
+            ? StringComparer.OrdinalIgnoreCase
+            : StringComparer.Ordinal;
+        var allowed = allowedNames.ToHashSet(comparer);
+        var actual = Directory.EnumerateFileSystemEntries(state.FullPath)
+            .Select(Path.GetFileName)
+            .ToList();
+        return state.VisiblePathMatches()
+            && actual.All(name => name != null && allowed.Contains(name));
+    }
+
+    private static void TryDeleteAnchoredStateDirectory(
+        PinnedDirectoryCreation? publication,
+        string stateName)
+    {
+        if (publication == null)
+        {
+            return;
+        }
+        try
+        {
+            publication.DeletePinnedEmptyDirectory(
+                stateName,
+                immediateWindows: true);
+        }
+        catch (Exception exception) when (exception is
+            IOException or UnauthorizedAccessException
+                or System.ComponentModel.Win32Exception
+                or InvalidOperationException)
+        {
+            // Preserve non-empty or changed recovery state.
+        }
+    }
 }

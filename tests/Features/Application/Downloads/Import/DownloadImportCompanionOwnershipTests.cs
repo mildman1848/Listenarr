@@ -7,10 +7,10 @@ namespace Listenarr.Tests.Features.Application.Downloads.Import;
 [Trait("Category", "DownloadProcessingJob")]
 public sealed class DownloadImportCompanionOwnershipTests : BaseTests
 {
-    public override Task InitializeAsync()
+    public override async Task InitializeAsync()
     {
         Init();
-        return Task.CompletedTask;
+        await AddAuthorizedRootAsync(FileService.GetTempPath());
     }
 
     [Fact]

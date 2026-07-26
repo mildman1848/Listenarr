@@ -1129,6 +1129,49 @@ namespace Listenarr.Tests.Features.Api.Services
         }
 
         [Fact]
+        public async Task MoveFileAsync_PublishedDestinationSubstitution_BlocksRecovery()
+        {
+            var sourceFile = Path.Join(_root, "substituted-source.mp3");
+            var destinationFile = Path.Join(_root, "substituted-target.mp3");
+            await File.WriteAllTextAsync(sourceFile, "new-generation");
+            await File.WriteAllTextAsync(destinationFile, "previous-generation");
+            var mover = new FileMover(
+                new NullLogger<FileMover>(),
+                semanticsResolver: new FileSystemSemanticsResolver())
+            {
+                AfterDestinationPublishedForTestAsync = _ =>
+                    throw new OperationCanceledException(
+                        "simulated interruption after publication")
+            };
+
+            await Assert.ThrowsAsync<OperationCanceledException>(
+                () => mover.MoveFileAsync(sourceFile, destinationFile));
+            File.Delete(destinationFile);
+            await File.WriteAllTextAsync(destinationFile, "attacker-replacement");
+
+            var retried = await new FileMover(
+                new NullLogger<FileMover>(),
+                semanticsResolver: new FileSystemSemanticsResolver())
+                .MoveFileAsync(sourceFile, destinationFile);
+
+            Assert.False(retried);
+            Assert.Equal(
+                "attacker-replacement",
+                await File.ReadAllTextAsync(destinationFile));
+            var previous = Assert.Single(Directory.EnumerateFiles(
+                _root,
+                "destination.previous",
+                SearchOption.AllDirectories));
+            Assert.Equal(
+                "previous-generation",
+                await File.ReadAllTextAsync(previous));
+            Assert.Single(Directory.EnumerateFiles(
+                _root,
+                "replacement-generation.fence",
+                SearchOption.AllDirectories));
+        }
+
+        [Fact]
         public async Task MoveFileAsync_InterruptedBeforeSourceClaim_DoesNotInferCompletion()
         {
             var sourceFile = Path.Join(_root, "preclaim-crash-source.mp3");
@@ -1806,69 +1849,7 @@ namespace Listenarr.Tests.Features.Api.Services
         }
 
         [Fact]
-        public void FileMoveStagingValidation_RejectsOrdinaryDirectoryReplacementWithoutToken()
-        {
-            var destinationDirectory = Path.Join(_root, "staging-replacement-destination");
-            var stagingDirectory = Path.Join(destinationDirectory, ".listenarr-file-move-test");
-            Directory.CreateDirectory(stagingDirectory);
-            const string ownershipToken = "0123456789abcdef0123456789abcdef";
-            File.WriteAllText(
-                Path.Join(stagingDirectory, FileMover.FileMoveStagingMarkerName),
-                ownershipToken);
-
-            Assert.True(FileMover.TryValidateOwnedFileMoveStagingDirectory(
-                stagingDirectory,
-                destinationDirectory,
-                ownershipToken,
-                out var normalizedStagingDirectory));
-            Assert.Equal(Path.GetFullPath(stagingDirectory), normalizedStagingDirectory);
-
-            Directory.Delete(stagingDirectory, recursive: true);
-            Directory.CreateDirectory(stagingDirectory);
-            File.WriteAllText(Path.Join(stagingDirectory, "foreign.txt"), "foreign");
-
-            Assert.False(FileMover.TryValidateOwnedFileMoveStagingDirectory(
-                stagingDirectory,
-                destinationDirectory,
-                ownershipToken,
-                out _));
-            Assert.Equal(
-                "foreign",
-                File.ReadAllText(Path.Join(stagingDirectory, "foreign.txt")));
-        }
-
-        [Fact]
-        public void FileMoveStagingValidation_RejectsSymlinkReplacementEvenWithCopiedToken()
-        {
-            if (OperatingSystem.IsWindows())
-            {
-                return;
-            }
-
-            var destinationDirectory = Path.Join(_root, "staging-link-destination");
-            var stagingDirectory = Path.Join(destinationDirectory, ".listenarr-file-move-test");
-            var outsideDirectory = Path.Join(_root, "staging-link-outside");
-            Directory.CreateDirectory(destinationDirectory);
-            Directory.CreateDirectory(outsideDirectory);
-            const string ownershipToken = "fedcba9876543210fedcba9876543210";
-            File.WriteAllText(
-                Path.Join(outsideDirectory, FileMover.FileMoveStagingMarkerName),
-                ownershipToken);
-            File.WriteAllText(Path.Join(outsideDirectory, "foreign.txt"), "foreign");
-            Directory.CreateSymbolicLink(stagingDirectory, outsideDirectory);
-
-            Assert.False(FileMover.TryValidateOwnedFileMoveStagingDirectory(
-                stagingDirectory,
-                destinationDirectory,
-                ownershipToken,
-                out _));
-            Assert.Equal(
-                "foreign",
-                File.ReadAllText(Path.Join(outsideDirectory, "foreign.txt")));
-        }
-
-        [Fact]
-        public async Task MoveFileAsync_RobocopyFallback_RecreatedStagingDirectoryIsPreservedAndRejected()
+        public async Task MoveFileAsync_RobocopyFallback_IsNotInvokedForLockedSource()
         {
             if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
             {
@@ -1883,17 +1864,10 @@ namespace Listenarr.Tests.Features.Api.Services
                 FileMode.Open,
                 FileAccess.Read,
                 FileShare.None);
-            string? replacedStagingDirectory = null;
             var runner = new RecordingProcessRunner(startInfo =>
             {
                 sourceLock?.Dispose();
                 sourceLock = null;
-                replacedStagingDirectory = startInfo.ArgumentList[1];
-                Directory.Delete(replacedStagingDirectory, recursive: true);
-                Directory.CreateDirectory(replacedStagingDirectory);
-                File.WriteAllText(
-                    Path.Join(replacedStagingDirectory, Path.GetFileName(sourceFile)),
-                    "foreign");
             });
             var mover = new FileMover(
                 new NullLogger<FileMover>(),
@@ -1913,12 +1887,7 @@ namespace Listenarr.Tests.Features.Api.Services
                 Assert.False(moved);
                 Assert.True(File.Exists(sourceFile));
                 Assert.False(File.Exists(destinationFile));
-                Assert.NotNull(replacedStagingDirectory);
-                Assert.Equal(
-                    "foreign",
-                    await File.ReadAllTextAsync(Path.Join(
-                        replacedStagingDirectory!,
-                        Path.GetFileName(sourceFile))));
+                Assert.Null(runner.LastStartInfo);
             }
             finally
             {
@@ -1927,7 +1896,7 @@ namespace Listenarr.Tests.Features.Api.Services
         }
 
         [Fact]
-        public async Task MoveFileAsync_RobocopyFallback_UsesVerifiedCopyOnlyStaging()
+        public async Task MoveFileAsync_RobocopyFallback_IsNotInvokedWhenEnabled()
         {
             if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
             {
@@ -1968,24 +1937,10 @@ namespace Listenarr.Tests.Features.Api.Services
             {
                 var ok = await mover.MoveFileAsync(sourceFile, destFile);
 
-                Assert.True(ok);
-                Assert.False(File.Exists(sourceFile));
-                Assert.Equal("content", await File.ReadAllTextAsync(destFile));
-                Assert.NotNull(runner.LastStartInfo);
-                Assert.Equal("robocopy", runner.LastStartInfo!.FileName);
-                Assert.True(string.IsNullOrEmpty(runner.LastStartInfo.Arguments));
-                Assert.Equal(
-                    Path.GetDirectoryName(sourceFile) ?? string.Empty,
-                    runner.LastStartInfo.ArgumentList[0]);
-                Assert.StartsWith(
-                    Path.GetDirectoryName(destFile) ?? string.Empty,
-                    runner.LastStartInfo.ArgumentList[1],
-                    StringComparison.OrdinalIgnoreCase);
-                Assert.Equal(
-                    Path.GetFileName(sourceFile),
-                    runner.LastStartInfo.ArgumentList[2]);
-                Assert.Contains("/COPY:DAT", runner.LastStartInfo.ArgumentList);
-                Assert.DoesNotContain("/MOV", runner.LastStartInfo.ArgumentList);
+                Assert.False(ok);
+                Assert.True(File.Exists(sourceFile));
+                Assert.False(File.Exists(destFile));
+                Assert.Null(runner.LastStartInfo);
             }
             finally
             {
@@ -2032,6 +1987,7 @@ namespace Listenarr.Tests.Features.Api.Services
                 Assert.False(moved);
                 Assert.True(File.Exists(sourceFile));
                 Assert.False(File.Exists(destinationFile));
+                Assert.Null(runner.LastStartInfo);
             }
             finally
             {

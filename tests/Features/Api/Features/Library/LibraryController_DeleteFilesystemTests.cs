@@ -27,6 +27,17 @@ namespace Listenarr.Tests.Features.Api.Features.Library
     [Trait("Category", "LibraryController")]
     public class LibraryController_DeleteFilesystemTests : BaseTests
     {
+        private async Task AddAuthorizedRootAsync(RootFolder root)
+        {
+            using var rootAnchor = PinnedDirectoryCreation.OpenPinnedBoundary(root.Path);
+            root.ResolvedCaseSensitivity =
+                FileSystemPathSemantics.CurrentHostDefault.CaseSensitivity;
+            root.PathIdentityState = PathIdentityState.Valid;
+            root.DirectoryObjectIdentityVersion = 1;
+            root.DirectoryObjectIdentity = rootAnchor.GetDirectoryObjectIdentity();
+            await _rootFolderRepository.AddAsync(root);
+        }
+
         [Fact]
         [Trait("Method", "DeleteAudiobook")]
         [Trait("Scenario", "DeleteFiles_RemovesAllFilesInFolderButPreservesDirectory")]
@@ -44,6 +55,10 @@ namespace Listenarr.Tests.Features.Api.Features.Library
             await File.WriteAllTextAsync(audioPath, "audio");
             await File.WriteAllTextAsync(sidecarPath, "cover");
             await File.WriteAllTextAsync(notePath, "notes");
+            await AddAuthorizedRootAsync(new RootFolderBuilder()
+                .WithId(50)
+                .WithPath(tempRoot)
+                .Build());
 
             var audiobook = await _audiobookRepository.AddAsync(new AudiobookBuilder()
                 .WithId(50)
@@ -86,6 +101,10 @@ namespace Listenarr.Tests.Features.Api.Features.Library
             Directory.CreateDirectory(bookFolder);
             await File.WriteAllTextAsync(audioPath, "audio");
             await File.WriteAllTextAsync(sidecarPath, "cover");
+            await AddAuthorizedRootAsync(new RootFolderBuilder()
+                .WithId(51)
+                .WithPath(tempRoot)
+                .Build());
 
             var audiobook = await _audiobookRepository.AddAsync(new AudiobookBuilder()
                 .WithId(1)
@@ -181,7 +200,7 @@ namespace Listenarr.Tests.Features.Api.Features.Library
             Directory.CreateDirectory(discFolder);
             await File.WriteAllTextAsync(audioPath, "audio");
 
-            await _rootFolderRepository.AddAsync(new RootFolder
+            await AddAuthorizedRootAsync(new RootFolder
             {
                 Name = "Library",
                 Path = tempRoot,
@@ -227,7 +246,7 @@ namespace Listenarr.Tests.Features.Api.Features.Library
             var audioPath = Path.Join(bookFolder, "Jack of Shadows.mp3");
             Directory.CreateDirectory(bookFolder);
             await File.WriteAllTextAsync(audioPath, "audio");
-            await _rootFolderRepository.AddAsync(new RootFolder
+            await AddAuthorizedRootAsync(new RootFolder
             {
                 Name = "Library",
                 Path = tempRoot,
@@ -271,6 +290,12 @@ namespace Listenarr.Tests.Features.Api.Features.Library
             var audioPath = Path.Join(bookFolder, "Jack of Shadows.mp3");
             Directory.CreateDirectory(bookFolder);
             await File.WriteAllTextAsync(audioPath, "audio");
+            await AddAuthorizedRootAsync(new RootFolder
+            {
+                Name = "Library",
+                Path = tempRoot,
+                IsDefault = true
+            });
             var ownershipStore = _provider.GetRequiredService<ILibraryDirectoryOwnershipStore>();
             await ownershipStore.RecordCreatedAsync(
                 new LibraryDirectoryOwnershipClaim(
@@ -278,12 +303,6 @@ namespace Listenarr.Tests.Features.Api.Features.Library
                     FileSystemPathSemantics.CurrentHostDefault,
                     "test-fixture",
                     Guid.NewGuid()));
-            await _rootFolderRepository.AddAsync(new RootFolder
-            {
-                Name = "Library",
-                Path = tempRoot,
-                IsDefault = true
-            });
             var audiobook = await _audiobookRepository.AddAsync(new AudiobookBuilder()
                 .WithId(12)
                 .WithTitle("Jack of Shadows")
@@ -322,7 +341,7 @@ namespace Listenarr.Tests.Features.Api.Features.Library
             var audioPath = Path.Join(discFolder, "book.mp3");
             Directory.CreateDirectory(discFolder);
             await File.WriteAllTextAsync(audioPath, "audio");
-            await _rootFolderRepository.AddAsync(new RootFolder
+            await AddAuthorizedRootAsync(new RootFolder
             {
                 Name = "Library",
                 Path = tempRoot,
@@ -397,7 +416,7 @@ namespace Listenarr.Tests.Features.Api.Features.Library
             var audioPath = Path.Join(bookFolder, "book.mp3");
             Directory.CreateDirectory(bookFolder);
             await File.WriteAllTextAsync(audioPath, "audio");
-            await _rootFolderRepository.AddAsync(new RootFolderBuilder()
+            await AddAuthorizedRootAsync(new RootFolderBuilder()
                 .WithName("Library")
                 .WithPath(tempRoot)
                 .WithCaseSensitivityMode(caseSensitivityMode)
@@ -439,12 +458,12 @@ namespace Listenarr.Tests.Features.Api.Features.Library
             var audioPath = Path.Join(bookFolder, "book.mp3");
             Directory.CreateDirectory(bookFolder);
             await File.WriteAllTextAsync(audioPath, "audio");
-            await _rootFolderRepository.AddAsync(new RootFolderBuilder()
+            await AddAuthorizedRootAsync(new RootFolderBuilder()
                 .WithName("A Outer")
                 .WithPath(outerRoot)
                 .WithCaseSensitivityMode(FileSystemCaseSensitivityMode.Insensitive)
                 .Build());
-            await _rootFolderRepository.AddAsync(new RootFolderBuilder()
+            await AddAuthorizedRootAsync(new RootFolderBuilder()
                 .WithName("Z Inner")
                 .WithPath(innerRoot)
                 .WithCaseSensitivityMode(FileSystemCaseSensitivityMode.Sensitive)
@@ -478,7 +497,7 @@ namespace Listenarr.Tests.Features.Api.Features.Library
             var audioPath = Path.Join(bookFolder, "book.mp3");
             Directory.CreateDirectory(bookFolder);
             await File.WriteAllTextAsync(audioPath, "audio");
-            await _rootFolderRepository.AddAsync(new RootFolder
+            await AddAuthorizedRootAsync(new RootFolder
             {
                 Name = "Library",
                 Path = tempRoot,
@@ -513,7 +532,8 @@ namespace Listenarr.Tests.Features.Api.Features.Library
                 _provider.GetRequiredService<IConfigurationService>(),
                 _provider.GetRequiredService<IFileSystemSemanticsResolver>(),
                 new FailingNthMarkRemovedOwnershipStore(ownershipStore, failOnCall: 2),
-                _provider.GetRequiredService<ILogger<AudiobookFilesystemDeleteService>>());
+                _provider.GetRequiredService<ILogger<AudiobookFilesystemDeleteService>>(),
+                _provider.GetRequiredService<LibraryDirectoryOwnershipBoundaryAuthorizer>());
             var authorSiblingMarker = LibraryDirectoryOwnershipMarker
                 .GetMarkerPaths(authorOwnership)
                 .Single(path => !FileSystemPathIdentity.IsSameOrInside(
@@ -558,7 +578,7 @@ namespace Listenarr.Tests.Features.Api.Features.Library
             var audioPath = Path.Join(bookFolder, "book.mp3");
             Directory.CreateDirectory(bookFolder);
             await File.WriteAllTextAsync(audioPath, "audio");
-            await _rootFolderRepository.AddAsync(new RootFolder
+            await AddAuthorizedRootAsync(new RootFolder
             {
                 Name = "Library",
                 Path = tempRoot,
@@ -590,7 +610,8 @@ namespace Listenarr.Tests.Features.Api.Features.Library
                 new CancelOnBeginRemovalOwnershipStore(
                     ownershipStore,
                     cancellation),
-                _provider.GetRequiredService<ILogger<AudiobookFilesystemDeleteService>>());
+                _provider.GetRequiredService<ILogger<AudiobookFilesystemDeleteService>>(),
+                _provider.GetRequiredService<LibraryDirectoryOwnershipBoundaryAuthorizer>());
 
             var result = await service.DeleteAsync(
                 audiobook,
@@ -661,6 +682,10 @@ namespace Listenarr.Tests.Features.Api.Features.Library
             var folder = FileService.GetTempDirectory("listenarr-delete-coordination");
             var audioPath = Path.Join(folder, "book.mp3");
             await File.WriteAllTextAsync(audioPath, "audio");
+            await AddAuthorizedRootAsync(new RootFolderBuilder()
+                .WithId(52)
+                .WithPath(Path.GetDirectoryName(folder)!)
+                .Build());
             var audiobook = await _audiobookRepository.AddAsync(new AudiobookBuilder()
                 .WithId(906)
                 .WithTitle("Blocked Delete")

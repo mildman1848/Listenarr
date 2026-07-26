@@ -106,6 +106,13 @@ internal sealed partial class EfLibraryDirectoryOwnershipStore
         }
 
         var resolved = compatible[0];
+        if (!HasDestructiveIdentity(resolved))
+        {
+            return new LibraryDirectoryOwnershipResolution(
+                LibraryDirectoryOwnershipResolutionState.Unavailable,
+                resolved,
+                "Durable directory ownership lacks managed-root physical identity.");
+        }
         if (validateProof
             && resolved.State is (
                 LibraryDirectoryOwnershipState.Owned
@@ -113,6 +120,17 @@ internal sealed partial class EfLibraryDirectoryOwnershipStore
         {
             try
             {
+                using var live = PinnedDirectoryCreation.OpenPinnedVisibleDirectory(
+                    resolved.CanonicalPath);
+                if (!string.Equals(
+                        live.GetDirectoryObjectIdentity(),
+                        resolved.DirectoryObjectIdentity,
+                        StringComparison.Ordinal)
+                    || !live.VisiblePathMatches())
+                {
+                    throw new InvalidOperationException(
+                        "The owned directory no longer matches its enrolled physical identity.");
+                }
                 LibraryDirectoryOwnershipMarker.Validate(
                     resolved,
                     resolved.CanonicalPath);
@@ -189,6 +207,11 @@ internal sealed partial class EfLibraryDirectoryOwnershipStore
                 throw new InvalidOperationException(
                     "A conflicting or unavailable durable directory ownership claim overlaps the move source.");
             }
+            if (!HasDestructiveIdentity(candidate))
+            {
+                throw new InvalidOperationException(
+                    "A durable ownership claim lacks managed-root physical identity.");
+            }
 
             owned.Add(candidate);
         }
@@ -197,4 +220,12 @@ internal sealed partial class EfLibraryDirectoryOwnershipStore
             .OrderBy(ownership => ownership.CanonicalPath.Length)
             .ToList();
     }
+
+    private static bool HasDestructiveIdentity(
+        LibraryDirectoryOwnership ownership) =>
+        ownership.ManagedRootFolderId.HasValue
+        && ownership.DirectoryObjectIdentityVersion == 1
+        && !string.IsNullOrWhiteSpace(ownership.DirectoryObjectIdentity)
+        && string.IsNullOrWhiteSpace(
+            ownership.DirectoryObjectIdentityUnavailableReason);
 }

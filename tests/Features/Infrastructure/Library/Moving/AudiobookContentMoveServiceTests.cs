@@ -13,6 +13,36 @@ namespace Listenarr.Tests.Features.Infrastructure.Library.Moving
         private static MoveLeaseToken LeaseToken(int generation = 1) =>
             new(TestLeaseOwner, generation);
 
+        public override async Task InitializeAsync()
+        {
+            await base.InitializeAsync();
+            await ConfigureManagedTestRootAsync();
+        }
+
+        private async Task ConfigureManagedTestRootAsync()
+        {
+            var rootPath = Path.GetFullPath(FileService.GetTempPath());
+            using var rootAnchor = PinnedDirectoryCreation.OpenPinnedBoundary(rootPath);
+            var factory = _provider.GetRequiredService<IDbContextFactory<ListenArrDbContext>>();
+            await using var db = await factory.CreateDbContextAsync();
+            if (await db.RootFolders.AnyAsync())
+            {
+                return;
+            }
+
+            db.RootFolders.Add(new RootFolder
+            {
+                Name = "Test library",
+                Path = rootPath,
+                ResolvedCaseSensitivity =
+                    FileSystemPathSemantics.CurrentHostDefault.CaseSensitivity,
+                PathIdentityState = PathIdentityState.Valid,
+                DirectoryObjectIdentityVersion = 1,
+                DirectoryObjectIdentity = rootAnchor.GetDirectoryObjectIdentity()
+            });
+            await db.SaveChangesAsync();
+        }
+
         [Theory]
         [InlineData(FileSystemCaseSensitivity.Insensitive, true)]
         [InlineData(FileSystemCaseSensitivity.Sensitive, false)]

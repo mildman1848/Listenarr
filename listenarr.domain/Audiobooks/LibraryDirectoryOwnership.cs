@@ -47,6 +47,16 @@ public sealed class LibraryDirectoryOwnership
     public Guid? CreationOperationId { get; set; }
     public int? AudiobookId { get; set; }
 
+    public int? ManagedRootFolderId { get; set; }
+
+    public int? DirectoryObjectIdentityVersion { get; set; }
+
+    [MaxLength(256)]
+    public string? DirectoryObjectIdentity { get; set; }
+
+    [MaxLength(1024)]
+    public string? DirectoryObjectIdentityUnavailableReason { get; set; }
+
     [MaxLength(1024)]
     public string? StateReason { get; set; }
 

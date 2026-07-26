@@ -5,6 +5,79 @@ namespace Listenarr.Infrastructure.Library.Moving;
 
 public sealed partial class AudiobookFilesystemDeleteService
 {
+    private async Task<PinnedDirectoryCreation.PinnedDirectoryAnchor?>
+        AuthorizeDeleteTargetAsync(
+            DeleteFolderTarget deleteTarget,
+            AudiobookFilesystemDeleteResult result,
+            CancellationToken cancellationToken)
+    {
+        if (_ownershipAuthorizer == null)
+        {
+            result.Warnings.Add(
+                "Managed-root authorization is unavailable, so audiobook folder contents were not deleted.");
+            return null;
+        }
+
+        try
+        {
+            using var rootAuthorization =
+                await _ownershipAuthorizer.AuthorizeContainingRootAsync(
+                    deleteTarget.FolderPath,
+                    deleteTarget.Semantics,
+                    cancellationToken);
+            var directoryName = Path.GetFileName(deleteTarget.FolderPath);
+            ExclusiveDirectoryCreator.InvokeBeforeOpenParentHook(
+                deleteTarget.FolderPath);
+            var target = rootAuthorization.ParentAnchor.OpenExistingChild(directoryName);
+            try
+            {
+                var exactOwnership = deleteTarget.OwnedDirectories.FirstOrDefault(
+                    ownership => FileSystemPathIdentity.AreEquivalent(
+                        ownership.CanonicalPath,
+                        deleteTarget.FolderPath,
+                        deleteTarget.Semantics));
+                if (exactOwnership != null
+                    && (exactOwnership.DirectoryObjectIdentityVersion != 1
+                        || string.IsNullOrWhiteSpace(
+                            exactOwnership.DirectoryObjectIdentity)
+                        || !string.IsNullOrWhiteSpace(
+                            exactOwnership.DirectoryObjectIdentityUnavailableReason)
+                        || !string.Equals(
+                            target.GetDirectoryObjectIdentity(),
+                            exactOwnership.DirectoryObjectIdentity,
+                            StringComparison.Ordinal)))
+                {
+                    throw new InvalidOperationException(
+                        "The audiobook folder differs from its durable ownership identity.");
+                }
+                if (!target.VisiblePathMatches())
+                {
+                    throw new InvalidOperationException(
+                        "The audiobook folder changed while destructive access was authorized.");
+                }
+
+                return target;
+            }
+            catch
+            {
+                target.Dispose();
+                throw;
+            }
+        }
+        catch (Exception exception) when (exception is not (
+            OperationCanceledException or OutOfMemoryException
+                or StackOverflowException))
+        {
+            result.Warnings.Add(
+                "The audiobook folder could not be bound to its managed physical directory, so its contents were not deleted.");
+            _logger.LogWarning(
+                exception,
+                "Blocked audiobook content deletion because managed-root authorization failed for {FolderPath}",
+                LogRedaction.SanitizeFilePath(deleteTarget.FolderPath));
+            return null;
+        }
+    }
+
     private async Task<IReadOnlyList<LibraryDirectoryOwnership>?> ResolveOwnedDirectoriesForDeleteAsync(
         string folderPath,
         FileSystemPathSemantics semantics,
@@ -75,9 +148,18 @@ public sealed partial class AudiobookFilesystemDeleteService
                 cancellationToken);
             ownership.State = LibraryDirectoryOwnershipState.Removing;
         }
+        if (_ownershipAuthorizer == null)
+        {
+            throw new InvalidOperationException(
+                "Managed-root ownership authorization is unavailable.");
+        }
 
+        using var authorization = await _ownershipAuthorizer.AuthorizeOwnershipAsync(
+            ownership,
+            cancellationToken);
         var outcome = LibraryDirectoryOwnershipRemoval.RemoveEmptyDirectory(
             ownership,
+            authorization.ParentAnchor,
             cancellationToken);
         if (outcome == LibraryDirectoryRemovalOutcome.Retained)
         {

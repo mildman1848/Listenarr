@@ -8,7 +8,7 @@ internal sealed partial class PinnedDirectoryCreation
 {
     internal sealed partial class PinnedFileEntry
     {
-        internal void Delete()
+        internal void Delete(bool immediateWindows = false)
         {
             ThrowIfDisposed();
             if (!VisiblePathMatches())
@@ -19,7 +19,14 @@ internal sealed partial class PinnedDirectoryCreation
 
             if (OperatingSystem.IsWindows())
             {
-                DeleteOpenedFileWindows(_fileHandle);
+                if (immediateWindows)
+                {
+                    DeleteOpenedFileImmediatelyWindows(_fileHandle);
+                }
+                else
+                {
+                    DeleteOpenedFileWindows(_fileHandle);
+                }
                 return;
             }
 
@@ -151,6 +158,45 @@ internal sealed partial class PinnedDirectoryCreation
                     Marshal.GetLastWin32Error(),
                     "Could not delete the verified pinned file handle.");
             }
+        }
+        finally
+        {
+            Marshal.FreeHGlobal(deleteInformation);
+        }
+    }
+
+    private static void DeleteOpenedFileImmediatelyWindows(SafeFileHandle fileHandle)
+    {
+        const int fileDispositionDelete = 0x1;
+        const int fileDispositionPosixSemantics = 0x2;
+        const int fileDispositionIgnoreReadonlyAttribute = 0x10;
+        var deleteInformation = Marshal.AllocHGlobal(sizeof(int));
+        try
+        {
+            Marshal.WriteInt32(
+                deleteInformation,
+                fileDispositionDelete
+                | fileDispositionPosixSemantics
+                | fileDispositionIgnoreReadonlyAttribute);
+            if (SetFileInformationByHandle(
+                    fileHandle,
+                    FileInformationClass.FileDispositionInfoEx,
+                    deleteInformation,
+                    sizeof(int)))
+            {
+                return;
+            }
+
+            var error = Marshal.GetLastWin32Error();
+            if (error is 1 or 50 or 87)
+            {
+                DeleteOpenedFileWindows(fileHandle);
+                return;
+            }
+
+            throw new Win32Exception(
+                error,
+                "Could not immediately retire the verified pinned file handle.");
         }
         finally
         {

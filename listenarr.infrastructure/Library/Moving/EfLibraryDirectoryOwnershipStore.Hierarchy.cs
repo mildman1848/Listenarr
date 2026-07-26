@@ -29,15 +29,10 @@ internal sealed partial class EfLibraryDirectoryOwnershipStore
             throw new InvalidOperationException(
                 "The directory creation destination is outside its managed boundary.");
         }
-        if (!Directory.Exists(boundary))
-        {
-            throw new InvalidOperationException(
-                "The managed directory creation boundary does not exist.");
-        }
-        ValidateExistingDirectory(
+        using var authorization = await _boundaryAuthorizer.AuthorizeAsync(
             boundary,
-            "managed directory creation boundary",
-            allowReparsePoint: true);
+            semantics,
+            cancellationToken);
 
         var hierarchy = new List<string>();
         var current = destination;
@@ -56,7 +51,7 @@ internal sealed partial class EfLibraryDirectoryOwnershipStore
         hierarchy.Reverse();
 
         var createdOwnerships = new List<LibraryDirectoryOwnership>();
-        var currentAnchor = PinnedDirectoryCreation.OpenPinnedBoundary(boundary);
+        var currentAnchor = authorization.BoundaryAnchor.Duplicate();
         try
         {
             foreach (var directory in hierarchy)
@@ -95,6 +90,7 @@ internal sealed partial class EfLibraryDirectoryOwnershipStore
                                     creationOperationId,
                                     audiobookId),
                                 existingPublication,
+                                authorization.RootFolderId,
                                 cancellationToken);
                             EnsureVisibleAnchor(nextAnchor);
                         }
@@ -125,6 +121,7 @@ internal sealed partial class EfLibraryDirectoryOwnershipStore
                                 creationOperationId,
                                 audiobookId),
                             creation,
+                            authorization.RootFolderId,
                             CancellationToken.None));
                         if (!creation.VisiblePathMatches())
                         {

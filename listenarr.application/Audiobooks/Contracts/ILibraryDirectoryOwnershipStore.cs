@@ -28,6 +28,13 @@ public interface ILibraryDirectoryOwnershipStore
         LibraryDirectoryOwnershipClaim claim,
         CancellationToken cancellationToken = default);
 
+    Task<LibraryDirectoryOwnership> ClaimRetainedAsync(
+        LibraryDirectoryOwnershipClaim claim,
+        CancellationToken cancellationToken = default) =>
+        Task.FromException<LibraryDirectoryOwnership>(
+            new InvalidOperationException(
+                "Authorized retained-directory claiming is unavailable."));
+
     Task<IReadOnlyList<LibraryDirectoryOwnership>> EnsureCreatedHierarchyAsync(
         string destinationDirectory,
         string managedBoundary,

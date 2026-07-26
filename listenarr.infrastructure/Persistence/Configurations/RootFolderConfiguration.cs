@@ -39,6 +39,8 @@ namespace Listenarr.Infrastructure.Persistence.Configurations
             builder.Property(r => r.CaseSensitivityMode).HasConversion<string>().HasMaxLength(16);
             builder.Property(r => r.ResolvedCaseSensitivity).HasConversion<string>().HasMaxLength(16);
             builder.Property(r => r.PathIdentityState).HasConversion<string>().HasMaxLength(16);
+            builder.Property(r => r.DirectoryObjectIdentity).HasMaxLength(256);
+            builder.Property(r => r.DirectoryObjectIdentityUnavailableReason).HasMaxLength(1024);
             builder.HasIndex(r => r.PathIdentityKey)
                 .IsUnique()
                 .HasFilter("\"PathIdentityKey\" IS NOT NULL");

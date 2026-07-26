@@ -37,13 +37,29 @@ public partial class FileMover
         string key,
         FileMoveGateEntry entry,
         IReadOnlyList<FileStream> stripeLocks,
-        string sourceIdentity,
-        string destinationIdentity) : IDisposable
+        FileMoveEndpoint source,
+        FileMoveEndpoint destination,
+        PinnedDirectoryCreation.PinnedDirectoryAnchor? sourceParent,
+        PinnedDirectoryCreation.PinnedDirectoryAnchor? destinationParent) : IDisposable
     {
         private FileMoveGateEntry? _entry = entry;
 
-        public string SourceIdentity { get; } = sourceIdentity;
-        public string DestinationIdentity { get; } = destinationIdentity;
+        public string SourceIdentity { get; } = source.LockIdentity;
+        public string DestinationIdentity { get; } = destination.LockIdentity;
+        public string SourcePath { get; } = source.ResolvedPath;
+        public string DestinationPath { get; } = destination.ResolvedPath;
+        public string SourceName { get; } = Path.GetFileName(source.ResolvedPath);
+        public string DestinationName { get; } = Path.GetFileName(destination.ResolvedPath);
+        private readonly PinnedDirectoryCreation.PinnedDirectoryAnchor? _sourceParent =
+            sourceParent;
+        private readonly PinnedDirectoryCreation.PinnedDirectoryAnchor? _destinationParent =
+            destinationParent;
+        public PinnedDirectoryCreation.PinnedDirectoryAnchor SourceParent =>
+            _sourceParent ?? throw new InvalidOperationException(
+                "The file-move source parent was not pinned.");
+        public PinnedDirectoryCreation.PinnedDirectoryAnchor DestinationParent =>
+            _destinationParent ?? throw new InvalidOperationException(
+                "The file-move destination parent was not pinned.");
         private IReadOnlyList<FileStream>? _stripeLocks = stripeLocks;
 
         public void Dispose()
@@ -53,6 +69,8 @@ public partial class FileMover
             {
                 return;
             }
+            _sourceParent?.Dispose();
+            _destinationParent?.Dispose();
 
             var locks = Interlocked.Exchange(ref _stripeLocks, null);
             if (locks != null)
@@ -76,6 +94,8 @@ public partial class FileMover
         }
     }
 
+    private sealed record FileMoveEndpoint(string LockIdentity, string ResolvedPath);
+
     private async Task<FileMoveGateLease?> TryAcquireFileMoveGateAsync(
         string sourceFile,
         string destinationFile)
@@ -86,10 +106,10 @@ public partial class FileMover
             return null;
         }
 
-        var sourceIdentity = await ResolveFileMoveLockIdentityAsync(sourceFile);
-        var destinationIdentity = await ResolveFileMoveLockIdentityAsync(
+        var sourceEndpoint = await ResolveFileMoveEndpointAsync(sourceFile);
+        var destinationEndpoint = await ResolveFileMoveEndpointAsync(
             destinationFile);
-        if (sourceIdentity == null || destinationIdentity == null)
+        if (sourceEndpoint == null || destinationEndpoint == null)
         {
             _logger.LogWarning(
                 "Blocked file move because endpoint identity could not be resolved: {Source} -> {Destination}",
@@ -104,7 +124,9 @@ public partial class FileMover
             return null;
         }
 
-        var key = GetFileMoveGateKey(sourceIdentity, destinationIdentity);
+        var key = GetFileMoveGateKey(
+            sourceEndpoint.LockIdentity,
+            destinationEndpoint.LockIdentity);
         FileMoveGateEntry entry;
         lock (FileMoveGateRegistryLock)
         {
@@ -119,11 +141,15 @@ public partial class FileMover
 
         await entry.Semaphore.WaitAsync();
         var stripeLocks = new List<FileStream>();
+        PinnedDirectoryCreation.PinnedDirectoryAnchor? sourceParent = null;
+        PinnedDirectoryCreation.PinnedDirectoryAnchor? destinationParent = null;
+        FileMoveGateLease? lease = null;
+        var leaseReturned = false;
         try
         {
             foreach (var lockPath in GetFileMoveStripeLockPaths(
-                sourceIdentity,
-                destinationIdentity))
+                sourceEndpoint.LockIdentity,
+                destinationEndpoint.LockIdentity))
             {
                 FileStream? stream = null;
                 for (var attempt = 0; attempt < 300 && stream == null; attempt++)
@@ -152,12 +178,41 @@ public partial class FileMover
                 stripeLocks.Add(stream);
             }
 
-            var lease = new FileMoveGateLease(
+            var currentSource = await ResolveFileMoveEndpointAsync(sourceFile);
+            var currentDestination = await ResolveFileMoveEndpointAsync(destinationFile);
+            if (currentSource == null
+                || currentDestination == null
+                || !string.Equals(
+                    currentSource.LockIdentity,
+                    sourceEndpoint.LockIdentity,
+                    StringComparison.Ordinal)
+                || !string.Equals(
+                    currentDestination.LockIdentity,
+                    destinationEndpoint.LockIdentity,
+                    StringComparison.Ordinal))
+            {
+                throw new IOException(
+                    "A file-move endpoint changed while its locks were acquired.");
+            }
+
+            var sourceParentPath = Path.GetDirectoryName(currentSource.ResolvedPath)
+                ?? throw new IOException("The file-move source has no parent.");
+            var destinationParentPath =
+                Path.GetDirectoryName(currentDestination.ResolvedPath)
+                ?? throw new IOException("The file-move destination has no parent.");
+            sourceParent = PinnedDirectoryCreation.OpenPinnedDirectoryNoFollow(
+                sourceParentPath);
+            destinationParent = PinnedDirectoryCreation.OpenPinnedDirectoryNoFollow(
+                destinationParentPath);
+
+            lease = new FileMoveGateLease(
                 key,
                 entry,
                 stripeLocks,
-                sourceIdentity,
-                destinationIdentity);
+                currentSource,
+                currentDestination,
+                sourceParent,
+                destinationParent);
             if (await IsFilesystemAliasAsync(sourceFile, destinationFile))
             {
                 lease.Dispose();
@@ -165,23 +220,41 @@ public partial class FileMover
                 return null;
             }
 
+            leaseReturned = true;
             return lease;
         }
         catch (Exception exception) when (exception is not (
             OperationCanceledException or OutOfMemoryException or StackOverflowException))
         {
-            new FileMoveGateLease(
-                key,
-                entry,
-                stripeLocks,
-                sourceIdentity,
-                destinationIdentity).Dispose();
             _logger.LogWarning(
                 exception,
                 "Blocked file move because cross-process path locks were unavailable: {Source} -> {Destination}",
                 LogRedaction.SanitizeFilePath(sourceFile),
                 LogRedaction.SanitizeFilePath(destinationFile));
             return null;
+        }
+        finally
+        {
+            if (!leaseReturned)
+            {
+                if (lease != null)
+                {
+                    lease.Dispose();
+                }
+                else
+                {
+                    sourceParent?.Dispose();
+                    destinationParent?.Dispose();
+                    new FileMoveGateLease(
+                        key,
+                        entry,
+                        stripeLocks,
+                        sourceEndpoint,
+                        destinationEndpoint,
+                        sourceParent: null,
+                        destinationParent: null).Dispose();
+                }
+            }
         }
     }
 
@@ -191,7 +264,7 @@ public partial class FileMover
             LogRedaction.SanitizeFilePath(sourceFile),
             LogRedaction.SanitizeFilePath(destinationFile));
 
-    private async ValueTask<string?> ResolveFileMoveLockIdentityAsync(
+    private async ValueTask<FileMoveEndpoint?> ResolveFileMoveEndpointAsync(
         string path)
     {
         var resolver = _semanticsResolver ?? new FileSystemSemanticsResolver();
@@ -203,18 +276,26 @@ public partial class FileMover
             return null;
         }
 
-        var canonicalPath = FileSystemPathIdentity.Canonicalize(
-            resolution.CanonicalPath ?? Path.GetFullPath(path),
-            resolution.Semantics.Syntax);
-        if (!TryResolveLinkedPathComponents(canonicalPath, out var identity))
+        var fullPath = Path.GetFullPath(path);
+        if (IsLinkedOrUnverifiableEntry(fullPath))
         {
             return null;
         }
 
-        return resolution.Semantics.CaseSensitivity
+        var canonicalPath = FileSystemPathIdentity.Canonicalize(
+            fullPath,
+            resolution.Semantics.Syntax);
+        if (!TryResolvePhysicalPath(canonicalPath, out var physical))
+        {
+            return null;
+        }
+
+        var identity = physical.ResolvedPath;
+        var lockIdentity = resolution.Semantics.CaseSensitivity
                 == FileSystemCaseSensitivity.Insensitive
             ? identity.ToUpperInvariant()
             : identity;
+        return new FileMoveEndpoint(lockIdentity, identity);
     }
 
     private static bool TryResolveLinkedPathComponents(

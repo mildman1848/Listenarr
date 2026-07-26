@@ -33,6 +33,7 @@ namespace Listenarr.Tests.Features.Application.Downloads.Import
         {
             _services.AddSingleton<IMetadataService>(metadataServiceMock);
             Init();
+            await AddAuthorizedRootAsync(FileService.GetTempPath());
         }
 
         public static TheoryData<string> PathSuffixes
@@ -80,16 +81,14 @@ namespace Listenarr.Tests.Features.Application.Downloads.Import
             var innerRoot = Path.Join(outerRoot, "Sensitive Library");
             var bookPath = Path.Join(innerRoot, "Book");
             Directory.CreateDirectory(bookPath);
-            await _rootFolderRepository.AddAsync(new RootFolderBuilder()
-                .WithName("A Outer")
-                .WithPath(outerRoot)
-                .WithCaseSensitivityMode(FileSystemCaseSensitivityMode.Insensitive)
-                .Build());
-            await _rootFolderRepository.AddAsync(new RootFolderBuilder()
-                .WithName("Z Inner")
-                .WithPath(innerRoot)
-                .WithCaseSensitivityMode(FileSystemCaseSensitivityMode.Sensitive)
-                .Build());
+            await AddAuthorizedRootAsync(
+                outerRoot,
+                "A Outer",
+                FileSystemCaseSensitivityMode.Insensitive);
+            await AddAuthorizedRootAsync(
+                innerRoot,
+                "Z Inner",
+                FileSystemCaseSensitivityMode.Sensitive);
             await _applicationSettingsRepository.SaveAsync(new ApplicationSettingsBuilder()
                 .WithMetadataProcessing()
                 .WithMoveFileOnCompleted()
@@ -620,6 +619,7 @@ namespace Listenarr.Tests.Features.Application.Downloads.Import
             Init(builder => builder
                 .WithSingleton<IFileMover>(fileMover.Object)
                 .WithSingleton<IAudiobookFileService>(fileService.Object));
+            await AddAuthorizedRootAsync(FileService.GetTempPath());
 
             var outputDirectory = FileService.GetTempDirectory("download-import-owned-destination");
             var sourceDirectory = FileService.GetTempDirectory("download-import-owned-source");
@@ -674,6 +674,7 @@ namespace Listenarr.Tests.Features.Application.Downloads.Import
                     return Task.FromResult(true);
                 });
             Init(builder => builder.WithSingleton<IFileMover>(fileMover.Object));
+            await AddAuthorizedRootAsync(FileService.GetTempPath());
 
             var outputDirectory = FileService.GetTempDirectory("download-import-reservation-dst");
             var sourceDirectory = FileService.GetTempDirectory("download-import-reservation-src");

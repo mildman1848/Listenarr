@@ -104,7 +104,9 @@ internal sealed partial class PinnedDirectoryCreation
             "The republished directory does not identify the pinned directory.");
     }
 
-    internal void DeletePinnedEmptyDirectory(string currentName)
+    internal void DeletePinnedEmptyDirectory(
+        string currentName,
+        bool immediateWindows = false)
     {
         ThrowIfDisposed();
         ValidateLeafName(currentName);
@@ -126,7 +128,14 @@ internal sealed partial class PinnedDirectoryCreation
         }
         if (OperatingSystem.IsWindows())
         {
-            DeleteOpenedFileWindows(_directoryHandle);
+            if (immediateWindows)
+            {
+                DeleteOpenedFileImmediatelyWindows(_directoryHandle);
+            }
+            else
+            {
+                DeleteOpenedFileWindows(_directoryHandle);
+            }
             return;
         }
 

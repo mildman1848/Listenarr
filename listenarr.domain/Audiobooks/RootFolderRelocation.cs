@@ -37,6 +37,11 @@ public sealed class RootFolderRelocation
     public string DesiredName { get; set; } = string.Empty;
     public bool DesiredIsDefault { get; set; }
     public FileSystemCaseSensitivityMode TargetCaseSensitivityMode { get; set; } = FileSystemCaseSensitivityMode.Auto;
+    public int? TargetDirectoryObjectIdentityVersion { get; set; }
+    [MaxLength(256)]
+    public string? TargetDirectoryObjectIdentity { get; set; }
+    [MaxLength(1024)]
+    public string? TargetDirectoryObjectIdentityUnavailableReason { get; set; }
     public int TotalJobs { get; set; }
     public int CompletedJobs { get; set; }
     [MaxLength(4000)]

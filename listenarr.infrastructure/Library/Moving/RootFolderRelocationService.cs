@@ -12,7 +12,8 @@ public sealed partial class RootFolderRelocationService(
     TimeProvider timeProvider,
     IFilesystemMutationCoordinator mutationCoordinator,
     IAudiobookOperationCoordinator audiobookOperationCoordinator,
-    IServiceScopeFactory manifestScopeFactory) : IRootFolderRelocationService
+    IServiceScopeFactory manifestScopeFactory,
+    IDirectoryObjectIdentityResolver? directoryObjectIdentityResolver = null) : IRootFolderRelocationService
 {
     private readonly SemaphoreSlim _rootIdentityGate = new(1, 1);
     private readonly IFilesystemMutationCoordinator _mutationCoordinator =
@@ -21,6 +22,8 @@ public sealed partial class RootFolderRelocationService(
         audiobookOperationCoordinator ?? throw new ArgumentNullException(nameof(audiobookOperationCoordinator));
     private readonly IServiceScopeFactory _manifestScopeFactory =
         manifestScopeFactory ?? throw new ArgumentNullException(nameof(manifestScopeFactory));
+    private readonly IDirectoryObjectIdentityResolver? _directoryObjectIdentityResolver =
+        directoryObjectIdentityResolver;
     private bool _rootIdentitiesReconciled;
     public async Task<RootFolderPathChangeResult> StartAsync(
         int rootFolderId,
@@ -66,6 +69,10 @@ public sealed partial class RootFolderRelocationService(
             throw new InvalidOperationException(
                 targetResolution.Reason ?? "Target filesystem semantics are unavailable; select an explicit override.");
         }
+        var targetObjectIdentity =
+            await ResolveExistingDirectoryObjectIdentityAsync(
+                targetPath,
+                cancellationToken);
 
         await using var db = await dbContextFactory.CreateDbContextAsync(cancellationToken);
         await using var transaction = await db.Database.BeginTransactionAsync(cancellationToken);
@@ -276,6 +283,14 @@ public sealed partial class RootFolderRelocationService(
             RejectDuplicateRelocationTargets(movePlans, targetResolution.Semantics);
         }
 
+        if (command.Mode == RootFolderRelocationMode.Relocate
+            && !targetObjectIdentity.IsAvailable)
+        {
+            targetObjectIdentity = await ResolveOrCreateRelocationTargetIdentityAsync(
+                targetPath,
+                cancellationToken);
+        }
+
         var now = timeProvider.GetUtcNow();
         var nowUtc = now.UtcDateTime;
 
@@ -330,6 +345,7 @@ public sealed partial class RootFolderRelocationService(
 
             RejectDuplicateAudiobookFileOwnership(db);
             ApplyRootMetadata(root, command, targetPath, targetResolution, targetIdentityKey);
+            ApplyRootDirectoryObjectIdentity(root, targetObjectIdentity);
             if (command.DesiredIsDefault)
             {
                 await ClearOtherDefaultsAsync(db, rootFolderId, cancellationToken);
@@ -387,6 +403,9 @@ public sealed partial class RootFolderRelocationService(
             SourcePath = root.Path,
             SourceCaseSensitivityMode = sourceCaseSensitivityMode,
             TargetPath = targetPath,
+            TargetDirectoryObjectIdentityVersion = targetObjectIdentity.Version,
+            TargetDirectoryObjectIdentity = targetObjectIdentity.Value,
+            TargetDirectoryObjectIdentityUnavailableReason = targetObjectIdentity.UnavailableReason,
             Mode = command.Mode,
             Status = RootFolderRelocationStatus.Pending,
             DeleteEmptySource = command.DeleteEmptySource,
@@ -443,6 +462,7 @@ public sealed partial class RootFolderRelocationService(
         if (affected.Count == 0)
         {
             ApplyRootMetadata(root, command, targetPath, targetResolution, targetIdentityKey);
+            ApplyRootDirectoryObjectIdentity(root, targetObjectIdentity);
             if (command.DesiredIsDefault)
             {
                 await ClearOtherDefaultsAsync(db, rootFolderId, cancellationToken);
@@ -458,29 +478,6 @@ public sealed partial class RootFolderRelocationService(
         await transaction.CommitAsync(CancellationToken.None);
         var result = Map(relocation, root.Path);
         return new StartOutcome(result, true);
-    }
-
-    private static void RejectTargetNavigationSegments(string targetPath)
-    {
-        ArgumentException.ThrowIfNullOrWhiteSpace(targetPath);
-        var root = Path.GetPathRoot(targetPath);
-        var relativePath = string.IsNullOrEmpty(root)
-            ? targetPath
-            : targetPath[root.Length..];
-        var segments = relativePath.Split(['/', '\\'], StringSplitOptions.RemoveEmptyEntries);
-        if (segments.Any(segment => segment == "."))
-        {
-            throw new ArgumentException(
-                "Root folder target path cannot contain current directory segments.",
-                nameof(targetPath));
-        }
-
-        if (segments.Any(segment => segment == ".."))
-        {
-            throw new ArgumentException(
-                "Root folder target path cannot contain parent traversal segments.",
-                nameof(targetPath));
-        }
     }
 
     private sealed record StartOutcome(RootFolderPathChangeResult Result, bool Broadcast);

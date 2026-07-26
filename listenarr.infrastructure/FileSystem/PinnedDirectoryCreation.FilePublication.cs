@@ -87,11 +87,16 @@ internal sealed partial class PinnedDirectoryCreation
         SafeFileHandle entryHandle,
         string sourceName,
         SafeFileHandle destinationDirectoryHandle,
-        string finalName)
+        string finalName,
+        bool replaceExisting = false)
     {
         if (OperatingSystem.IsWindows())
         {
-            RenameRelativeEntryWindows(destinationDirectoryHandle, entryHandle, finalName);
+            RenameRelativeEntryWindows(
+                destinationDirectoryHandle,
+                entryHandle,
+                finalName,
+                replaceExisting);
             return;
         }
 
@@ -101,7 +106,13 @@ internal sealed partial class PinnedDirectoryCreation
         var destinationDirectoryFileDescriptor = destinationDirectoryHandle
             .DangerousGetHandle()
             .ToInt32();
-        var result = OperatingSystem.IsMacOS()
+        var result = replaceExisting
+            ? RenameAtUnix(
+                sourceDirectoryFileDescriptor,
+                sourceName,
+                destinationDirectoryFileDescriptor,
+                finalName)
+            : OperatingSystem.IsMacOS()
             ? RenameAtExclusiveMac(
                 sourceDirectoryFileDescriptor,
                 sourceName,
@@ -125,7 +136,8 @@ internal sealed partial class PinnedDirectoryCreation
     private static void RenameRelativeEntryWindows(
         SafeFileHandle directoryHandle,
         SafeFileHandle entryHandle,
-        string finalName)
+        string finalName,
+        bool replaceExisting)
     {
         var fileNameBytes = Encoding.Unicode.GetBytes(finalName);
         var rootDirectoryOffset = IntPtr.Size == 8 ? 8 : 4;
@@ -140,7 +152,7 @@ internal sealed partial class PinnedDirectoryCreation
                 Marshal.WriteByte(buffer, index, 0);
             }
 
-            Marshal.WriteByte(buffer, 0, 0);
+            Marshal.WriteByte(buffer, 0, replaceExisting ? (byte)1 : (byte)0);
             Marshal.WriteIntPtr(
                 buffer,
                 rootDirectoryOffset,

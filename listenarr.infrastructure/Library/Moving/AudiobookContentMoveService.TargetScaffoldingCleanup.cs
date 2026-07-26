@@ -62,7 +62,7 @@ internal sealed partial class AudiobookContentMoveService
             ValidateExistingMoveDirectory(
                 directory.Path,
                 "move-created retained directory");
-            await directoryOwnershipStore.RecordCreatedAsync(
+            await directoryOwnershipStore.ClaimRetainedAsync(
                 new LibraryDirectoryOwnershipClaim(
                     directory.Path,
                     request.TargetSemantics,

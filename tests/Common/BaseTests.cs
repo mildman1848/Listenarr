@@ -105,5 +105,50 @@ namespace Listenarr.Tests.Common
                 .WithBasePath(FileService.GetTempPath())
                 .Build());
         }
+
+        protected async Task<RootFolder> AddAuthorizedRootAsync(
+            string path,
+            string name = "Test Library Root",
+            FileSystemCaseSensitivityMode caseSensitivityMode =
+                FileSystemCaseSensitivityMode.Auto)
+        {
+            Directory.CreateDirectory(path);
+            var identity = await _provider
+                .GetRequiredService<IDirectoryObjectIdentityResolver>()
+                .ResolveAsync(path);
+            Assert.True(
+                identity.IsAvailable,
+                identity.UnavailableReason
+                    ?? "The test library root has no physical directory identity.");
+
+            var semantics = FileSystemPathSemantics.CurrentHostDefault;
+            var canonicalPath = FileSystemPathIdentity.Canonicalize(
+                path,
+                semantics.Syntax);
+            var root = (await _rootFolderRepository.GetAllAsync())
+                .SingleOrDefault(candidate => FileSystemPathIdentity.AreEquivalent(
+                    candidate.Path,
+                    canonicalPath,
+                    semantics));
+            var isNew = root == null;
+            root ??= new RootFolderBuilder()
+                .WithName(name)
+                .WithPath(canonicalPath)
+                .WithCaseSensitivityMode(caseSensitivityMode)
+                .Build();
+            root.DirectoryObjectIdentityVersion = identity.Version;
+            root.DirectoryObjectIdentity = identity.Value;
+            root.DirectoryObjectIdentityUnavailableReason = identity.UnavailableReason;
+            if (isNew)
+            {
+                await _rootFolderRepository.AddAsync(root);
+            }
+            else
+            {
+                await _rootFolderRepository.UpdateAsync(root);
+            }
+
+            return root;
+        }
     }
 }

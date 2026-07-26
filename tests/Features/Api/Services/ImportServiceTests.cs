@@ -52,6 +52,7 @@ namespace Listenarr.Tests.Features.Api.Services
             _outputRoot = FileService.GetTempDirectory("import-out");
 
             await InitDataAsync();
+            await AddAuthorizedRootAsync(FileService.GetTempPath());
         }
 
         private async Task InitDataAsync()
@@ -143,6 +144,7 @@ namespace Listenarr.Tests.Features.Api.Services
 
             _services.AddSingleton<IMetadataService>(metadataMock.Object);
             Init();
+            await AddAuthorizedRootAsync(FileService.GetTempPath());
             await InitDataAsync();
 
             var settings = await _applicationSettingsRepository.SaveAsync(new ApplicationSettingsBuilder()
@@ -176,7 +178,7 @@ namespace Listenarr.Tests.Features.Api.Services
         }
 
         [Fact]
-        public async Task ImportFilesFromDirectory_MoveImportsCompanionFilesAndDeletesSourceFolder()
+        public async Task ImportFilesFromDirectory_MoveImportsCompanionFilesAndPreservesUnownedSourceFolder()
         {
             var outputRoot = FileService.GetTempDirectory("import-out");
             var sourceDir = FileService.GetTempDirectory("import-src");
@@ -191,6 +193,7 @@ namespace Listenarr.Tests.Features.Api.Services
 
             _services.AddSingleton(metadataMock.Object);
             Init();
+            await AddAuthorizedRootAsync(FileService.GetTempPath());
 
             var settings = await _applicationSettingsRepository.SaveAsync(new ApplicationSettings
             {
@@ -218,7 +221,8 @@ namespace Listenarr.Tests.Features.Api.Services
             Assert.Contains(results, r => string.Equals(Path.GetFileName(r.FinalPath), "Companion Book-01.mp3", StringComparison.OrdinalIgnoreCase));
             Assert.Contains(results, r => string.Equals(Path.GetFileName(r.FinalPath), "cover.jpg", StringComparison.OrdinalIgnoreCase));
             Assert.Contains(results, r => string.Equals(Path.GetFileName(r.FinalPath), "notes.txt", StringComparison.OrdinalIgnoreCase));
-            Assert.False(Directory.Exists(sourceDir));
+            Assert.True(Directory.Exists(sourceDir));
+            Assert.Empty(Directory.EnumerateFileSystemEntries(sourceDir));
         }
 
         [Fact]
@@ -237,6 +241,7 @@ namespace Listenarr.Tests.Features.Api.Services
 
             _services.AddSingleton(metadataMock.Object);
             Init();
+            await AddAuthorizedRootAsync(FileService.GetTempPath());
 
             var settings = await _applicationSettingsRepository.SaveAsync(new ApplicationSettings
             {
@@ -298,6 +303,7 @@ namespace Listenarr.Tests.Features.Api.Services
 
             _services.AddSingleton(metadataMock.Object);
             Init();
+            await AddAuthorizedRootAsync(FileService.GetTempPath());
 
             var settings = await _applicationSettingsRepository.SaveAsync(new ApplicationSettings
             {
@@ -407,6 +413,7 @@ namespace Listenarr.Tests.Features.Api.Services
 
             _services.AddSingleton(metadataMock.Object);
             Init();
+            await AddAuthorizedRootAsync(FileService.GetTempPath());
             await InitDataAsync();
 
             var settings = await _applicationSettingsRepository.SaveAsync(new ApplicationSettings
@@ -461,6 +468,7 @@ namespace Listenarr.Tests.Features.Api.Services
 
             _services.AddSingleton(metadataMock.Object);
             Init();
+            await AddAuthorizedRootAsync(FileService.GetTempPath());
             await InitDataAsync();
 
             var settings = await _applicationSettingsRepository.SaveAsync(new ApplicationSettings
@@ -508,6 +516,7 @@ namespace Listenarr.Tests.Features.Api.Services
 
             _services.AddSingleton(metadataMock.Object);
             Init();
+            await AddAuthorizedRootAsync(FileService.GetTempPath());
             await InitDataAsync();
 
             var settings = await _applicationSettingsRepository.SaveAsync(new ApplicationSettings
@@ -643,6 +652,7 @@ namespace Listenarr.Tests.Features.Api.Services
 
             _services.AddSingleton(metadataMock.Object);
             Init();
+            await AddAuthorizedRootAsync(FileService.GetTempPath());
             await InitDataAsync();
 
             var settings = await _applicationSettingsRepository.SaveAsync(new ApplicationSettings

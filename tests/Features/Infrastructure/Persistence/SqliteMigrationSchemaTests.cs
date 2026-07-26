@@ -55,7 +55,8 @@ namespace Listenarr.Tests.Features.Infrastructure.Persistence
             "20260713181804_HardenMoveExecutionAndScanHandoffs",
             "20260715115000_AddAudiobookFileOwnershipIdentity",
             "20260717143713_AddLibraryDirectoryOwnership",
-            "20260720122500_EnforceSingleDefaultRootFolder"
+            "20260720122500_EnforceSingleDefaultRootFolder",
+            "20260726042801_AddDirectoryObjectIdentityAuthorization"
         };
 
         private static (SqliteConnection Connection, ListenArrDbContext Context) CreateMigratedSqliteContext()
@@ -473,32 +474,34 @@ namespace Listenarr.Tests.Features.Infrastructure.Persistence
             var migrator = context.GetService<IMigrator>();
             await migrator.MigrateAsync("20260708225144_SetRootFolderRelocationRootDeleteBehavior");
 
-            var root = new RootFolder
-            {
-                Name = "Deleted Library",
-                Path = "/library",
-                IsDefault = true
-            };
-            context.RootFolders.Add(root);
-            await context.SaveChangesAsync();
-            context.RootFolderRelocations.Add(new RootFolderRelocation
-            {
-                Id = relocationId,
-                RootFolderId = root.Id,
-                SourcePath = "/library",
-                TargetPath = "/new-library",
-                Mode = RootFolderRelocationMode.MetadataOnly,
-                Status = RootFolderRelocationStatus.Completed,
-                DesiredName = "Deleted Library",
-                DesiredIsDefault = true,
-                CompletedAt = DateTime.UtcNow
-            });
-            await context.SaveChangesAsync();
+            await context.Database.ExecuteSqlInterpolatedAsync(
+                $"""
+                INSERT INTO "RootFolders" ("Name", "Path", "IsDefault", "CreatedAt")
+                VALUES ({"Deleted Library"}, {"/library"}, {true}, {DateTime.UtcNow});
+                """);
+            var rootId = (long)(await ExecuteScalarAsync(
+                connection,
+                "SELECT last_insert_rowid();"))!;
+            await context.Database.ExecuteSqlInterpolatedAsync(
+                $"""
+                INSERT INTO "RootFolderRelocations" (
+                    "Id", "RootFolderId", "SourcePath", "TargetPath", "Mode", "Status",
+                    "DesiredName", "DesiredIsDefault", "CompletedAt", "CreatedAt",
+                    "UpdatedAt", "CompletedJobs", "DeleteEmptySource",
+                    "SourceCaseSensitivityMode", "TargetCaseSensitivityMode", "TotalJobs")
+                VALUES (
+                    {relocationId}, {rootId}, {"/library"}, {"/new-library"},
+                    {nameof(RootFolderRelocationMode.MetadataOnly)},
+                    {nameof(RootFolderRelocationStatus.Completed)},
+                    {"Deleted Library"}, {true}, {DateTime.UtcNow}, {DateTime.UtcNow},
+                    {DateTime.UtcNow}, {0}, {false},
+                    {nameof(FileSystemCaseSensitivityMode.Auto)},
+                    {nameof(FileSystemCaseSensitivityMode.Auto)}, {0});
+                """);
 
-            context.RootFolders.Remove(root);
-            await context.SaveChangesAsync();
+            await context.Database.ExecuteSqlInterpolatedAsync(
+                $"DELETE FROM \"RootFolders\" WHERE \"Id\" = {rootId};");
             context.ChangeTracker.Clear();
-            Assert.Null((await context.RootFolderRelocations.SingleAsync()).RootFolderId);
 
             var exception = await Assert.ThrowsAsync<SqliteException>(() =>
                 migrator.MigrateAsync("20260708224900_AddRootFolderRelocationSkippedItems"));
@@ -543,27 +546,30 @@ namespace Listenarr.Tests.Features.Infrastructure.Persistence
             var migrator = context.GetService<IMigrator>();
             await migrator.MigrateAsync("20260708225144_SetRootFolderRelocationRootDeleteBehavior");
 
-            var root = new RootFolder
-            {
-                Name = "Retained Library",
-                Path = "/library",
-                IsDefault = true
-            };
-            context.RootFolders.Add(root);
-            await context.SaveChangesAsync();
-            context.RootFolderRelocations.Add(new RootFolderRelocation
-            {
-                Id = Guid.NewGuid(),
-                RootFolderId = root.Id,
-                SourcePath = "/library",
-                TargetPath = "/new-library",
-                Mode = RootFolderRelocationMode.MetadataOnly,
-                Status = RootFolderRelocationStatus.Completed,
-                DesiredName = "Retained Library",
-                DesiredIsDefault = true,
-                CompletedAt = DateTime.UtcNow
-            });
-            await context.SaveChangesAsync();
+            await context.Database.ExecuteSqlInterpolatedAsync(
+                $"""
+                INSERT INTO "RootFolders" ("Name", "Path", "IsDefault", "CreatedAt")
+                VALUES ({"Retained Library"}, {"/library"}, {true}, {DateTime.UtcNow});
+                """);
+            var rootId = (long)(await ExecuteScalarAsync(
+                connection,
+                "SELECT last_insert_rowid();"))!;
+            await context.Database.ExecuteSqlInterpolatedAsync(
+                $"""
+                INSERT INTO "RootFolderRelocations" (
+                    "Id", "RootFolderId", "SourcePath", "TargetPath", "Mode", "Status",
+                    "DesiredName", "DesiredIsDefault", "CompletedAt", "CreatedAt",
+                    "UpdatedAt", "CompletedJobs", "DeleteEmptySource",
+                    "SourceCaseSensitivityMode", "TargetCaseSensitivityMode", "TotalJobs")
+                VALUES (
+                    {Guid.NewGuid()}, {rootId}, {"/library"}, {"/new-library"},
+                    {nameof(RootFolderRelocationMode.MetadataOnly)},
+                    {nameof(RootFolderRelocationStatus.Completed)},
+                    {"Retained Library"}, {true}, {DateTime.UtcNow}, {DateTime.UtcNow},
+                    {DateTime.UtcNow}, {0}, {false},
+                    {nameof(FileSystemCaseSensitivityMode.Auto)},
+                    {nameof(FileSystemCaseSensitivityMode.Auto)}, {0});
+                """);
 
             await migrator.MigrateAsync("20260708224900_AddRootFolderRelocationSkippedItems");
 
@@ -571,7 +577,7 @@ namespace Listenarr.Tests.Features.Infrastructure.Persistence
             {
                 rootIdCommand.CommandText =
                     "SELECT \"RootFolderId\" FROM \"RootFolderRelocations\" LIMIT 1;";
-                Assert.Equal((long)root.Id, await rootIdCommand.ExecuteScalarAsync());
+                Assert.Equal(rootId, await rootIdCommand.ExecuteScalarAsync());
             }
 
             await using (var foreignKeyCheck = connection.CreateCommand())
@@ -607,6 +613,15 @@ namespace Listenarr.Tests.Features.Infrastructure.Persistence
             }
 
             Assert.Contains("SourcePath", columns);
+        }
+
+        private static async Task<object?> ExecuteScalarAsync(
+            SqliteConnection connection,
+            string commandText)
+        {
+            await using var command = connection.CreateCommand();
+            command.CommandText = commandText;
+            return await command.ExecuteScalarAsync();
         }
     }
 }

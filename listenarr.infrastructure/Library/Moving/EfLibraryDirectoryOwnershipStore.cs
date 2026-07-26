@@ -6,43 +6,71 @@ namespace Listenarr.Infrastructure.Library.Moving;
 
 internal sealed partial class EfLibraryDirectoryOwnershipStore(
     IDbContextFactory<ListenArrDbContext> dbContextFactory,
-    TimeProvider timeProvider) : ILibraryDirectoryOwnershipStore
+    TimeProvider timeProvider,
+    LibraryDirectoryOwnershipBoundaryAuthorizer? boundaryAuthorizer = null)
+    : ILibraryDirectoryOwnershipStore
 {
     private const string IdentityScope = "library-directory";
+    private readonly LibraryDirectoryOwnershipBoundaryAuthorizer _boundaryAuthorizer =
+        boundaryAuthorizer
+        ?? new LibraryDirectoryOwnershipBoundaryAuthorizer(dbContextFactory);
 
-    public Task<LibraryDirectoryOwnership> RecordCreatedAsync(
+    public async Task<LibraryDirectoryOwnership> RecordCreatedAsync(
+        LibraryDirectoryOwnershipClaim claim,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(claim);
+        using var authorization = await _boundaryAuthorizer.AuthorizeContainingRootAsync(
+            claim.Path,
+            claim.Semantics,
+            cancellationToken);
+        var canonicalPath = FileSystemPathIdentity.Canonicalize(
+            claim.Path,
+            claim.Semantics.Syntax);
+        using var existing = authorization.ParentAnchor.OpenExistingChildForPublication(
+            Path.GetFileName(canonicalPath));
+        return await RecordCreatedCoreAsync(
+            claim,
+            existing,
+            pinnedCreationIsNew: false,
+            authorization.RootFolderId,
+            cancellationToken);
+    }
+
+    public async Task<LibraryDirectoryOwnership> ClaimRetainedAsync(
         LibraryDirectoryOwnershipClaim claim,
         CancellationToken cancellationToken = default) =>
-        RecordCreatedCoreAsync(
-            claim,
-            pinnedCreation: null,
-            pinnedCreationIsNew: false,
-            cancellationToken);
+        await RecordCreatedAsync(claim, cancellationToken);
 
     internal Task<LibraryDirectoryOwnership> RecordPinnedCreatedAsync(
         LibraryDirectoryOwnershipClaim claim,
         PinnedDirectoryCreation pinnedCreation,
+        int managedRootFolderId,
         CancellationToken cancellationToken = default) =>
         RecordCreatedCoreAsync(
             claim,
             pinnedCreation,
             pinnedCreationIsNew: true,
+            managedRootFolderId,
             cancellationToken);
 
     private Task<LibraryDirectoryOwnership> RepairPinnedExistingAsync(
         LibraryDirectoryOwnershipClaim claim,
         PinnedDirectoryCreation pinnedCreation,
+        int managedRootFolderId,
         CancellationToken cancellationToken = default) =>
         RecordCreatedCoreAsync(
             claim,
             pinnedCreation,
             pinnedCreationIsNew: false,
+            managedRootFolderId,
             cancellationToken);
 
     private async Task<LibraryDirectoryOwnership> RecordCreatedCoreAsync(
         LibraryDirectoryOwnershipClaim claim,
         PinnedDirectoryCreation? pinnedCreation,
         bool pinnedCreationIsNew,
+        int? managedRootFolderId,
         CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(claim);
@@ -72,6 +100,13 @@ internal sealed partial class EfLibraryDirectoryOwnershipStore(
         {
             throw new InvalidOperationException(
                 "The claimed directory no longer matches its validated pathname.");
+        }
+        using var claimedDirectory = markerCreation.OpenCreatedDirectoryAnchor();
+        var directoryObjectIdentity = claimedDirectory.GetDirectoryObjectIdentity();
+        if (!claimedDirectory.VisiblePathMatches())
+        {
+            throw new InvalidOperationException(
+                "The claimed directory changed while its physical identity was captured.");
         }
 
         var lookupKey = FileSystemPathIdentity.CreateLookupKey(
@@ -124,6 +159,10 @@ internal sealed partial class EfLibraryDirectoryOwnershipStore(
         if (compatible.Count == 1 && conflicts.Count == 0)
         {
             var existing = compatible[0];
+            EnsureAuthorizedPhysicalIdentity(
+                existing,
+                managedRootFolderId,
+                directoryObjectIdentity);
             await PinnedLibraryDirectoryOwnershipMarker.EnsureAsync(
                 existing,
                 markerCreation,
@@ -161,6 +200,8 @@ internal sealed partial class EfLibraryDirectoryOwnershipStore(
                 ownershipKey: null,
                 LibraryDirectoryOwnershipState.Conflict,
                 "Conflicting durable ownership claims resolve to this directory.",
+                managedRootFolderId,
+                directoryObjectIdentity,
                 now));
             await db.SaveChangesAsync(cancellationToken);
             if (transaction != null)
@@ -178,6 +219,8 @@ internal sealed partial class EfLibraryDirectoryOwnershipStore(
             ownershipKey,
             LibraryDirectoryOwnershipState.Owned,
             reason: null,
+            managedRootFolderId,
+            directoryObjectIdentity,
             now);
         db.LibraryDirectoryOwnerships.Add(ownership);
         try
@@ -298,6 +341,8 @@ internal sealed partial class EfLibraryDirectoryOwnershipStore(
         string? ownershipKey,
         LibraryDirectoryOwnershipState state,
         string? reason,
+        int? managedRootFolderId,
+        string directoryObjectIdentity,
         DateTime now) => new()
         {
             Path = claim.Path,
@@ -315,10 +360,36 @@ internal sealed partial class EfLibraryDirectoryOwnershipStore(
             CreationWorkflow = claim.CreationWorkflow,
             CreationOperationId = claim.CreationOperationId,
             AudiobookId = claim.AudiobookId,
+            ManagedRootFolderId = managedRootFolderId,
+            DirectoryObjectIdentityVersion = 1,
+            DirectoryObjectIdentity = directoryObjectIdentity,
+            DirectoryObjectIdentityUnavailableReason = managedRootFolderId.HasValue
+                ? null
+                : "The claim was not created through an authorized managed root.",
             StateReason = reason,
             CreatedAt = now,
             UpdatedAt = now
         };
+
+    private static void EnsureAuthorizedPhysicalIdentity(
+        LibraryDirectoryOwnership ownership,
+        int? managedRootFolderId,
+        string directoryObjectIdentity)
+    {
+        if (!managedRootFolderId.HasValue
+            || ownership.ManagedRootFolderId != managedRootFolderId
+            || ownership.DirectoryObjectIdentityVersion != 1
+            || !string.Equals(
+                ownership.DirectoryObjectIdentity,
+                directoryObjectIdentity,
+                StringComparison.Ordinal)
+            || !string.IsNullOrWhiteSpace(
+                ownership.DirectoryObjectIdentityUnavailableReason))
+        {
+            throw new InvalidOperationException(
+                "The existing ownership claim lacks matching managed-root and physical-directory authorization.");
+        }
+    }
 
     private static OwnershipComparison Compare(
         LibraryDirectoryOwnership ownership,

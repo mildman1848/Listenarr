@@ -63,10 +63,25 @@ internal sealed partial class PinnedDirectoryCreation
 
         internal string FullPath { get; }
 
+        internal string GetDirectoryObjectIdentity()
+        {
+            ThrowIfDisposed();
+            return PinnedDirectoryCreation.GetDirectoryObjectIdentity(_handle);
+        }
+
         internal SafeFileHandle DuplicateHandleForOperation()
         {
             ThrowIfDisposed();
             return DuplicateSafeHandle(_handle);
+        }
+
+        internal PinnedDirectoryAnchor Duplicate()
+        {
+            ThrowIfDisposed();
+            return new PinnedDirectoryAnchor(
+                DuplicateSafeHandle(_handle),
+                FullPath,
+                _followVisibleFinalLink);
         }
 
         internal bool VisiblePathMatches() =>
@@ -127,6 +142,20 @@ internal sealed partial class PinnedDirectoryCreation
 
         internal PinnedDirectoryCreation TryCreateChildForPublication(string childName)
             => TryCreateChild(childName, requireDirectoryDeleteAccess: true);
+
+        internal PinnedDirectoryCreation? TryOpenExistingChildForPublication(
+            string childName)
+        {
+            try
+            {
+                return OpenExistingChildForPublication(childName);
+            }
+            catch (Win32Exception exception) when (
+                exception.NativeErrorCode is 2 or 3)
+            {
+                return null;
+            }
+        }
 
         private PinnedDirectoryCreation TryCreateChild(
             string childName,

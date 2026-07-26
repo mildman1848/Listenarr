@@ -74,6 +74,21 @@ internal sealed partial class PinnedDirectoryCreation
                 "The file changed while it was being opened beneath its pinned parent.");
         }
 
+        internal PinnedFileEntry? TryOpenExistingFile(
+            string fileName,
+            bool requireDeleteAccess)
+        {
+            try
+            {
+                return OpenExistingFile(fileName, requireDeleteAccess);
+            }
+            catch (Win32Exception exception) when (
+                exception.NativeErrorCode is 2 or 3 or 32)
+            {
+                return null;
+            }
+        }
+
         internal PinnedFileEntry CreateNewFile(
             string fileName,
             bool hiddenFile = false)
@@ -102,10 +117,10 @@ internal sealed partial class PinnedDirectoryCreation
 
     internal sealed partial class PinnedFileEntry : IDisposable
     {
-        private readonly SafeFileHandle _parentHandle;
+        private SafeFileHandle _parentHandle;
         private readonly SafeFileHandle _fileHandle;
-        private readonly string _parentPath;
-        private readonly string _fileName;
+        private string _parentPath;
+        private string _fileName;
         private bool _disposed;
 
         internal PinnedFileEntry(
@@ -133,8 +148,15 @@ internal sealed partial class PinnedDirectoryCreation
         internal FileStream OpenReadStream(int bufferSize, bool asynchronous)
         {
             ThrowIfDisposed();
-            return new FileStream(
-                DuplicateSafeHandle(_fileHandle),
+            var handle = OperatingSystem.IsWindows()
+                ? OpenRelativeFileWindows(
+                    _parentHandle,
+                    _fileName,
+                    FullPath,
+                    requireDeleteAccess: false)
+                : OpenRelativeFileUnix(_parentHandle, _fileName, FullPath);
+            return OpenVerifiedIndependentStream(
+                handle,
                 FileAccess.Read,
                 bufferSize,
                 asynchronous);
@@ -143,8 +165,17 @@ internal sealed partial class PinnedDirectoryCreation
         internal FileStream OpenWriteStream(int bufferSize, bool asynchronous)
         {
             ThrowIfDisposed();
-            return new FileStream(
-                DuplicateSafeHandle(_fileHandle),
+            var handle = OperatingSystem.IsWindows()
+                ? OpenRelativeFileForWriteWindows(
+                    _parentHandle,
+                    _fileName,
+                    FullPath)
+                : OpenRelativeFileForWriteUnix(
+                    _parentHandle,
+                    _fileName,
+                    FullPath);
+            return OpenVerifiedIndependentStream(
+                handle,
                 FileAccess.Write,
                 bufferSize,
                 asynchronous);
@@ -177,6 +208,12 @@ internal sealed partial class PinnedDirectoryCreation
             ThrowIfDisposed();
             ArgumentNullException.ThrowIfNull(destination);
             destination.ThrowIfDisposed();
+            if (!OperatingSystem.IsWindows())
+            {
+                File.SetUnixFileMode(
+                    destination._fileHandle,
+                    File.GetUnixFileMode(_fileHandle));
+            }
             File.SetAttributes(
                 destination._fileHandle,
                 File.GetAttributes(_fileHandle));
@@ -255,6 +292,12 @@ internal sealed partial class PinnedDirectoryCreation
                 throw new InvalidOperationException(
                     "The published quarantine file does not identify the opened source file.");
             }
+
+            var newParentHandle = DuplicateSafeHandle(destinationHandle);
+            _parentHandle.Dispose();
+            _parentHandle = newParentHandle;
+            _parentPath = destinationParent.FullPath;
+            _fileName = destinationName;
         }
 
         internal void MoveWithinParent(string destinationName)
@@ -288,6 +331,47 @@ internal sealed partial class PinnedDirectoryCreation
                 throw new InvalidOperationException(
                     "The published file does not identify the opened partial file.");
             }
+
+            _fileName = destinationName;
+        }
+
+        internal void ReplaceWithinParent(
+            string destinationName,
+            PinnedFileEntry expectedDestination)
+        {
+            ThrowIfDisposed();
+            ArgumentNullException.ThrowIfNull(expectedDestination);
+            ValidateLeafName(destinationName);
+            if (!VisiblePathMatches() || !expectedDestination.VisiblePathMatches())
+            {
+                throw new InvalidOperationException(
+                    "A marker changed before its atomic replacement.");
+            }
+
+            RenameRelativeEntry(
+                _parentHandle,
+                _fileHandle,
+                _fileName,
+                _parentHandle,
+                destinationName,
+                replaceExisting: true);
+            using var published = OperatingSystem.IsWindows()
+                ? OpenRelativeFileWindows(
+                    _parentHandle,
+                    destinationName,
+                    Path.Join(_parentPath, destinationName),
+                    requireDeleteAccess: false)
+                : OpenRelativeFileUnix(
+                    _parentHandle,
+                    destinationName,
+                    Path.Join(_parentPath, destinationName));
+            if (!HandlesIdentifySameDirectory(_fileHandle, published))
+            {
+                throw new InvalidOperationException(
+                    "The replacement marker does not identify the flushed temporary file.");
+            }
+
+            _fileName = destinationName;
         }
 
         public void Dispose()
@@ -300,29 +384,6 @@ internal sealed partial class PinnedDirectoryCreation
             _fileHandle.Dispose();
             _parentHandle.Dispose();
             _disposed = true;
-        }
-
-        private FileStream OpenVerifiedIndependentStream(
-            SafeFileHandle handle,
-            FileAccess access,
-            int bufferSize,
-            bool asynchronous)
-        {
-            try
-            {
-                if (!HandlesIdentifySameDirectory(_fileHandle, handle))
-                {
-                    throw new InvalidOperationException(
-                        "The reopened pinned file does not identify the validated file object.");
-                }
-
-                return new FileStream(handle, access, bufferSize, asynchronous);
-            }
-            catch
-            {
-                handle.Dispose();
-                throw;
-            }
         }
 
         private void ThrowIfDisposed()

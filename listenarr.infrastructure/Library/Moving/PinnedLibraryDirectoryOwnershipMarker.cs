@@ -1,12 +1,7 @@
-using System.Text.Json;
-
 namespace Listenarr.Infrastructure.Library.Moving;
 
 internal static class PinnedLibraryDirectoryOwnershipMarker
 {
-    private const int Version = 1;
-    private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
-
     public static async Task EnsureAsync(
         LibraryDirectoryOwnership ownership,
         PinnedDirectoryCreation creation,
@@ -21,12 +16,7 @@ internal static class PinnedLibraryDirectoryOwnershipMarker
                 "The pinned directory is no longer reachable through its validated pathname.");
         }
 
-        var payload = JsonSerializer.Serialize(
-            new MarkerPayload(
-                Version,
-                ownership.OwnershipToken,
-                ownership.CanonicalPath),
-            JsonOptions);
+        var payload = LibraryDirectoryOwnershipMarker.SerializePayload(ownership);
         using var directory = creation.OpenCreatedDirectoryAnchor();
         using var parent = creation.OpenParentDirectoryAnchor();
         await EnsureMarkerAsync(
@@ -58,14 +48,36 @@ internal static class PinnedLibraryDirectoryOwnershipMarker
         string payload,
         CancellationToken cancellationToken)
     {
-        var markerPath = Path.Join(parent.FullPath, fileName);
-        if (File.Exists(markerPath))
+        using var existing = parent.TryOpenExistingFile(
+            fileName,
+            requireDeleteAccess: false);
+        if (existing != null)
         {
+            LibraryDirectoryOwnershipMarker.ValidateMarkerFile(ownership, existing);
+            return;
+        }
+
+        var temporaryName = fileName + ".v2.tmp";
+        using var interruptedTemporary = parent.TryOpenExistingFile(
+            temporaryName,
+            requireDeleteAccess: true);
+        if (interruptedTemporary != null)
+        {
+            var interruptedPayload =
+                LibraryDirectoryOwnershipMarker.ReadPayload(interruptedTemporary);
+            if (!LibraryDirectoryOwnershipMarker.MatchesCurrentPayload(
+                    ownership,
+                    interruptedPayload))
+            {
+                throw new InvalidOperationException(
+                    "A durable ownership marker temporary file is stale or mismatched.");
+            }
+
+            interruptedTemporary.MoveWithinParent(fileName);
             ValidateExistingMarker(ownership, parent, fileName);
             return;
         }
 
-        var temporaryName = fileName + $".writing-{Guid.NewGuid():N}";
         try
         {
             await parent.PublishNewFileAsync(
@@ -94,13 +106,111 @@ internal static class PinnedLibraryDirectoryOwnershipMarker
             (exception is IOException
                 or InvalidOperationException
                 or System.ComponentModel.Win32Exception)
-            && File.Exists(markerPath))
+            && parent.TryOpenExistingFile(fileName, requireDeleteAccess: false) is { } published)
         {
-            ValidateExistingMarker(ownership, parent, fileName);
+            using (published)
+            {
+                LibraryDirectoryOwnershipMarker.ValidateMarkerFile(
+                    ownership,
+                    published);
+            }
             return;
         }
 
         ValidateExistingMarker(ownership, parent, fileName);
+    }
+
+    internal static async Task UpgradeLegacyAsync(
+        LibraryDirectoryOwnership ownership,
+        PinnedDirectoryCreation.PinnedDirectoryAnchor directory,
+        PinnedDirectoryCreation.PinnedDirectoryAnchor parent,
+        CancellationToken cancellationToken)
+    {
+        await UpgradeLegacyMarkerAsync(
+            ownership,
+            directory,
+            LibraryDirectoryOwnershipMarker.FileName,
+            cancellationToken);
+        await UpgradeLegacyMarkerAsync(
+            ownership,
+            parent,
+            $".listenarr-directory-owner-{ownership.OwnershipToken}.json",
+            cancellationToken);
+    }
+
+    private static async Task UpgradeLegacyMarkerAsync(
+        LibraryDirectoryOwnership ownership,
+        PinnedDirectoryCreation.PinnedDirectoryAnchor parent,
+        string fileName,
+        CancellationToken cancellationToken)
+    {
+        var temporaryName = fileName + ".v2.tmp";
+        using var predecessor = parent.TryOpenExistingFile(
+            fileName,
+            requireDeleteAccess: false)
+            ?? throw new InvalidOperationException(
+                "The ownership marker predecessor is missing.");
+        var predecessorPayload = LibraryDirectoryOwnershipMarker.ReadPayload(predecessor);
+        using var existingTemporary = parent.TryOpenExistingFile(
+            temporaryName,
+            requireDeleteAccess: true);
+        if (existingTemporary != null)
+        {
+            var temporaryPayload =
+                LibraryDirectoryOwnershipMarker.ReadPayload(existingTemporary);
+            if (!LibraryDirectoryOwnershipMarker.MatchesCurrentPayload(
+                    ownership,
+                    temporaryPayload))
+            {
+                throw new InvalidOperationException(
+                    "The ownership marker temporary file is stale or mismatched.");
+            }
+
+            if (LibraryDirectoryOwnershipMarker.MatchesCurrentPayload(
+                    ownership,
+                    predecessorPayload))
+            {
+                existingTemporary.Delete();
+                return;
+            }
+            if (!LibraryDirectoryOwnershipMarker.MatchesLegacyPayload(
+                    ownership,
+                    predecessorPayload))
+            {
+                throw new InvalidOperationException(
+                    "The ownership marker predecessor is not the expected legacy marker.");
+            }
+
+            existingTemporary.ReplaceWithinParent(fileName, predecessor);
+            return;
+        }
+
+        if (LibraryDirectoryOwnershipMarker.MatchesCurrentPayload(
+                ownership,
+                predecessorPayload))
+        {
+            return;
+        }
+        if (!LibraryDirectoryOwnershipMarker.MatchesLegacyPayload(
+                ownership,
+                predecessorPayload))
+        {
+            throw new InvalidOperationException(
+                "The ownership marker predecessor is not upgradeable.");
+        }
+
+        using var temporary = parent.CreateNewFile(temporaryName, hiddenFile: true);
+        await using (var stream = temporary.OpenWriteStream(
+            bufferSize: 4096,
+            asynchronous: false))
+        {
+            var bytes = System.Text.Encoding.UTF8.GetBytes(
+                LibraryDirectoryOwnershipMarker.SerializePayload(ownership));
+            await stream.WriteAsync(bytes, cancellationToken);
+            await stream.FlushAsync(cancellationToken);
+            stream.Flush(flushToDisk: true);
+        }
+        temporary.ReplaceWithinParent(fileName, predecessor);
     }
 
     private static void ValidateExistingMarker(
@@ -118,9 +228,4 @@ internal static class PinnedLibraryDirectoryOwnershipMarker
                 "The durable ownership marker changed during pinned validation.");
         }
     }
-
-    private sealed record MarkerPayload(
-        int Version,
-        string OwnershipToken,
-        string CanonicalPath);
 }

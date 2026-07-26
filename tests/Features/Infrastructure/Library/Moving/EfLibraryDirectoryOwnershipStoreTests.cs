@@ -1,4 +1,6 @@
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging.Abstractions;
+using System.Text.Json;
 
 using Listenarr.Tests.Common;
 
@@ -30,6 +32,18 @@ public sealed class EfLibraryDirectoryOwnershipStoreTests : BaseTests
         _factory = new TestDbContextFactory(options);
         await using var db = await _factory.CreateDbContextAsync();
         await db.Database.EnsureCreatedAsync();
+        using var rootAnchor = PinnedDirectoryCreation.OpenPinnedBoundary(_root);
+        db.RootFolders.Add(new RootFolder
+        {
+            Name = "Test library",
+            Path = _root,
+            ResolvedCaseSensitivity =
+                FileSystemPathSemantics.CurrentHostDefault.CaseSensitivity,
+            PathIdentityState = PathIdentityState.Valid,
+            DirectoryObjectIdentityVersion = 1,
+            DirectoryObjectIdentity = rootAnchor.GetDirectoryObjectIdentity()
+        });
+        await db.SaveChangesAsync();
         _store = new EfLibraryDirectoryOwnershipStore(_factory, TimeProvider.System);
     }
 
@@ -68,6 +82,22 @@ public sealed class EfLibraryDirectoryOwnershipStoreTests : BaseTests
             _root,
             ".listenarr-directory-owner-*.json",
             SearchOption.TopDirectoryOnly));
+        using (var marker = JsonDocument.Parse(
+            await File.ReadAllTextAsync(
+                Path.Join(directory, LibraryDirectoryOwnershipMarker.FileName))))
+        {
+            var payload = marker.RootElement;
+            Assert.Equal(2, payload.GetProperty("version").GetInt32());
+            Assert.Equal(
+                ownership.ManagedRootFolderId,
+                payload.GetProperty("managedRootFolderId").GetInt32());
+            Assert.Equal(
+                ownership.DirectoryObjectIdentityVersion,
+                payload.GetProperty("directoryObjectIdentityVersion").GetInt32());
+            Assert.Equal(
+                ownership.DirectoryObjectIdentity,
+                payload.GetProperty("directoryObjectIdentity").GetString());
+        }
         LibraryDirectoryOwnershipMarker.Validate(ownership, directory);
 
         var resolution = await _store.ResolveOwnedAsync(
@@ -151,6 +181,39 @@ public sealed class EfLibraryDirectoryOwnershipStoreTests : BaseTests
     }
 
     [Fact]
+    public async Task PhysicalPathReplacementWithCopiedMarkersFailsClosed()
+    {
+        var directory = Path.Join(_root, "ReplacedAuthor");
+        Directory.CreateDirectory(directory);
+        var ownership = await _store.RecordCreatedAsync(
+            new LibraryDirectoryOwnershipClaim(
+                directory,
+                FileSystemPathSemantics.CurrentHostDefault,
+                "test"));
+        var insideMarker = Path.Join(
+            directory,
+            LibraryDirectoryOwnershipMarker.FileName);
+        var insidePayload = await File.ReadAllTextAsync(insideMarker);
+
+        File.Delete(insideMarker);
+        Directory.Delete(directory);
+        Directory.CreateDirectory(directory);
+        await File.WriteAllTextAsync(insideMarker, insidePayload);
+
+        var resolution = await _store.ResolveOwnedAsync(
+            directory,
+            FileSystemPathSemantics.CurrentHostDefault);
+
+        Assert.Equal(
+            LibraryDirectoryOwnershipResolutionState.Unavailable,
+            resolution.State);
+        Assert.Contains(
+            "physical identity",
+            resolution.Reason,
+            StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public async Task EnsureCreatedHierarchyAsync_ClaimsOnlyDirectoriesCreatedExclusively()
     {
         var destination = Path.Join(_root, "Author", "Book");
@@ -183,7 +246,8 @@ public sealed class EfLibraryDirectoryOwnershipStoreTests : BaseTests
         var destination = Path.Join(_root, "FailedEmptyCreation");
         var store = new EfLibraryDirectoryOwnershipStore(
             new FailFirstContextCreationFactory(_factory),
-            TimeProvider.System);
+            TimeProvider.System,
+            new LibraryDirectoryOwnershipBoundaryAuthorizer(_factory));
 
         await Assert.ThrowsAsync<InvalidOperationException>(() =>
             store.EnsureCreatedHierarchyAsync(
@@ -208,7 +272,8 @@ public sealed class EfLibraryDirectoryOwnershipStoreTests : BaseTests
             new FailFirstContextCreationFactory(
                 _factory,
                 () => File.WriteAllText(foreignFile, "foreign")),
-            TimeProvider.System);
+            TimeProvider.System,
+            new LibraryDirectoryOwnershipBoundaryAuthorizer(_factory));
 
         await Assert.ThrowsAsync<InvalidOperationException>(() =>
             store.EnsureCreatedHierarchyAsync(
@@ -232,7 +297,8 @@ public sealed class EfLibraryDirectoryOwnershipStoreTests : BaseTests
         using var cancellation = new CancellationTokenSource();
         var store = new EfLibraryDirectoryOwnershipStore(
             new CancelOnFirstContextCreationFactory(_factory, cancellation),
-            TimeProvider.System);
+            TimeProvider.System,
+            new LibraryDirectoryOwnershipBoundaryAuthorizer(_factory));
 
         var ownerships = await store.EnsureCreatedHierarchyAsync(
             destination,
@@ -449,8 +515,9 @@ public sealed class EfLibraryDirectoryOwnershipStoreTests : BaseTests
         Directory.Delete(directory, recursive: false);
         await File.WriteAllTextAsync(directory, "user file");
 
+        using var parent = PinnedDirectoryCreation.OpenPinnedDirectoryNoFollow(_root);
         var exception = Assert.Throws<InvalidOperationException>(() =>
-            LibraryDirectoryOwnershipRemoval.RemoveEmptyDirectory(ownership));
+            LibraryDirectoryOwnershipRemoval.RemoveEmptyDirectory(ownership, parent));
 
         Assert.Contains("occupied by a file", exception.Message, StringComparison.OrdinalIgnoreCase);
         Assert.Equal("user file", await File.ReadAllTextAsync(directory));
@@ -474,8 +541,9 @@ public sealed class EfLibraryDirectoryOwnershipStoreTests : BaseTests
         var quarantinePath = LibraryDirectoryOwnershipRemoval.GetQuarantinePath(ownership);
         await File.WriteAllTextAsync(quarantinePath, "foreign file");
 
+        using var parent = PinnedDirectoryCreation.OpenPinnedDirectoryNoFollow(_root);
         var exception = Assert.Throws<InvalidOperationException>(() =>
-            LibraryDirectoryOwnershipRemoval.RemoveEmptyDirectory(ownership));
+            LibraryDirectoryOwnershipRemoval.RemoveEmptyDirectory(ownership, parent));
 
         Assert.Contains("occupied by a file", exception.Message, StringComparison.OrdinalIgnoreCase);
         Assert.Equal("foreign file", await File.ReadAllTextAsync(quarantinePath));
@@ -514,6 +582,80 @@ public sealed class EfLibraryDirectoryOwnershipStoreTests : BaseTests
 
         Assert.NotEqual(prior.Id, recreated.Id);
         LibraryDirectoryOwnershipMarker.Validate(recreated, directory);
+    }
+
+    [Fact]
+    public async Task Reconciler_TransientRootOutage_PreservesAndRecoversClaim()
+    {
+        var directory = Path.Join(_root, "TransientOutage");
+        Directory.CreateDirectory(directory);
+        var ownership = await _store.RecordCreatedAsync(
+            new LibraryDirectoryOwnershipClaim(
+                directory,
+                FileSystemPathSemantics.CurrentHostDefault,
+                "test"));
+        var ownershipKey = Assert.IsType<string>(ownership.PathOwnershipKey);
+        var unavailableRoot = $"{_root}-offline";
+        Directory.Move(_root, unavailableRoot);
+        var reconciler = new LibraryDirectoryOwnershipReconciler(
+            _factory,
+            new LibraryDirectoryOwnershipBoundaryAuthorizer(_factory),
+            new FilesystemMutationCoordinator(),
+            NullLogger<LibraryDirectoryOwnershipReconciler>.Instance);
+
+        await reconciler.ReconcileAsync();
+
+        await using (var db = await _factory.CreateDbContextAsync())
+        {
+            var unavailable = await db.LibraryDirectoryOwnerships.SingleAsync();
+            Assert.Equal(
+                LibraryDirectoryOwnershipState.Owned,
+                unavailable.State);
+            Assert.Equal(ownershipKey, unavailable.PathOwnershipKey);
+            Assert.False(string.IsNullOrWhiteSpace(
+                unavailable.DirectoryObjectIdentityUnavailableReason));
+        }
+
+        Directory.Move(unavailableRoot, _root);
+        await reconciler.ReconcileAsync();
+
+        await using var verification = await _factory.CreateDbContextAsync();
+        var recovered = await verification.LibraryDirectoryOwnerships.SingleAsync();
+        Assert.Equal(LibraryDirectoryOwnershipState.Owned, recovered.State);
+        Assert.Equal(ownershipKey, recovered.PathOwnershipKey);
+        Assert.Null(recovered.DirectoryObjectIdentityUnavailableReason);
+        Assert.Null(recovered.StateReason);
+    }
+
+    [Fact]
+    public async Task Reconciler_SiblingOnlyRemoval_PreservesRecoverableIntent()
+    {
+        var directory = Path.Join(_root, "SiblingOnlyRemoval");
+        Directory.CreateDirectory(directory);
+        var ownership = await _store.RecordCreatedAsync(
+            new LibraryDirectoryOwnershipClaim(
+                directory,
+                FileSystemPathSemantics.CurrentHostDefault,
+                "test"));
+        var ownershipKey = Assert.IsType<string>(ownership.PathOwnershipKey);
+        await _store.BeginRemovalAsync(ownership.Id, ownershipKey);
+        LibraryDirectoryOwnershipMarker.DeleteInsideMarker(ownership, directory);
+        Directory.Delete(directory);
+        var reconciler = new LibraryDirectoryOwnershipReconciler(
+            _factory,
+            new LibraryDirectoryOwnershipBoundaryAuthorizer(_factory),
+            new FilesystemMutationCoordinator(),
+            NullLogger<LibraryDirectoryOwnershipReconciler>.Instance);
+
+        await reconciler.ReconcileAsync();
+
+        await using var verification = await _factory.CreateDbContextAsync();
+        var persisted = await verification.LibraryDirectoryOwnerships.SingleAsync();
+        Assert.Equal(
+            LibraryDirectoryOwnershipState.Removing,
+            persisted.State);
+        Assert.Equal(ownershipKey, persisted.PathOwnershipKey);
+        LibraryDirectoryOwnershipRemoval.ValidateRecoverableState(persisted);
     }
 
     private sealed class FailFirstContextCreationFactory(

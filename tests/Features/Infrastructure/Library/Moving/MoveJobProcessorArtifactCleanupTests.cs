@@ -176,11 +176,6 @@ public partial class MoveJobProcessorTests
         var target = Path.Join(
             FileService.GetTempPath(),
             $"move-processor-finalize-retry-dst-{Guid.NewGuid():N}");
-        await _rootFolderRepository.AddAsync(new RootFolder
-        {
-            Name = "Finalization Retry Root",
-            Path = sourceRoot
-        });
         var audiobook = await _audiobookRepository.AddAsync(new Audiobook
         {
             Title = "Finalization Retry",
@@ -233,11 +228,6 @@ public partial class MoveJobProcessorTests
         var target = Path.Join(
             FileService.GetTempPath(),
             $"move-processor-finalize-arrival-dst-{Guid.NewGuid():N}");
-        await _rootFolderRepository.AddAsync(new RootFolder
-        {
-            Name = "Finalization Arrival Root",
-            Path = sourceRoot
-        });
         var audiobook = await _audiobookRepository.AddAsync(new Audiobook
         {
             Title = "Finalization Arrival",
@@ -279,11 +269,6 @@ public partial class MoveJobProcessorTests
         var target = Path.Join(
             FileService.GetTempPath(),
             $"move-processor-retry-limit-dst-{Guid.NewGuid():N}");
-        await _rootFolderRepository.AddAsync(new RootFolder
-        {
-            Name = "Retry Limit Root",
-            Path = sourceRoot
-        });
         var audiobook = await _audiobookRepository.AddAsync(new Audiobook
         {
             Title = "Retry Limit",

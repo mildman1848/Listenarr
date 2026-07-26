@@ -44,185 +44,232 @@ public partial class FileMover
         string GenerationFence);
 
     private async Task<VerifiedFileMoveRemovalOutcome> TryRemoveVerifiedFileMoveSourceWithClaimsAsync(
-        string sourceFile,
-        string destinationFile,
-        string sourceIdentity,
-        string destinationIdentity)
+        FileMoveGateLease lease)
     {
+        var sourceFile = lease.SourcePath;
+        var destinationFile = lease.DestinationPath;
+        var sourceIdentity = lease.SourceIdentity;
+        var destinationIdentity = lease.DestinationIdentity;
+        if (!lease.SourceParent.VisiblePathMatches()
+            || !lease.DestinationParent.VisiblePathMatches())
+        {
+            return VerifiedFileMoveRemovalOutcome.NotRemoved;
+        }
         var state = GetFileMoveStatePaths(
             sourceFile,
             destinationFile,
             sourceIdentity,
             destinationIdentity);
-        var sourceClaimOwned = false;
         var sourceRetirementCommitted = false;
-        var sourceRetired = false;
+        PinnedDirectoryCreation? sourceStatePublication = null;
+        PinnedDirectoryCreation? destinationStatePublication = null;
 
         try
         {
-            if (!File.Exists(sourceFile)
-                || IsLinkedOrUnverifiableEntry(sourceFile)
-                || (File.Exists(destinationFile)
-                    && IsLinkedOrUnverifiableEntry(destinationFile))
-                || Directory.Exists(state.SourceStateDirectory)
-                || Directory.Exists(state.DestinationStateDirectory))
+            using var initialSource = lease.SourceParent.TryOpenExistingFile(
+                lease.SourceName,
+                requireDeleteAccess: true);
+            using var initialDestination = lease.DestinationParent.TryOpenExistingFile(
+                lease.DestinationName,
+                requireDeleteAccess: true);
+            using var existingSourceState =
+                lease.SourceParent.TryOpenExistingChildForPublication(
+                    Path.GetFileName(state.SourceStateDirectory));
+            using var existingDestinationState =
+                lease.DestinationParent.TryOpenExistingChildForPublication(
+                    Path.GetFileName(state.DestinationStateDirectory));
+            if (initialSource == null
+                || existingSourceState != null
+                || existingDestinationState != null)
             {
                 return VerifiedFileMoveRemovalOutcome.NotRemoved;
             }
 
-            CreatePrivateStateDirectory(state.SourceStateDirectory);
+            sourceStatePublication = CreateAnchoredFileMoveStateDirectory(
+                lease.SourceParent,
+                Path.GetFileName(state.SourceStateDirectory));
+            using var sourceState = sourceStatePublication.OpenCreatedDirectoryAnchor();
             if (AfterSourceStateCreatedForTestAsync != null)
             {
                 await AfterSourceStateCreatedForTestAsync();
             }
 
-            if (!FileSystemSafety.TryValidateMutationTarget(
-                    state.SourceClaim,
-                    [state.SourceStateDirectory],
-                    out var sourceClaim,
-                    out _))
-            {
-                TryDeleteEmptyStateDirectories(state);
-                return VerifiedFileMoveRemovalOutcome.NotRemoved;
-            }
-
-            // Private state is a cooperative boundary. A process under this
-            // account can already mutate every media path and is out of scope.
-            MovePublicFileToPrivateClaim(
-                sourceFile,
-                state.SourceStateDirectory,
-                Path.GetFileName(sourceClaim));
-            sourceClaimOwned = true;
+            initialSource.MoveTo(sourceState, "source.claim");
+            initialSource.Dispose();
+            using var sourceClaim = sourceState.OpenExistingFile(
+                "source.claim",
+                requireDeleteAccess: true);
             var sourceSnapshot = await CaptureFileMoveContentAsync(sourceClaim);
             if (AfterSourceQuarantinedForTestAsync != null)
             {
-                await AfterSourceQuarantinedForTestAsync(sourceFile, sourceClaim);
+                await AfterSourceQuarantinedForTestAsync(
+                    sourceFile,
+                    state.SourceClaim);
             }
 
             if (!await FileMatchesMoveContentAsync(
                     sourceClaim,
                     sourceSnapshot))
             {
-                RestoreUncommittedFileMove(sourceFile, destinationFile, state);
-                return FileMoveStateHasConflicts(sourceFile, destinationFile, state)
-                    ? VerifiedFileMoveRemovalOutcome.PathRecreated
-                    : VerifiedFileMoveRemovalOutcome.NotRemoved;
+                throw new IOException(
+                    "The quarantined source changed before destination staging.");
             }
 
-            CreatePrivateStateDirectory(state.DestinationStateDirectory);
+            destinationStatePublication = CreateAnchoredFileMoveStateDirectory(
+                lease.DestinationParent,
+                Path.GetFileName(state.DestinationStateDirectory));
+            using var destinationState =
+                destinationStatePublication.OpenCreatedDirectoryAnchor();
             if (AfterDestinationStateCreatedForTestAsync != null)
             {
                 await AfterDestinationStateCreatedForTestAsync();
             }
 
-            if (!FileSystemSafety.TryValidateMutationTarget(
-                    state.DestinationStage,
-                    [state.DestinationStateDirectory],
-                    out var destinationStage,
-                    out _))
+            if (initialDestination != null)
             {
-                RestoreUncommittedFileMove(sourceFile, destinationFile, state);
-                return VerifiedFileMoveRemovalOutcome.NotRemoved;
+                initialDestination.MoveTo(
+                    destinationState,
+                    "destination.previous");
+                initialDestination.Dispose();
             }
-
-            if (File.Exists(destinationFile))
+            using var destinationStage = destinationState.CreateNewFile(
+                "destination.stage");
+            await using (var sourceStream = sourceClaim.OpenReadStream(
+                bufferSize: 128 * 1024,
+                asynchronous: false))
+            await using (var destinationStream = destinationStage.OpenWriteStream(
+                bufferSize: 128 * 1024,
+                asynchronous: false))
             {
-                // Claim the exact opened destination generation. Any new generation
-                // that appears at the public path must survive and block publication.
-                MovePublicFileToPrivateClaim(
-                    destinationFile,
-                    state.DestinationStateDirectory,
-                    Path.GetFileName(state.DestinationPrevious));
+                sourceStream.Position = 0;
+                await sourceStream.CopyToAsync(destinationStream);
+                await destinationStream.FlushAsync();
+                destinationStream.Flush(flushToDisk: true);
             }
+            sourceClaim.PreserveMetadataTo(destinationStage);
 
-            File.Copy(sourceClaim, destinationStage, overwrite: false);
             if (AfterDestinationQuarantinedForTestAsync != null)
             {
                 await AfterDestinationQuarantinedForTestAsync(
                     destinationFile,
-                    File.Exists(state.DestinationPrevious)
+                    initialDestination != null
                         ? state.DestinationPrevious
-                        : destinationStage);
+                        : state.DestinationStage);
             }
-            if (!await FileMatchesMoveContentAsync(sourceClaim, sourceSnapshot)
-                || !await FileMatchesMoveContentAsync(destinationStage, sourceSnapshot))
+            var sourceStillMatches = await FileMatchesMoveContentAsync(
+                sourceClaim,
+                sourceSnapshot);
+            var destinationMatches = await FileMatchesMoveContentAsync(
+                destinationStage,
+                sourceSnapshot);
+            if (!sourceStillMatches || !destinationMatches)
             {
-                RestoreUncommittedFileMove(sourceFile, destinationFile, state);
-                return FileMoveStateHasConflicts(sourceFile, destinationFile, state)
-                    ? VerifiedFileMoveRemovalOutcome.PathRecreated
-                    : VerifiedFileMoveRemovalOutcome.NotRemoved;
+                throw new IOException(
+                    "The verified source or destination stage changed before source retirement.");
             }
 
-            // Persist the retirement decision before deleting the claimed source.
-            // Recovery must treat every later entry at the original source path as
-            // a replacement generation, including one created before publication.
-            WriteGenerationFence(state.GenerationFence);
+            using var generationFence = sourceState.CreateNewFile(
+                "replacement-generation.fence");
+            await WriteFileMoveContentAsync(generationFence, sourceSnapshot);
             sourceRetirementCommitted = true;
             if (AfterSourceRetirementCommittedForTestAsync != null)
             {
                 await AfterSourceRetirementCommittedForTestAsync();
             }
 
-            // Source-claim deletion commits while the verified stage survives.
-            File.Delete(sourceClaim);
-            sourceClaimOwned = false;
-            sourceRetired = true;
+            sourceClaim.Delete(immediateWindows: true);
+            sourceClaim.Dispose();
             if (AfterSourceClaimDeletedForTestAsync != null)
             {
                 await AfterSourceClaimDeletedForTestAsync();
             }
 
-            PublishPrivateClaimNoReplace(destinationStage, destinationFile);
+            if (lease.DestinationParent.TryOpenExistingFile(
+                    lease.DestinationName,
+                    requireDeleteAccess: false) is { } recreatedDestination)
+            {
+                recreatedDestination.Dispose();
+                return VerifiedFileMoveRemovalOutcome.PathRecreated;
+            }
+            destinationStage.MoveTo(
+                lease.DestinationParent,
+                lease.DestinationName);
             if (AfterDestinationPublishedForTestAsync != null)
             {
                 await AfterDestinationPublishedForTestAsync(destinationFile);
             }
 
-            TryDeleteFile(state.DestinationPrevious);
-            if (!PathEntryExists(sourceFile))
+            using var previous = destinationState.TryOpenExistingFile(
+                "destination.previous",
+                requireDeleteAccess: true);
+            previous?.Delete(immediateWindows: true);
+            previous?.Dispose();
+            using var recreatedSource = lease.SourceParent.TryOpenExistingFile(
+                lease.SourceName,
+                requireDeleteAccess: false);
+            var sourcePathWasRecreated = recreatedSource != null;
+            if (!sourcePathWasRecreated)
             {
-                TryDeleteFile(state.GenerationFence);
+                generationFence.Delete(immediateWindows: true);
+                generationFence.Dispose();
             }
-            TryDeleteEmptyStateDirectories(state);
+            sourceState.Dispose();
+            destinationState.Dispose();
+            if (!sourcePathWasRecreated)
+            {
+                sourceStatePublication.DeletePinnedEmptyDirectory(
+                    Path.GetFileName(state.SourceStateDirectory),
+                    immediateWindows: true);
+            }
+            destinationStatePublication.DeletePinnedEmptyDirectory(
+                Path.GetFileName(state.DestinationStateDirectory),
+                immediateWindows: true);
             if (AfterFileMoveStateCleanedForTestAsync != null)
             {
                 await AfterFileMoveStateCleanedForTestAsync();
             }
 
-            // Preserve any new source-path generation after this commit.
             return VerifiedFileMoveRemovalOutcome.Removed;
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
         }
         catch (Exception exception) when (exception is not (
             OperationCanceledException or OutOfMemoryException or StackOverflowException))
         {
-            if (sourceClaimOwned && !sourceRetirementCommitted)
+            if (!sourceRetirementCommitted)
             {
-                RestoreUncommittedFileMove(sourceFile, destinationFile, state);
+                _ = await TryRecoverInterruptedFileMoveClaimsAsync(lease);
             }
-            else if (!sourceRetirementCommitted)
-            {
-                TryDeleteEmptyStateDirectories(state);
-            }
-
             _logger.LogWarning(
                 exception,
-                sourceRetirementCommitted || sourceRetired
+                sourceRetirementCommitted
                     ? "Preserved committed file-move state for recovery: {Source} -> {Destination}"
                     : "Preserved uncommitted file-move state after verified cleanup failed: {Source} -> {Destination}",
                 LogRedaction.SanitizeFilePath(sourceFile),
                 LogRedaction.SanitizeFilePath(destinationFile));
-            return FileMoveStateHasConflicts(sourceFile, destinationFile, state)
-                ? VerifiedFileMoveRemovalOutcome.PathRecreated
-                : VerifiedFileMoveRemovalOutcome.NotRemoved;
+            return VerifiedFileMoveRemovalOutcome.NotRemoved;
+        }
+        finally
+        {
+            destinationStatePublication?.Dispose();
+            sourceStatePublication?.Dispose();
         }
     }
 
     private async Task<FileMoveClaimRecoveryOutcome> TryRecoverInterruptedFileMoveClaimsAsync(
-        string sourceFile,
-        string destinationFile,
-        string sourceIdentity,
-        string destinationIdentity)
+        FileMoveGateLease lease)
     {
+        var sourceFile = lease.SourcePath;
+        var destinationFile = lease.DestinationPath;
+        var sourceIdentity = lease.SourceIdentity;
+        var destinationIdentity = lease.DestinationIdentity;
+        if (!lease.SourceParent.VisiblePathMatches()
+            || !lease.DestinationParent.VisiblePathMatches())
+        {
+            return FileMoveClaimRecoveryOutcome.Blocked;
+        }
         var state = GetFileMoveStatePaths(
             sourceFile,
             destinationFile,
@@ -235,118 +282,206 @@ public partial class FileMover
                 sourceFile,
                 destinationIdentity,
                 sourceIdentity);
-            if (FileMoveStateExists(reverseState))
+            using var reverseSource =
+                lease.DestinationParent.TryOpenExistingChildForPublication(
+                    Path.GetFileName(reverseState.SourceStateDirectory));
+            using var reverseDestination =
+                lease.SourceParent.TryOpenExistingChildForPublication(
+                    Path.GetFileName(reverseState.DestinationStateDirectory));
+            if (reverseSource != null || reverseDestination != null)
             {
                 return FileMoveClaimRecoveryOutcome.Blocked;
             }
         }
 
-        var sourceStateDirectoryExists = Directory.Exists(
-            state.SourceStateDirectory);
-        var destinationStateDirectoryExists = Directory.Exists(
-            state.DestinationStateDirectory);
-        if (!sourceStateDirectoryExists && !destinationStateDirectoryExists)
+        using var sourceStatePublication =
+            lease.SourceParent.TryOpenExistingChildForPublication(
+                Path.GetFileName(state.SourceStateDirectory));
+        using var destinationStatePublication =
+            lease.DestinationParent.TryOpenExistingChildForPublication(
+                Path.GetFileName(state.DestinationStateDirectory));
+        if (sourceStatePublication == null && destinationStatePublication == null)
         {
             return FileMoveClaimRecoveryOutcome.Ready;
         }
 
         try
         {
-            if (!TryValidateStateDirectory(state.SourceStateDirectory)
-                || !TryValidateStateDirectory(state.DestinationStateDirectory)
-                || !StateDirectoryContainsOnly(
-                    state.SourceStateDirectory,
-                    state.SourceClaim,
-                    state.GenerationFence)
-                || !StateDirectoryContainsOnly(
-                    state.DestinationStateDirectory,
-                    state.DestinationStage,
-                    state.DestinationPrevious))
+            using var sourceState =
+                sourceStatePublication?.OpenCreatedDirectoryAnchor();
+            using var destinationState =
+                destinationStatePublication?.OpenCreatedDirectoryAnchor();
+            if ((sourceState != null
+                    && !AnchoredStateContainsOnly(
+                        sourceState,
+                        "source.claim",
+                        "replacement-generation.fence"))
+                || (destinationState != null
+                    && !AnchoredStateContainsOnly(
+                        destinationState,
+                        "destination.stage",
+                        "destination.previous")))
             {
                 return FileMoveClaimRecoveryOutcome.Blocked;
             }
 
-            var sourceClaimExists = File.Exists(state.SourceClaim);
-            var destinationStageExists = File.Exists(state.DestinationStage);
-            var destinationPreviousExists = File.Exists(state.DestinationPrevious);
-            var generationFenceExists = File.Exists(state.GenerationFence);
-            if ((sourceClaimExists && IsLinkedOrUnverifiableEntry(state.SourceClaim))
-                || (destinationStageExists
-                    && IsLinkedOrUnverifiableEntry(state.DestinationStage))
-                || (destinationPreviousExists
-                    && IsLinkedOrUnverifiableEntry(state.DestinationPrevious))
-                || (generationFenceExists
-                    && IsLinkedOrUnverifiableEntry(state.GenerationFence)))
-            {
-                return FileMoveClaimRecoveryOutcome.Blocked;
-            }
+            using var sourceClaim = sourceState?.TryOpenExistingFile(
+                "source.claim",
+                requireDeleteAccess: true);
+            using var destinationStage = destinationState?.TryOpenExistingFile(
+                "destination.stage",
+                requireDeleteAccess: true);
+            using var destinationPrevious = destinationState?.TryOpenExistingFile(
+                "destination.previous",
+                requireDeleteAccess: true);
+            using var generationFence = sourceState?.TryOpenExistingFile(
+                "replacement-generation.fence",
+                requireDeleteAccess: true);
 
-            if (!generationFenceExists)
+            if (generationFence == null)
             {
-                if (sourceClaimExists)
+                if (sourceClaim != null)
                 {
-                    // The commit point was not crossed. Restore the source generation
-                    // and discard only the redundant destination copy.
-                    TryRestoreStateFile(state.SourceClaim, sourceFile);
-                    if (File.Exists(state.SourceClaim))
+                    using var publicSource = lease.SourceParent.TryOpenExistingFile(
+                        lease.SourceName,
+                        requireDeleteAccess: false);
+                    if (publicSource != null)
                     {
                         return FileMoveClaimRecoveryOutcome.Blocked;
                     }
 
-                    TryDeleteFile(state.DestinationStage);
-                    TryRestoreStateFile(
-                        state.DestinationPrevious,
-                        destinationFile);
-                    TryDeleteEmptyStateDirectories(state);
+                    sourceClaim.MoveTo(lease.SourceParent, lease.SourceName);
+                    sourceClaim.Dispose();
+                    destinationStage?.Delete(immediateWindows: true);
+                    destinationStage?.Dispose();
+                    if (destinationPrevious != null)
+                    {
+                        using var publicDestination =
+                            lease.DestinationParent.TryOpenExistingFile(
+                                lease.DestinationName,
+                                requireDeleteAccess: false);
+                        if (publicDestination != null)
+                        {
+                            return FileMoveClaimRecoveryOutcome.Blocked;
+                        }
+                        destinationPrevious.MoveTo(
+                            lease.DestinationParent,
+                            lease.DestinationName);
+                        destinationPrevious.Dispose();
+                    }
+
+                    sourceState?.Dispose();
+                    destinationState?.Dispose();
+                    TryDeleteAnchoredStateDirectory(
+                        sourceStatePublication,
+                        Path.GetFileName(state.SourceStateDirectory));
+                    TryDeleteAnchoredStateDirectory(
+                        destinationStatePublication,
+                        Path.GetFileName(state.DestinationStateDirectory));
                     return FileMoveClaimRecoveryOutcome.Ready;
                 }
 
-                // A missing source claim plus surviving destination state cannot
-                // distinguish an interrupted pre-commit move from external damage.
-                // Never publish or discard either generation without the fence.
-                if (destinationStageExists || destinationPreviousExists)
+                if (destinationStage != null || destinationPrevious != null)
                 {
                     return FileMoveClaimRecoveryOutcome.Blocked;
                 }
 
-                TryDeleteEmptyStateDirectories(state);
-                return PathEntryExists(sourceFile)
+                sourceState?.Dispose();
+                destinationState?.Dispose();
+                TryDeleteAnchoredStateDirectory(
+                    sourceStatePublication,
+                    Path.GetFileName(state.SourceStateDirectory));
+                TryDeleteAnchoredStateDirectory(
+                    destinationStatePublication,
+                    Path.GetFileName(state.DestinationStateDirectory));
+                using var liveSource = lease.SourceParent.TryOpenExistingFile(
+                    lease.SourceName,
+                    requireDeleteAccess: false);
+                return liveSource != null
                     ? FileMoveClaimRecoveryOutcome.Ready
                     : FileMoveClaimRecoveryOutcome.Blocked;
             }
 
-            if (sourceClaimExists)
-            {
-                if (!destinationStageExists
-                    || !await FileSystemSafety.FilesHaveSameContentAsync(
-                        state.SourceClaim,
-                        state.DestinationStage))
-                {
-                    return FileMoveClaimRecoveryOutcome.Blocked;
-                }
-
-                File.Delete(state.SourceClaim);
-            }
-
-            if (destinationStageExists)
-            {
-                PublishPrivateClaimNoReplace(
-                    state.DestinationStage,
-                    destinationFile);
-            }
-
-            if (!File.Exists(destinationFile)
-                || IsLinkedOrUnverifiableEntry(destinationFile))
+            var committedContent = await ReadFileMoveContentAsync(generationFence);
+            if (!committedContent.HasValue)
             {
                 return FileMoveClaimRecoveryOutcome.Blocked;
             }
 
-            TryDeleteFile(state.DestinationPrevious);
-            if (!PathEntryExists(sourceFile))
+            if (sourceClaim != null)
             {
-                File.Delete(state.GenerationFence);
+                if (destinationStage == null)
+                {
+                    return FileMoveClaimRecoveryOutcome.Blocked;
+                }
+                if (!await FileMatchesMoveContentAsync(
+                        sourceClaim,
+                        committedContent.Value)
+                    || !await FileMatchesMoveContentAsync(
+                        destinationStage,
+                        committedContent.Value))
+                {
+                    return FileMoveClaimRecoveryOutcome.Blocked;
+                }
+                sourceClaim.Delete(immediateWindows: true);
+                sourceClaim.Dispose();
             }
-            TryDeleteEmptyStateDirectories(state);
+
+            if (destinationStage != null)
+            {
+                if (!await FileMatchesMoveContentAsync(
+                        destinationStage,
+                        committedContent.Value))
+                {
+                    return FileMoveClaimRecoveryOutcome.Blocked;
+                }
+                using var publicDestination =
+                    lease.DestinationParent.TryOpenExistingFile(
+                        lease.DestinationName,
+                        requireDeleteAccess: false);
+                if (publicDestination != null)
+                {
+                    return FileMoveClaimRecoveryOutcome.Blocked;
+                }
+                destinationStage.MoveTo(
+                    lease.DestinationParent,
+                    lease.DestinationName);
+                destinationStage.Dispose();
+            }
+
+            using var publishedDestination =
+                lease.DestinationParent.TryOpenExistingFile(
+                    lease.DestinationName,
+                    requireDeleteAccess: false);
+            if (publishedDestination == null)
+            {
+                return FileMoveClaimRecoveryOutcome.Blocked;
+            }
+            if (!await FileMatchesMoveContentAsync(
+                    publishedDestination,
+                    committedContent.Value))
+            {
+                return FileMoveClaimRecoveryOutcome.Blocked;
+            }
+
+            destinationPrevious?.Delete(immediateWindows: true);
+            destinationPrevious?.Dispose();
+            using var publishedSource = lease.SourceParent.TryOpenExistingFile(
+                lease.SourceName,
+                requireDeleteAccess: false);
+            if (publishedSource == null)
+            {
+                generationFence.Delete(immediateWindows: true);
+                generationFence.Dispose();
+            }
+            sourceState?.Dispose();
+            destinationState?.Dispose();
+            TryDeleteAnchoredStateDirectory(
+                sourceStatePublication,
+                Path.GetFileName(state.SourceStateDirectory));
+            TryDeleteAnchoredStateDirectory(
+                destinationStatePublication,
+                Path.GetFileName(state.DestinationStateDirectory));
             return FileMoveClaimRecoveryOutcome.Completed;
         }
         catch (Exception exception) when (exception is not (
@@ -360,4 +495,5 @@ public partial class FileMover
             return FileMoveClaimRecoveryOutcome.Blocked;
         }
     }
+
 }

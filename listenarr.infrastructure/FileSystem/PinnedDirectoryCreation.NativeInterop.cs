@@ -18,10 +18,12 @@ internal sealed partial class PinnedDirectoryCreation
 
     private enum FileInformationClass
     {
+        FileBasicInfo = 0,
         FileRenameInfo = 3,
         FileDispositionInfo = 4,
         FileAttributeTagInfo = 9,
-        FileIdInfo = 18
+        FileIdInfo = 18,
+        FileDispositionInfoEx = 21
     }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -43,6 +45,16 @@ internal sealed partial class PinnedDirectoryCreation
     {
         public ulong VolumeSerialNumber;
         public FileId128 FileId;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct FileBasicInformation
+    {
+        public long CreationTime;
+        public long LastAccessTime;
+        public long LastWriteTime;
+        public long ChangeTime;
+        public uint FileAttributes;
     }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -119,6 +131,37 @@ internal sealed partial class PinnedDirectoryCreation
         public ulong Spare11;
     }
 
+    [StructLayout(LayoutKind.Sequential)]
+    private struct MacTimespec
+    {
+        public long Seconds;
+        public long Nanoseconds;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct MacStatInformation
+    {
+        public int Device;
+        public ushort Mode;
+        public ushort LinkCount;
+        public ulong Inode;
+        public uint UserId;
+        public uint GroupId;
+        public int Rdev;
+        public MacTimespec AccessTime;
+        public MacTimespec ModificationTime;
+        public MacTimespec ChangeTime;
+        public MacTimespec BirthTime;
+        public long Size;
+        public long Blocks;
+        public int BlockSize;
+        public uint Flags;
+        public uint Generation;
+        public int Spare;
+        public long QSpare0;
+        public long QSpare1;
+    }
+
     [DllImport("kernel32.dll", EntryPoint = "CreateFileW", CharSet = CharSet.Unicode, SetLastError = true)]
     private static extern SafeFileHandle CreateFileWindows(
         string fileName,
@@ -151,6 +194,14 @@ internal sealed partial class PinnedDirectoryCreation
         SafeFileHandle fileHandle,
         FileInformationClass fileInformationClass,
         out FileIdInformation fileInformation,
+        uint bufferSize);
+
+    [DllImport("kernel32.dll", EntryPoint = "GetFileInformationByHandleEx", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetFileBasicInformationByHandleEx(
+        SafeFileHandle fileHandle,
+        FileInformationClass fileInformationClass,
+        out FileBasicInformation fileInformation,
         uint bufferSize);
 
     [DllImport("ntdll.dll")]
@@ -204,6 +255,13 @@ internal sealed partial class PinnedDirectoryCreation
         [MarshalAs(UnmanagedType.LPUTF8Str)] string newPath,
         uint flags);
 
+    [DllImport("libc", EntryPoint = "renameat", SetLastError = true)]
+    private static extern int RenameAtUnix(
+        int oldDirectoryFileDescriptor,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string oldPath,
+        int newDirectoryFileDescriptor,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string newPath);
+
     [DllImport("libc", EntryPoint = "renameatx_np", SetLastError = true)]
     private static extern int RenameAtExclusiveMac(
         int oldDirectoryFileDescriptor,
@@ -231,4 +289,9 @@ internal sealed partial class PinnedDirectoryCreation
         int fileDescriptor,
         int command,
         IntPtr buffer);
+
+    [DllImport("libc", EntryPoint = "fstat", SetLastError = true)]
+    private static extern int FStatMac(
+        int fileDescriptor,
+        out MacStatInformation information);
 }

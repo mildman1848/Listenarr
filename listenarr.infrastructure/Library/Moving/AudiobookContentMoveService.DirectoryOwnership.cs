@@ -236,8 +236,12 @@ internal sealed partial class AudiobookContentMoveService
         LibraryDirectoryRemovalOutcome outcome;
         try
         {
+            using var authorization = await ownershipAuthorizer.AuthorizeOwnershipAsync(
+                ownership,
+                cancellationToken);
             outcome = LibraryDirectoryOwnershipRemoval.RemoveEmptyDirectory(
                 ownership,
+                authorization.ParentAnchor,
                 cancellationToken);
         }
         catch (InvalidOperationException exception)

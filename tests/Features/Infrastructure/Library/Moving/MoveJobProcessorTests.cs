@@ -48,15 +48,16 @@ namespace Listenarr.Tests.Features.Infrastructure.Library.Moving
                 sourceRoot,
                 Path.GetDirectoryName(source)!);
             var target = Path.Join(FileService.GetTempPath(), $"move-processor-cleanup-dst-{Guid.NewGuid():N}");
-            var rootFolderRepository = _provider.GetRequiredService<IRootFolderRepository>();
-            await rootFolderRepository.AddAsync(new RootFolder { Name = "Cleanup Root", Path = sourceRoot });
             var audiobook = await _audiobookRepository.AddAsync(new Audiobook { Title = "Cleanup Test", BasePath = source });
             var (queue, job) = await CreateQueuedMoveJobAsync(audiobook, target, source);
 
             var processor = _provider.GetRequiredService<IMoveJobProcessor>();
             await processor.ProcessJobAsync(job, CancellationToken.None);
 
-            Assert.Equal(MoveJobStatus.Completed, (await queue.GetJobAsync(job.Id))?.Status);
+            var completed = await queue.GetJobAsync(job.Id);
+            Assert.True(
+                completed?.Status == MoveJobStatus.Completed,
+                completed?.Error ?? "The move job was not persisted.");
             Assert.True(Directory.Exists(sourceRoot));
             Assert.False(Directory.Exists(Path.Join(sourceRoot, "Author")));
             Assert.True(File.Exists(Path.Join(target, "book.m4b")));
@@ -110,7 +111,6 @@ namespace Listenarr.Tests.Features.Infrastructure.Library.Moving
                 Name = "Foreign Legacy Root",
                 Path = OperatingSystem.IsWindows() ? "/legacy/library" : @"Z:\legacy\library"
             });
-            await rootFolderRepository.AddAsync(new RootFolder { Name = "Valid Root", Path = sourceRoot });
             var audiobook = await _audiobookRepository.AddAsync(new Audiobook
             {
                 Title = "Foreign Root Cleanup",
@@ -121,7 +121,10 @@ namespace Listenarr.Tests.Features.Infrastructure.Library.Moving
             var processor = _provider.GetRequiredService<IMoveJobProcessor>();
             await processor.ProcessJobAsync(job, CancellationToken.None);
 
-            Assert.Equal(MoveJobStatus.Completed, (await queue.GetJobAsync(job.Id))?.Status);
+            var completed = await queue.GetJobAsync(job.Id);
+            Assert.True(
+                completed?.Status == MoveJobStatus.Completed,
+                completed?.Error ?? "The move job was not persisted.");
             Assert.True(Directory.Exists(sourceRoot));
             Assert.False(Directory.Exists(Path.Join(sourceRoot, "Author")));
             Assert.True(File.Exists(Path.Join(target, "book.m4b")));
@@ -1095,6 +1098,7 @@ namespace Listenarr.Tests.Features.Infrastructure.Library.Moving
             var boundary = FileSystemPathIdentity.Canonicalize(
                 managedBoundary,
                 semantics.Syntax);
+            await AddAuthorizedRootAsync(boundary, "Move Job Test Root");
             var current = FileSystemPathIdentity.Canonicalize(
                 deepestOwnedDirectory,
                 semantics.Syntax);
