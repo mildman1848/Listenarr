@@ -18,6 +18,64 @@ public enum RootFolderRelocationStatus
     Failed
 }
 
+public enum TargetIdentityEnrollmentState
+{
+    Authorized,
+    LegacyUnenrolled,
+    Unavailable,
+    NotRequired
+}
+
+public enum LibraryDirectoryOwnershipPathMigrationState
+{
+    Prepared,
+    MarkersPublished,
+    MetadataCommitted
+}
+
+public enum RootFolderRelocationCreatedDirectoryState
+{
+    Planned,
+    Created,
+    Retained,
+    Removed
+}
+
+public static class TargetIdentityEnrollment
+{
+    public static TargetIdentityEnrollmentState Classify(
+        RootFolderRelocation relocation)
+    {
+        ArgumentNullException.ThrowIfNull(relocation);
+        if (relocation.Status is
+            RootFolderRelocationStatus.Completed
+                or RootFolderRelocationStatus.Failed)
+        {
+            return TargetIdentityEnrollmentState.NotRequired;
+        }
+
+        if (relocation.TargetDirectoryObjectIdentityVersion.HasValue
+            && !string.IsNullOrWhiteSpace(
+                relocation.TargetDirectoryObjectIdentity)
+            && string.IsNullOrWhiteSpace(
+                relocation.TargetDirectoryObjectIdentityUnavailableReason))
+        {
+            return TargetIdentityEnrollmentState.Authorized;
+        }
+
+        if (relocation.TargetDirectoryObjectIdentityVersion == null
+            && string.IsNullOrWhiteSpace(
+                relocation.TargetDirectoryObjectIdentity)
+            && string.IsNullOrWhiteSpace(
+                relocation.TargetDirectoryObjectIdentityUnavailableReason))
+        {
+            return TargetIdentityEnrollmentState.LegacyUnenrolled;
+        }
+
+        return TargetIdentityEnrollmentState.Unavailable;
+    }
+}
+
 public sealed class RootFolderRelocation
 {
     [Key]
@@ -37,6 +95,8 @@ public sealed class RootFolderRelocation
     public string DesiredName { get; set; } = string.Empty;
     public bool DesiredIsDefault { get; set; }
     public FileSystemCaseSensitivityMode TargetCaseSensitivityMode { get; set; } = FileSystemCaseSensitivityMode.Auto;
+    public TargetIdentityEnrollmentState TargetIdentityEnrollmentState { get; set; } =
+        TargetIdentityEnrollmentState.Authorized;
     public int? TargetDirectoryObjectIdentityVersion { get; set; }
     [MaxLength(256)]
     public string? TargetDirectoryObjectIdentity { get; set; }
@@ -51,6 +111,10 @@ public sealed class RootFolderRelocation
     public DateTime? CompletedAt { get; set; }
     public ICollection<MoveJob> MoveJobs { get; set; } = new List<MoveJob>();
     public ICollection<RootFolderRelocationSkippedItem> SkippedItems { get; set; } = new List<RootFolderRelocationSkippedItem>();
+    public ICollection<LibraryDirectoryOwnershipPathMigration> OwnershipPathMigrations { get; set; } =
+        new List<LibraryDirectoryOwnershipPathMigration>();
+    public ICollection<RootFolderRelocationCreatedDirectory> CreatedDirectories { get; set; } =
+        new List<RootFolderRelocationCreatedDirectory>();
 }
 
 public sealed class RootFolderRelocationSkippedItem
@@ -63,4 +127,59 @@ public sealed class RootFolderRelocationSkippedItem
     public string Reason { get; set; } = string.Empty;
     public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
     public RootFolderRelocation Relocation { get; set; } = null!;
+}
+
+public sealed class LibraryDirectoryOwnershipPathMigration
+{
+    [Key]
+    public long Id { get; set; }
+    public long OwnershipId { get; set; }
+    public LibraryDirectoryOwnership Ownership { get; set; } = null!;
+    public Guid RelocationId { get; set; }
+    public RootFolderRelocation Relocation { get; set; } = null!;
+    [Required, MaxLength(4096)]
+    public string SourceCanonicalPath { get; set; } = string.Empty;
+    public FileSystemPathSyntax SourcePathSyntax { get; set; }
+    public FileSystemCaseSensitivity SourceCaseSensitivity { get; set; }
+    public FileSystemCaseSensitivityMode SourceCaseSensitivityMode { get; set; }
+    [Required, MaxLength(4096)]
+    public string SourceIdentityBoundary { get; set; } = string.Empty;
+    [Required, MaxLength(160)]
+    public string SourceIdentityLookupKey { get; set; } = string.Empty;
+    [Required, MaxLength(160)]
+    public string SourceOwnershipKey { get; set; } = string.Empty;
+    [Required, MaxLength(4096)]
+    public string TargetCanonicalPath { get; set; } = string.Empty;
+    public FileSystemPathSyntax TargetPathSyntax { get; set; }
+    public FileSystemCaseSensitivity TargetCaseSensitivity { get; set; }
+    public FileSystemCaseSensitivityMode TargetCaseSensitivityMode { get; set; }
+    [Required, MaxLength(4096)]
+    public string TargetIdentityBoundary { get; set; } = string.Empty;
+    [Required, MaxLength(160)]
+    public string TargetIdentityLookupKey { get; set; } = string.Empty;
+    [Required, MaxLength(160)]
+    public string TargetOwnershipKey { get; set; } = string.Empty;
+    public LibraryDirectoryOwnershipPathMigrationState State { get; set; } =
+        LibraryDirectoryOwnershipPathMigrationState.Prepared;
+    public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
+    public DateTime UpdatedAt { get; set; } = DateTime.UtcNow;
+}
+
+public sealed class RootFolderRelocationCreatedDirectory
+{
+    [Key]
+    public long Id { get; set; }
+    public Guid RelocationId { get; set; }
+    public RootFolderRelocation Relocation { get; set; } = null!;
+    [Required, MaxLength(4096)]
+    public string CanonicalPath { get; set; } = string.Empty;
+    [Required, MaxLength(64)]
+    public string OwnershipToken { get; set; } = string.Empty;
+    public RootFolderRelocationCreatedDirectoryState State { get; set; } =
+        RootFolderRelocationCreatedDirectoryState.Planned;
+    public int? DirectoryObjectIdentityVersion { get; set; }
+    [MaxLength(256)]
+    public string? DirectoryObjectIdentity { get; set; }
+    public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
+    public DateTime UpdatedAt { get; set; } = DateTime.UtcNow;
 }

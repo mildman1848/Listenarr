@@ -169,6 +169,62 @@ public class LibraryController_DeleteLinkSafetyTests : BaseTests
     }
 
     [Fact]
+    public async Task FilesystemDelete_AuthorizedRootReplacedAfterEnumeration_PreservesReplacementTree()
+    {
+        var tempRoot = FileService.GetTempDirectory(
+            "listenarr-delete-generation-race");
+        var bookFolder = Path.Join(tempRoot, "Book");
+        var displacedFolder = Path.Join(tempRoot, "Book-displaced");
+        var localFile = Path.Join(bookFolder, "book.m4b");
+        var displacedFile = Path.Join(displacedFolder, "book.m4b");
+        Directory.CreateDirectory(bookFolder);
+        await File.WriteAllTextAsync(localFile, "owned audio");
+        await AddAuthorizedRootAsync(tempRoot);
+
+        var audiobook = await _audiobookRepository.AddAsync(
+            new AudiobookBuilder()
+                .WithTitle("Generation Race Book")
+                .WithBasePath(bookFolder)
+                .WithFilePath(localFile)
+                .Build());
+        await _audiobookFileRepository.AddAsync(
+            new AudiobookFileBuilder()
+                .WithAudiobook(audiobook)
+                .WithPath(localFile)
+                .Build());
+
+        var replaced = false;
+        using var hook = ExclusiveDirectoryCreator.PushBeforeOpenParentHook(path =>
+        {
+            if (replaced
+                || !string.Equals(path, localFile, StringComparison.Ordinal))
+            {
+                return;
+            }
+
+            Directory.Move(bookFolder, displacedFolder);
+            Directory.CreateDirectory(bookFolder);
+            File.WriteAllText(localFile, "replacement audio");
+            replaced = true;
+        });
+
+        var service =
+            _provider.GetRequiredService<IAudiobookFilesystemDeleteService>();
+        var result = await service.DeleteAsync(audiobook, deleteFolder: true);
+
+        Assert.True(replaced);
+        Assert.Equal("owned audio", await File.ReadAllTextAsync(displacedFile));
+        Assert.Equal("replacement audio", await File.ReadAllTextAsync(localFile));
+        Assert.False(result.DeletedFolder);
+        Assert.Contains(result.Warnings, warning =>
+            warning.Contains("generation", StringComparison.OrdinalIgnoreCase)
+            || warning.Contains("delete", StringComparison.OrdinalIgnoreCase));
+
+        Directory.Delete(bookFolder, recursive: true);
+        Directory.Move(displacedFolder, bookFolder);
+    }
+
+    [Fact]
     public async Task FilesystemDelete_FolderReplacedByFile_DoesNotReportSuccess()
     {
         var tempRoot = FileService.GetTempDirectory("listenarr-delete-folder-file-race");

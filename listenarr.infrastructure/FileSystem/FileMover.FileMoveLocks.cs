@@ -37,6 +37,7 @@ public partial class FileMover
         string key,
         FileMoveGateEntry entry,
         IReadOnlyList<FileStream> stripeLocks,
+        PinnedDirectoryCreation.PinnedDirectoryAnchor? lockDirectory,
         FileMoveEndpoint source,
         FileMoveEndpoint destination,
         PinnedDirectoryCreation.PinnedDirectoryAnchor? sourceParent,
@@ -61,6 +62,8 @@ public partial class FileMover
             _destinationParent ?? throw new InvalidOperationException(
                 "The file-move destination parent was not pinned.");
         private IReadOnlyList<FileStream>? _stripeLocks = stripeLocks;
+        private PinnedDirectoryCreation.PinnedDirectoryAnchor? _lockDirectory =
+            lockDirectory;
 
         public void Dispose()
         {
@@ -80,6 +83,7 @@ public partial class FileMover
                     stripeLock.Dispose();
                 }
             }
+            Interlocked.Exchange(ref _lockDirectory, null)?.Dispose();
 
             releasedEntry.Semaphore.Release();
             lock (FileMoveGateRegistryLock)
@@ -98,7 +102,8 @@ public partial class FileMover
 
     private async Task<FileMoveGateLease?> TryAcquireFileMoveGateAsync(
         string sourceFile,
-        string destinationFile)
+        string destinationFile,
+        bool createDestinationParent = false)
     {
         if (await IsFilesystemAliasAsync(sourceFile, destinationFile))
         {
@@ -141,41 +146,21 @@ public partial class FileMover
 
         await entry.Semaphore.WaitAsync();
         var stripeLocks = new List<FileStream>();
+        PinnedDirectoryCreation.PinnedDirectoryAnchor? lockDirectory = null;
         PinnedDirectoryCreation.PinnedDirectoryAnchor? sourceParent = null;
         PinnedDirectoryCreation.PinnedDirectoryAnchor? destinationParent = null;
         FileMoveGateLease? lease = null;
         var leaseReturned = false;
         try
         {
-            foreach (var lockPath in GetFileMoveStripeLockPaths(
+            lockDirectory = OpenFileMoveLockDirectory();
+            foreach (var lockName in GetFileMoveStripeLockNames(
                 sourceEndpoint.LockIdentity,
                 destinationEndpoint.LockIdentity))
             {
-                FileStream? stream = null;
-                for (var attempt = 0; attempt < 300 && stream == null; attempt++)
-                {
-                    try
-                    {
-                        stream = new FileStream(
-                            lockPath,
-                            FileMode.OpenOrCreate,
-                            FileAccess.ReadWrite,
-                            FileShare.None,
-                            bufferSize: 1,
-                            FileOptions.None);
-                    }
-                    catch (IOException) when (attempt < 299)
-                    {
-                        await Task.Delay(100);
-                    }
-                }
-
-                if (stream == null)
-                {
-                    throw new IOException("Timed out acquiring a file-move stripe lock.");
-                }
-
-                stripeLocks.Add(stream);
+                stripeLocks.Add(
+                    await lockDirectory.OpenOrCreateExclusiveLockFileAsync(
+                        lockName));
             }
 
             var currentSource = await ResolveFileMoveEndpointAsync(sourceFile);
@@ -200,15 +185,18 @@ public partial class FileMover
             var destinationParentPath =
                 Path.GetDirectoryName(currentDestination.ResolvedPath)
                 ?? throw new IOException("The file-move destination has no parent.");
-            sourceParent = PinnedDirectoryCreation.OpenPinnedDirectoryNoFollow(
-                sourceParentPath);
-            destinationParent = PinnedDirectoryCreation.OpenPinnedDirectoryNoFollow(
-                destinationParentPath);
+            sourceParent = PinnedDirectoryCreation.OpenPinnedHierarchyNoFollow(
+                sourceParentPath,
+                createMissing: false);
+            destinationParent = PinnedDirectoryCreation.OpenPinnedHierarchyNoFollow(
+                destinationParentPath,
+                createDestinationParent);
 
             lease = new FileMoveGateLease(
                 key,
                 entry,
                 stripeLocks,
+                lockDirectory,
                 currentSource,
                 currentDestination,
                 sourceParent,
@@ -249,6 +237,7 @@ public partial class FileMover
                         key,
                         entry,
                         stripeLocks,
+                        lockDirectory,
                         sourceEndpoint,
                         destinationEndpoint,
                         sourceParent: null,
@@ -286,6 +275,10 @@ public partial class FileMover
             fullPath,
             resolution.Semantics.Syntax);
         if (!TryResolvePhysicalPath(canonicalPath, out var physical))
+        {
+            return null;
+        }
+        if (physical.EncounteredLink)
         {
             return null;
         }
@@ -349,18 +342,15 @@ public partial class FileMover
         }
     }
 
-    private static IReadOnlyList<string> GetFileMoveStripeLockPaths(
+    private static IReadOnlyList<string> GetFileMoveStripeLockNames(
         string sourceIdentity,
-        string destinationIdentity)
-    {
-        var directory = GetFileMoveLockDirectory();
-        return new[] { sourceIdentity, destinationIdentity }
+        string destinationIdentity) =>
+        new[] { sourceIdentity, destinationIdentity }
             .Select(GetFileMoveLockStripe)
             .Distinct()
             .Order()
-            .Select(stripe => Path.Join(directory, $"stripe-{stripe:D4}.lock"))
+            .Select(stripe => $"stripe-{stripe:D4}.lock")
             .ToArray();
-    }
 
     private static int GetFileMoveLockStripe(string path)
     {
@@ -368,33 +358,45 @@ public partial class FileMover
         return (int)(BitConverter.ToUInt32(hash, 0) % FileMoveLockStripeCount);
     }
 
-    private static string GetFileMoveLockDirectory()
+    private PinnedDirectoryCreation.PinnedDirectoryAnchor
+        OpenFileMoveLockDirectory()
     {
-        var localData = Environment.GetFolderPath(
-            Environment.SpecialFolder.LocalApplicationData);
-        if (string.IsNullOrWhiteSpace(localData))
+        var directory = FileMoveLockDirectoryForTest;
+        if (string.IsNullOrWhiteSpace(directory))
         {
-            throw new IOException(
-                "A per-user application-data directory is required for file-move locks.");
+            var localData = Environment.GetFolderPath(
+                Environment.SpecialFolder.LocalApplicationData);
+            if (string.IsNullOrWhiteSpace(localData))
+            {
+                throw new IOException(
+                    "A per-user application-data directory is required for file-move locks.");
+            }
+
+            directory = Path.Join(
+                localData,
+                "Listenarr",
+                "file-move-locks");
         }
 
-        var directory = Path.Join(localData, "Listenarr", "file-move-locks");
-        Directory.CreateDirectory(directory);
-        if (!OperatingSystem.IsWindows())
+        var pinned = PinnedDirectoryCreation.OpenPinnedHierarchyNoFollow(
+            directory,
+            createMissing: true);
+        try
         {
-            File.SetUnixFileMode(
-                directory,
-                UnixFileMode.UserRead
-                | UnixFileMode.UserWrite
-                | UnixFileMode.UserExecute);
-        }
+            pinned.RestrictToCurrentUser();
+            if (!pinned.VisiblePathMatches())
+            {
+                throw new IOException(
+                    "The file-move lock directory changed while it was pinned.");
+            }
 
-        if (!TryValidateStateDirectory(directory))
+            return pinned;
+        }
+        catch
         {
-            throw new IOException("The file-move lock directory is unsafe.");
+            pinned.Dispose();
+            throw;
         }
-
-        return directory;
     }
 
     private static string GetFileMoveGateKey(

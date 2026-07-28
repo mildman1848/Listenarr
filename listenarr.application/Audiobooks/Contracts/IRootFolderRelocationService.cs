@@ -18,7 +18,9 @@ public sealed record RootFolderPathChangeResult(
     RootFolderRelocationStatus Status,
     int TotalJobs,
     int CompletedJobs,
-    string? Error);
+    string? Error,
+    TargetIdentityEnrollmentState TargetIdentityEnrollmentState =
+        TargetIdentityEnrollmentState.NotRequired);
 
 public interface IRootFolderRelocationService
 {
@@ -42,6 +44,11 @@ public interface IRootFolderRelocationService
 
     Task<RootFolderPathChangeResult> RetryAsync(
         Guid relocationId,
+        CancellationToken cancellationToken = default);
+
+    Task<RootFolderPathChangeResult> ReauthorizeLegacyTargetAsync(
+        Guid relocationId,
+        string confirmedTargetPath,
         CancellationToken cancellationToken = default);
 
     Task OnMoveJobStateChangedAsync(

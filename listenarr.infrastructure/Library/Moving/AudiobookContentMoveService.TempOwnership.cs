@@ -56,15 +56,25 @@ internal sealed partial class AudiobookContentMoveService
             }
             catch (InterruptedOwnershipPublicationException)
             {
-                await EnsureMutationAuthorizedAsync(request, source, target, cancellationToken);
-                ValidateExistingMoveDirectory(tempDirectory, "interrupted temporary directory");
-                if (Directory.EnumerateFileSystemEntries(tempDirectory).Any())
-                {
-                    throw new MoveNeedsAttentionException(
-                        "An interrupted temporary ownership publication left unexpected content.");
-                }
-
-                Directory.Delete(tempDirectory, recursive: false);
+                await RetirePinnedEmptyDirectoryAsync(
+                    tempDirectory,
+                    "interrupted temporary directory",
+                    () =>
+                    {
+                        ValidateExistingMoveDirectory(
+                            tempDirectory,
+                            "interrupted temporary directory");
+                        if (Directory.EnumerateFileSystemEntries(tempDirectory).Any())
+                        {
+                            throw new MoveNeedsAttentionException(
+                                "An interrupted temporary ownership publication left unexpected content.");
+                        }
+                    },
+                    () => EnsureMutationAuthorizedAsync(
+                        request,
+                        source,
+                        target,
+                        cancellationToken));
             }
         }
 
@@ -404,20 +414,21 @@ internal sealed partial class AudiobookContentMoveService
         {
             if (Directory.Exists(directory))
             {
-                ValidateExistingMoveDirectory(
+                await RetirePinnedEmptyDirectoryAsync(
                     directory,
-                    $"new {artifactName} directory");
-                if (!Directory.EnumerateFileSystemEntries(directory).Any())
-                {
-                    await authorizeMutation();
-                    ValidateExistingMoveDirectory(
-                        directory,
-                        $"new {artifactName} directory");
-                    if (!Directory.EnumerateFileSystemEntries(directory).Any())
+                    $"new {artifactName} directory",
+                    () =>
                     {
-                        Directory.Delete(directory, recursive: false);
-                    }
-                }
+                        ValidateExistingMoveDirectory(
+                            directory,
+                            $"new {artifactName} directory");
+                        if (Directory.EnumerateFileSystemEntries(directory).Any())
+                        {
+                            throw new MoveNeedsAttentionException(
+                                $"The new {artifactName} directory changed before retirement.");
+                        }
+                    },
+                    authorizeMutation);
             }
         }
         catch (Exception cleanupException) when (cleanupException is

@@ -288,7 +288,7 @@ namespace Listenarr.Api.Features.Library
                         $"Audiobook with ID {id} not found");
                 }
 
-                var destinationRoot = destinationRootOrPath.Trim();
+                var destinationRoot = destinationRootOrPath;
                 var namingPattern = !string.IsNullOrWhiteSpace(settings?.FolderNamingPattern)
                     ? settings!.FolderNamingPattern
                     : settings?.FileNamingPattern ?? string.Empty;

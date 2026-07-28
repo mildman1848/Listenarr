@@ -26,9 +26,19 @@ public static class ListenarrStartupTasks
     {
         await app.MigrateLegacyOutputPathAsync();
         await app.ReconcileRootFolderObjectIdentitiesAsync();
+        await app.ReconcileRootFolderRelocationsAsync();
         await app.ReconcileLibraryDirectoryOwnershipAsync();
         await app.ReconcileAudiobookFileIdentitiesAsync();
         await app.WarnIfAuthenticationDisabledAsync();
+    }
+
+    private static async Task ReconcileRootFolderRelocationsAsync(
+        this WebApplication app)
+    {
+        using var scope = app.Services.CreateScope();
+        var reconciler = scope.ServiceProvider
+            .GetRequiredService<IRootFolderRelocationService>();
+        await reconciler.ReconcileActiveAsync();
     }
 
     private static async Task ReconcileLibraryDirectoryOwnershipAsync(

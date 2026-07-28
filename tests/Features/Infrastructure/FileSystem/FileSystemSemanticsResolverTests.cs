@@ -1,3 +1,4 @@
+using System.Runtime.InteropServices;
 using Listenarr.Tests.Common;
 
 namespace Listenarr.Tests.Features.Infrastructure.FileSystem;
@@ -109,4 +110,167 @@ public sealed class FileSystemSemanticsResolverTests : BaseTests
             Directory.Delete(root, true);
         }
     }
+
+    [Fact]
+    public async Task AutoProbe_PrimaryGenerationIsReplaced_PreservesReplacementAndReturnsUnavailable()
+    {
+        var root = Path.Join(
+            Path.GetTempPath(),
+            "filesystem-semantics-race-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        string? replacementPath = null;
+        var resolver = new FileSystemSemanticsResolver
+        {
+            AfterPrimaryProbeCreatedForTest = (primaryPath, _) =>
+            {
+                File.Delete(primaryPath);
+                File.WriteAllText(primaryPath, "replacement");
+                replacementPath = primaryPath;
+            }
+        };
+        try
+        {
+            var resolution = await resolver.ResolveAsync(
+                root,
+                FileSystemCaseSensitivityMode.Auto);
+
+            Assert.Equal(PathIdentityState.Unavailable, resolution.State);
+            Assert.Equal(
+                FileSystemCaseSensitivity.Unknown,
+                resolution.Semantics.CaseSensitivity);
+            Assert.NotNull(replacementPath);
+            Assert.Equal("replacement", await File.ReadAllTextAsync(replacementPath));
+        }
+        finally
+        {
+            Directory.Delete(root, true);
+        }
+    }
+
+    [Fact]
+    public async Task AutoProbe_AlternateSpellingIsOccupied_PreservesUnownedEntryAndReturnsUnavailable()
+    {
+        var root = Path.Join(
+            Path.GetTempPath(),
+            "filesystem-semantics-alternate-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        var capabilityLower = Path.Join(root, "case-capability-a");
+        var capabilityUpper = Path.Join(root, "CASE-CAPABILITY-A");
+        await File.WriteAllTextAsync(capabilityLower, "lower");
+        try
+        {
+            await using var alternateCapability = new FileStream(
+                capabilityUpper,
+                FileMode.CreateNew,
+                FileAccess.Write,
+                FileShare.Read);
+        }
+        catch (IOException)
+        {
+            Directory.Delete(root, true);
+            return;
+        }
+
+        File.Delete(capabilityLower);
+        File.Delete(capabilityUpper);
+        string? occupiedAlternate = null;
+        var resolver = new FileSystemSemanticsResolver
+        {
+            AfterPrimaryProbeCreatedForTest = (_, alternatePath) =>
+            {
+                File.WriteAllText(alternatePath, "external");
+                occupiedAlternate = alternatePath;
+            }
+        };
+        try
+        {
+            var resolution = await resolver.ResolveAsync(
+                root,
+                FileSystemCaseSensitivityMode.Auto);
+
+            Assert.Equal(PathIdentityState.Unavailable, resolution.State);
+            Assert.Equal(
+                FileSystemCaseSensitivity.Unknown,
+                resolution.Semantics.CaseSensitivity);
+            Assert.NotNull(occupiedAlternate);
+            Assert.Equal("external", await File.ReadAllTextAsync(occupiedAlternate));
+        }
+        finally
+        {
+            Directory.Delete(root, true);
+        }
+    }
+
+    [Fact]
+    public async Task AutoProbe_AlternateSpellingHardlinkSpoof_ReturnsUnavailableAndPreservesUnownedLink()
+    {
+        var root = Path.Join(
+            Path.GetTempPath(),
+            "filesystem-semantics-hardlink-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        var capabilityLower = Path.Join(root, "case-capability-a");
+        var capabilityUpper = Path.Join(root, "CASE-CAPABILITY-A");
+        await File.WriteAllTextAsync(capabilityLower, "lower");
+        if (!TryCreateHardLink(capabilityUpper, capabilityLower))
+        {
+            Directory.Delete(root, true);
+            return;
+        }
+
+        File.Delete(capabilityLower);
+        File.Delete(capabilityUpper);
+        string? spoofedAlternate = null;
+        var resolver = new FileSystemSemanticsResolver
+        {
+            AfterPrimaryProbeCreatedForTest = (primaryPath, alternatePath) =>
+            {
+                Assert.True(TryCreateHardLink(alternatePath, primaryPath));
+                spoofedAlternate = alternatePath;
+            }
+        };
+        try
+        {
+            var resolution = await resolver.ResolveAsync(
+                root,
+                FileSystemCaseSensitivityMode.Auto);
+
+            Assert.Equal(PathIdentityState.Unavailable, resolution.State);
+            Assert.Equal(
+                FileSystemCaseSensitivity.Unknown,
+                resolution.Semantics.CaseSensitivity);
+            Assert.NotNull(spoofedAlternate);
+            Assert.True(File.Exists(spoofedAlternate));
+        }
+        finally
+        {
+            Directory.Delete(root, true);
+        }
+    }
+
+    private static bool TryCreateHardLink(string linkPath, string existingPath)
+    {
+        try
+        {
+            return OperatingSystem.IsWindows()
+                ? CreateHardLinkWindows(linkPath, existingPath, IntPtr.Zero)
+                : LinkUnix(existingPath, linkPath) == 0;
+        }
+        catch (Exception exception) when (exception is
+            IOException or UnauthorizedAccessException or PlatformNotSupportedException)
+        {
+            return false;
+        }
+    }
+
+    [DllImport("kernel32.dll", EntryPoint = "CreateHardLinkW", CharSet = CharSet.Unicode, SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool CreateHardLinkWindows(
+        string fileName,
+        string existingFileName,
+        IntPtr securityAttributes);
+
+    [DllImport("libc", EntryPoint = "link", SetLastError = true)]
+    private static extern int LinkUnix(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string existingPath,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string newPath);
 }

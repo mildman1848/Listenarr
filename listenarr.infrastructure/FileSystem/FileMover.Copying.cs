@@ -2,7 +2,6 @@
  * Listenarr - Audiobook Management System
  * Copyright (C) 2024-2026 Listenarr Contributors
  */
-using System.Runtime.InteropServices;
 using System.Diagnostics;
 using Listenarr.Domain.Audiobooks.Enumerations;
 using Microsoft.Extensions.Logging;
@@ -120,59 +119,27 @@ namespace Listenarr.Infrastructure.FileSystem
 
         public async Task<bool> CopyFileAsync(string sourceFile, string destFile)
         {
-            try
-            {
-                if (await IsFilesystemAliasAsync(sourceFile, destFile))
-                {
-                    LogMutation(
-                        FileMutationOutcome.Blocked,
-                        FileAction.Copy,
-                        sourceFile,
-                        destFile,
-                        "Source and destination are linked aliases of the same file");
-                    return false;
-                }
-
-                if (await IsSameFilesystemPathAsync(sourceFile, destFile))
-                {
-                    LogMutation(
-                        FileMutationOutcome.Skipped,
-                        FileAction.Copy,
-                        sourceFile,
-                        destFile,
-                        "Source and destination identify the same file");
-                    return true;
-                }
-
-                if (BeforeFileSameContentShortcutForTestAsync != null)
-                {
-                    await BeforeFileSameContentShortcutForTestAsync(
-                        FileAction.Copy,
-                        sourceFile,
-                        destFile);
-                }
-
-                var shortcutOutcome = await TrySkipSameContentAsync(
-                    FileAction.Copy,
-                    sourceFile,
-                    destFile);
-                if (shortcutOutcome != SameContentShortcutOutcome.NotApplicable)
-                {
-                    return shortcutOutcome == SameContentShortcutOutcome.Completed;
-                }
-
-                File.Copy(sourceFile, destFile, true);
-                LogMutation(FileMutationOutcome.Success, FileAction.Copy, sourceFile, destFile);
-                return true;
-            }
-            catch (Exception exception) when (exception is not (OperationCanceledException or OutOfMemoryException or StackOverflowException))
-            {
-                _logger.LogError(exception, $"Copy file failed: {sourceFile} -> {destFile}");
-                return false;
-            }
+            return await CopyOrHardlinkPinnedFileAsync(
+                FileAction.Copy,
+                sourceFile,
+                destFile,
+                preferHardlink: false);
         }
 
         public async Task<bool> HardlinkFileAsync(string sourceFile, string destFile)
+        {
+            return await CopyOrHardlinkPinnedFileAsync(
+                FileAction.HardlinkCopy,
+                sourceFile,
+                destFile,
+                preferHardlink: true);
+        }
+
+        private async Task<bool> CopyOrHardlinkPinnedFileAsync(
+            FileAction action,
+            string sourceFile,
+            string destFile,
+            bool preferHardlink)
         {
             try
             {
@@ -180,7 +147,7 @@ namespace Listenarr.Infrastructure.FileSystem
                 {
                     LogMutation(
                         FileMutationOutcome.Blocked,
-                        FileAction.HardlinkCopy,
+                        action,
                         sourceFile,
                         destFile,
                         "Source and destination are linked aliases of the same file");
@@ -191,98 +158,270 @@ namespace Listenarr.Infrastructure.FileSystem
                 {
                     LogMutation(
                         FileMutationOutcome.Skipped,
-                        FileAction.HardlinkCopy,
+                        action,
                         sourceFile,
                         destFile,
                         "Source and destination identify the same file");
                     return true;
                 }
 
-                var destDir = Path.GetDirectoryName(destFile) ?? string.Empty;
-                if (!string.IsNullOrEmpty(destDir) && !Directory.Exists(destDir))
-                {
-                    Directory.CreateDirectory(destDir);
-                }
-
                 if (BeforeFileSameContentShortcutForTestAsync != null)
                 {
                     await BeforeFileSameContentShortcutForTestAsync(
-                        FileAction.HardlinkCopy,
+                        action,
                         sourceFile,
                         destFile);
                 }
 
-                var shortcutOutcome = await TrySkipSameContentAsync(
-                    FileAction.HardlinkCopy,
+                using var lease = await TryAcquireFileMoveGateAsync(
                     sourceFile,
-                    destFile);
-                if (shortcutOutcome != SameContentShortcutOutcome.NotApplicable)
+                    destFile,
+                    createDestinationParent: true);
+                if (lease == null)
                 {
-                    return shortcutOutcome == SameContentShortcutOutcome.Completed;
+                    return false;
                 }
 
-                var tempDestName = Path.GetFileName(Path.GetRandomFileName()) + ".tmp";
-                var tempDest = Path.Join(destDir, tempDestName);
-                try
-                {
-                    if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
-                    {
-                        if (!CreateHardLinkNative(tempDest, sourceFile, IntPtr.Zero))
-                        {
-                            var error = Marshal.GetLastWin32Error();
-                            throw new IOException($"CreateHardLink failed with error code {error}");
-                        }
-                    }
-                    else
-                    {
-                        var result = LinkNative(sourceFile, tempDest);
-                        if (result != 0)
-                        {
-                            var error = Marshal.GetLastWin32Error();
-                            throw new IOException($"link() failed with error code {error}");
-                        }
-                    }
+                var publicationStateName =
+                    await GetPreparedFilePublicationStateNameAsync(destFile);
+                RecoverPreparedFilePublication(
+                    lease.DestinationParent,
+                    lease.DestinationName,
+                    publicationStateName);
 
-                    await PublishPreparedFileReplacingCapturedDestinationAsync(
-                        tempDest,
+                if (AfterFileEndpointsPinnedForTestAsync != null)
+                {
+                    await AfterFileEndpointsPinnedForTestAsync(
+                        action,
+                        sourceFile,
                         destFile);
-                    LogMutation(FileMutationOutcome.Success, FileAction.HardlinkCopy, sourceFile, destFile);
+                }
+
+                if (!lease.SourceParent.VisiblePathMatches()
+                    || !lease.DestinationParent.VisiblePathMatches())
+                {
+                    return false;
+                }
+
+                using var sourceEntry = lease.SourceParent.OpenExistingFile(
+                    lease.SourceName,
+                    requireDeleteAccess: false);
+                using var destinationEntry =
+                    lease.DestinationParent.TryOpenExistingFile(
+                        lease.DestinationName,
+                        requireDeleteAccess: true);
+                if (destinationEntry != null
+                    && sourceEntry.IdentifiesSameEntry(destinationEntry))
+                {
+                    LogMutation(
+                        FileMutationOutcome.Blocked,
+                        action,
+                        sourceFile,
+                        destFile,
+                        "Source and destination identify the same file generation");
+                    return false;
+                }
+
+                if (AfterFileEntriesPinnedForTestAsync != null)
+                {
+                    await AfterFileEntriesPinnedForTestAsync(
+                        action,
+                        sourceFile,
+                        destFile);
+                }
+
+                if (!lease.SourceParent.VisiblePathMatches()
+                    || !lease.DestinationParent.VisiblePathMatches()
+                    || !sourceEntry.VisiblePathMatches()
+                    || (destinationEntry != null
+                        && !destinationEntry.VisiblePathMatches()))
+                {
+                    return false;
+                }
+
+                var sourceContent = await CaptureFileMoveContentAsync(sourceEntry);
+                if (AfterPinnedSourceContentCapturedForTestAsync != null)
+                {
+                    await AfterPinnedSourceContentCapturedForTestAsync(
+                        action,
+                        sourceFile,
+                        destFile);
+                }
+                if (destinationEntry != null
+                    && await FileMatchesMoveContentAsync(
+                        destinationEntry,
+                        sourceContent)
+                    && sourceEntry.VisiblePathMatches()
+                    && await FileMatchesMoveContentAsync(
+                        sourceEntry,
+                        sourceContent))
+                {
+                    LogMutation(
+                        FileMutationOutcome.Skipped,
+                        action,
+                        sourceFile,
+                        destFile,
+                        "Destination already contains the pinned source bytes");
                     return true;
                 }
-                catch (Exception linkEx) when (linkEx is not OperationCanceledException && linkEx is not OutOfMemoryException && linkEx is not StackOverflowException)
+
+                var temporaryName =
+                    $".listenarr-file-copy-{Guid.NewGuid():N}.tmp";
+                PinnedDirectoryCreation.PinnedFileEntry? prepared = null;
+                var published = false;
+                try
                 {
-                    var isCrossDevice = linkEx is IOException ioEx && ioEx.Message.Contains("error code 17");
-                    if (!isCrossDevice)
-                        isCrossDevice = linkEx is IOException ioEx2 && ioEx2.Message.Contains("error code 18");
+                    if (preferHardlink)
+                    {
+                        try
+                        {
+                            if (BeforePinnedHardlinkCreationForTestAsync != null)
+                            {
+                                await BeforePinnedHardlinkCreationForTestAsync();
+                            }
+                            prepared = sourceEntry.CreateHardLinkTo(
+                                lease.DestinationParent,
+                                temporaryName);
+                        }
+                        catch (Exception exception) when (exception is
+                            IOException or System.ComponentModel.Win32Exception
+                                or PlatformNotSupportedException)
+                        {
+                            _logger.LogInformation(
+                                exception,
+                                "Pinned hardlink creation was unavailable; falling back to a pinned byte copy: {Source} -> {Destination}",
+                                LogRedaction.SanitizeFilePath(sourceFile),
+                                LogRedaction.SanitizeFilePath(destFile));
+                        }
+                    }
 
-                    if (isCrossDevice)
-                        _logger.LogInformation("Hardlink not possible (source and destination are on different drives), falling back to copy: {Source} -> {Dest}", sourceFile, destFile);
+                    if (prepared == null)
+                    {
+                        prepared = lease.DestinationParent.CreateNewFile(
+                            temporaryName);
+                        await using (var sourceStream = sourceEntry.OpenReadStream(
+                            bufferSize: 128 * 1024,
+                            asynchronous: false))
+                        await using (var destinationStream = prepared.OpenWriteStream(
+                            bufferSize: 128 * 1024,
+                            asynchronous: false))
+                        {
+                            sourceStream.Position = 0;
+                            await sourceStream.CopyToAsync(destinationStream);
+                            await destinationStream.FlushAsync();
+                            destinationStream.Flush(flushToDisk: true);
+                        }
+                        sourceEntry.PreserveMetadataTo(prepared);
+                    }
+
+                    if (!lease.SourceParent.VisiblePathMatches()
+                        || !lease.DestinationParent.VisiblePathMatches()
+                        || !sourceEntry.VisiblePathMatches()
+                        || !prepared.VisiblePathMatches()
+                        || !await FileMatchesMoveContentAsync(
+                            sourceEntry,
+                            sourceContent)
+                        || !await FileMatchesMoveContentAsync(
+                            prepared,
+                            sourceContent)
+                        || (destinationEntry != null
+                            && !destinationEntry.VisiblePathMatches()))
+                    {
+                        return false;
+                    }
+
+                    if (destinationEntry == null)
+                    {
+                        using var appearedDestination =
+                            lease.DestinationParent.TryOpenExistingFile(
+                                lease.DestinationName,
+                                requireDeleteAccess: false);
+                        if (appearedDestination != null)
+                        {
+                            return false;
+                        }
+
+                        prepared.MoveWithinParent(lease.DestinationName);
+                    }
                     else
-                        _logger.LogWarning(linkEx, "Hardlink failed, falling back to copy: {Source} -> {Dest}", sourceFile, destFile);
-
-                    var tempCopyName = Path.GetFileName(Path.GetRandomFileName()) + ".tmp";
-                    var tempCopyPath = Path.Join(destDir, tempCopyName);
-                    try
                     {
-                        File.Copy(sourceFile, tempCopyPath, overwrite: false);
                         await PublishPreparedFileReplacingCapturedDestinationAsync(
-                            tempCopyPath,
-                            destFile);
-                        LogMutation(FileMutationOutcome.Success, FileAction.HardlinkCopy, sourceFile, destFile, "Copied after hardlink failure");
-                        return true;
+                            prepared,
+                            lease.DestinationParent,
+                            lease.DestinationName,
+                            destinationEntry,
+                            publicationStateName);
                     }
-                    catch
+                    published = true;
+                    LogMutation(
+                        FileMutationOutcome.Success,
+                        action,
+                        sourceFile,
+                        destFile,
+                        preferHardlink && sourceEntry.IdentifiesSameEntry(prepared)
+                            ? "Created from the pinned source hardlink generation"
+                            : "Copied from stable pinned source bytes");
+                    return true;
+                }
+                finally
+                {
+                    if (!published
+                        && prepared != null
+                        && prepared.VisiblePathMatches())
                     {
-                        // The temporary pathname is public and may have been replaced.
-                        // Preserve an uncertain entry instead of deleting through it.
-                        throw;
+                        prepared.Delete(immediateWindows: true);
                     }
+                    prepared?.Dispose();
                 }
             }
             catch (Exception ex) when (ex is not OperationCanceledException && ex is not OutOfMemoryException && ex is not StackOverflowException)
             {
-                _logger.LogError(ex, "Hardlink/Copy failed: {Source} -> {Dest}", sourceFile, destFile);
+                _logger.LogError(
+                    ex,
+                    "Pinned file copy failed: {Source} -> {Dest}",
+                    sourceFile,
+                    destFile);
                 return false;
+            }
+        }
+
+        private static void PublishPinnedPreparedReplacingCapturedDestination(
+            PinnedDirectoryCreation.PinnedFileEntry prepared,
+            PinnedDirectoryCreation.PinnedDirectoryAnchor destinationParent,
+            string destinationName,
+            PinnedDirectoryCreation.PinnedFileEntry capturedDestination)
+        {
+            var capturedName =
+                $".listenarr-file-copy-previous-{Guid.NewGuid():N}.tmp";
+            capturedDestination.MoveWithinParent(capturedName);
+            try
+            {
+                using var appearedDestination =
+                    destinationParent.TryOpenExistingFile(
+                        destinationName,
+                        requireDeleteAccess: false);
+                if (appearedDestination != null)
+                {
+                    throw new IOException(
+                        "The destination was recreated after its captured generation was quarantined.");
+                }
+
+                prepared.MoveWithinParent(destinationName);
+                capturedDestination.Delete(immediateWindows: true);
+            }
+            catch
+            {
+                using var appearedDestination =
+                    destinationParent.TryOpenExistingFile(
+                        destinationName,
+                        requireDeleteAccess: false);
+                if (appearedDestination == null
+                    && capturedDestination.VisiblePathMatches())
+                {
+                    capturedDestination.MoveWithinParent(destinationName);
+                }
+
+                throw;
             }
         }
 
@@ -310,167 +449,6 @@ namespace Listenarr.Infrastructure.FileSystem
             }
 
             return startInfo;
-        }
-
-        public async Task<bool> PerformActionOn(FileAction action, string source, string? destination = null)
-        {
-            if (action == FileAction.None || destination == null) return true;
-            if (await IsFilesystemAliasAsync(source, destination))
-            {
-                LogMutation(
-                    FileMutationOutcome.Blocked,
-                    action,
-                    source,
-                    destination,
-                    "Source and destination are linked aliases of the same file");
-                return false;
-            }
-            if (await IsSameFilesystemPathAsync(source, destination))
-            {
-                LogMutation(
-                    FileMutationOutcome.Skipped,
-                    action,
-                    source,
-                    destination,
-                    "Source and destination identify the same filesystem path");
-                return true;
-            }
-
-            var directory = Path.GetDirectoryName(destination);
-            if (action != FileAction.Move && !string.IsNullOrEmpty(directory))
-            {
-                Directory.CreateDirectory(directory);
-            }
-
-            try
-            {
-                switch (action)
-                {
-                    case FileAction.Move:
-                        return await MoveFileAsync(source, destination);
-                    case FileAction.HardlinkCopy:
-                        return await HardlinkFileAsync(source, destination);
-                    case FileAction.Copy:
-                        return await CopyFileAsync(source, destination);
-                }
-
-                return false;
-            }
-            catch (Exception exception) when (exception is not (OperationCanceledException or OutOfMemoryException or StackOverflowException))
-            {
-                LogMutation(FileMutationOutcome.Failed, action, source, destination, exception.Message);
-                throw new InvalidOperationException($"Unable to perform {action} on {source} to {destination}", exception);
-            }
-        }
-
-        private async Task<IdempotentFileMoveOutcome> TryCompleteIdempotentFileMoveAsync(
-            FileMoveGateLease lease)
-        {
-            var sourceFile = lease.SourcePath;
-            var destFile = lease.DestinationPath;
-            var equivalence = await TryDetermineFilesystemPathEquivalenceAsync(
-                sourceFile,
-                destFile);
-            if (equivalence == true)
-            {
-                return IdempotentFileMoveOutcome.Completed;
-            }
-
-            using var sourceEntry = lease.SourceParent.TryOpenExistingFile(
-                lease.SourceName,
-                requireDeleteAccess: false);
-            using var destinationEntry = lease.DestinationParent.TryOpenExistingFile(
-                lease.DestinationName,
-                requireDeleteAccess: false);
-            if (equivalence == null
-                || sourceEntry == null
-                || destinationEntry == null)
-            {
-                return IdempotentFileMoveOutcome.NotApplicable;
-            }
-
-            var removalOutcome = await TryRemoveVerifiedFileMoveSourceWithClaimsAsync(
-                lease);
-            if (removalOutcome == VerifiedFileMoveRemovalOutcome.NotRemoved)
-            {
-                return IdempotentFileMoveOutcome.SourcePathRecreated;
-            }
-
-            if (removalOutcome == VerifiedFileMoveRemovalOutcome.PathRecreated)
-            {
-                return IdempotentFileMoveOutcome.SourcePathRecreated;
-            }
-
-            LogMutation(
-                FileMutationOutcome.Skipped,
-                FileAction.Move,
-                sourceFile,
-                destFile,
-                "Destination already has identical content; source removed");
-            return IdempotentFileMoveOutcome.Completed;
-        }
-
-        private async Task<SameContentShortcutOutcome> TrySkipSameContentAsync(
-            FileAction action,
-            string sourceFile,
-            string destFile)
-        {
-            if (!File.Exists(sourceFile) || !File.Exists(destFile))
-            {
-                return SameContentShortcutOutcome.NotApplicable;
-            }
-
-            if (await IsFilesystemAliasAsync(sourceFile, destFile))
-            {
-                LogMutation(
-                    FileMutationOutcome.Blocked,
-                    action,
-                    sourceFile,
-                    destFile,
-                    "Source and destination became linked aliases before the same-content shortcut");
-                return SameContentShortcutOutcome.Blocked;
-            }
-
-            if (!await FileSystemSafety.FilesHaveSameContentAsync(sourceFile, destFile))
-            {
-                return SameContentShortcutOutcome.NotApplicable;
-            }
-
-            if (await IsFilesystemAliasAsync(sourceFile, destFile))
-            {
-                LogMutation(
-                    FileMutationOutcome.Blocked,
-                    action,
-                    sourceFile,
-                    destFile,
-                    "Source and destination became linked aliases before the same-content shortcut");
-                return SameContentShortcutOutcome.Blocked;
-            }
-
-            if (!await FileSystemSafety.FilesHaveSameContentAsync(sourceFile, destFile))
-            {
-                return SameContentShortcutOutcome.NotApplicable;
-            }
-
-            LogMutation(
-                FileMutationOutcome.Skipped,
-                action,
-                sourceFile,
-                destFile,
-                "Destination already has identical content");
-            return SameContentShortcutOutcome.Completed;
-        }
-
-        private void LogMutation(FileMutationOutcome outcome, FileAction action, string source, string? destination, string? reason = null)
-        {
-            var result = new FileMutationResult(outcome, action, source, destination, reason);
-            _logger.LogInformation(
-                "File mutation {Outcome}: {Action} {Source} -> {Destination}. Reason: {Reason}",
-                result.Outcome,
-                result.Action,
-                LogRedaction.SanitizeFilePath(result.SourcePath),
-                LogRedaction.SanitizeFilePath(result.DestinationPath ?? string.Empty),
-                LogRedaction.SanitizeText(result.Reason ?? string.Empty));
         }
     }
 }

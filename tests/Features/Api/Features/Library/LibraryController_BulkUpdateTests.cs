@@ -100,6 +100,62 @@ namespace Listenarr.Tests.Features.Api.Features.Library
                 It.IsAny<CancellationToken>()), Times.Once);
         }
 
+        [LinuxFact]
+        public async Task BulkUpdate_PhysicalPathChange_PreservesTrailingSpaceInUnixDestinationRoot()
+        {
+            MoveEnqueueCommand? captured = null;
+            var jobId = Guid.NewGuid();
+            var moveQueue = new Mock<IMoveQueueService>();
+            moveQueue.Setup(service => service.EnqueueMoveAsync(
+                    It.IsAny<MoveEnqueueCommand>(),
+                    It.IsAny<CancellationToken>()))
+                .Callback<MoveEnqueueCommand, CancellationToken>((command, _) => captured = command)
+                .ReturnsAsync(jobId);
+            Init(services => services.WithSingleton(moveQueue.Object));
+
+            var configuredRoot = FileService.GetTempDirectory("bulk-unix-byte-root");
+            var destinationRoot = Path.Join(configuredRoot, "Library ");
+            Directory.CreateDirectory(destinationRoot);
+            await _applicationSettingsRepository.SaveAsync(new ApplicationSettingsBuilder()
+                .WithOutputPath(configuredRoot)
+                .WithFileNamingPattern("{Author}/{Title}")
+                .Build());
+            var sourceBasePath = FileService.GetTempDirectory("bulk-unix-byte-source");
+            var sourceFilePath = Path.Join(sourceBasePath, "book.m4b");
+            await File.WriteAllTextAsync(sourceFilePath, "audio");
+            var audiobook = await _audiobookRepository.AddAsync(new Audiobook
+            {
+                Title = "Byte Book",
+                Authors = ["Byte Author"],
+                BasePath = sourceBasePath,
+                FilePath = sourceFilePath
+            });
+            await AddTrackedFileAsync(audiobook, sourceFilePath);
+
+            var actionResult = await _provider.GetRequiredService<LibraryController>()
+                .BulkUpdateAudiobooks(new LibraryController.BulkUpdateRequest
+                {
+                    Ids = [audiobook.Id],
+                    PathChange = new LibraryController.BulkPathChangeRequest
+                    {
+                        Mode = LibraryController.BulkPathChangeMode.Physical,
+                        DestinationRootOrPath = destinationRoot,
+                        DeleteEmptySource = false
+                    }
+                });
+
+            var ok = Assert.IsType<OkObjectResult>(actionResult);
+            var json = JsonSerializer.Serialize(ok.Value);
+            using var document = JsonDocument.Parse(json);
+            var result = Assert.Single(document.RootElement.GetProperty("results").EnumerateArray());
+            Assert.True(result.GetProperty("success").GetBoolean());
+            Assert.NotNull(captured);
+            var expectedTarget = Path.Join(destinationRoot, "Byte Author", "Byte Book");
+            Assert.Equal(expectedTarget, captured.TargetPath);
+            Assert.Contains($"{Path.DirectorySeparatorChar}Library {Path.DirectorySeparatorChar}", captured.TargetPath);
+            Assert.Equal(expectedTarget, result.GetProperty("resolvedDestination").GetString());
+        }
+
         [Fact]
         public async Task BulkUpdate_PhysicalPathChange_WithoutMetadata_EnqueuesAndReportsNoMetadataUpdate()
         {
@@ -573,6 +629,17 @@ namespace Listenarr.Tests.Features.Api.Features.Library
             using var scope = _provider.CreateScope();
             var repository = scope.ServiceProvider.GetRequiredService<IAudiobookRepository>();
             return await repository.GetByIdAsync(id);
+        }
+    }
+
+    public sealed class LinuxFactAttribute : FactAttribute
+    {
+        public LinuxFactAttribute()
+        {
+            if (!OperatingSystem.IsLinux())
+            {
+                Skip = "This test requires Linux filesystem path semantics.";
+            }
         }
     }
 }

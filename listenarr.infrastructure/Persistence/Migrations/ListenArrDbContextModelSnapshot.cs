@@ -681,6 +681,198 @@ namespace Listenarr.Infrastructure.Persistence.Migrations
                     b.ToTable("LibraryDirectoryOwnerships", (string)null);
                 });
 
+            modelBuilder.Entity("Listenarr.Domain.Audiobooks.LibraryDirectoryOwnershipPathMigration", b =>
+                {
+                    b.Property<long>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("INTEGER");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("OwnershipId")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<Guid>("RelocationId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("SourceCanonicalPath")
+                        .IsRequired()
+                        .HasMaxLength(4096)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("SourceCaseSensitivity")
+                        .IsRequired()
+                        .HasMaxLength(16)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("SourceCaseSensitivityMode")
+                        .IsRequired()
+                        .HasMaxLength(16)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("SourceIdentityBoundary")
+                        .IsRequired()
+                        .HasMaxLength(4096)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("SourceIdentityLookupKey")
+                        .IsRequired()
+                        .HasMaxLength(160)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("SourceOwnershipKey")
+                        .IsRequired()
+                        .HasMaxLength(160)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("SourcePathSyntax")
+                        .IsRequired()
+                        .HasMaxLength(16)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("State")
+                        .IsRequired()
+                        .HasMaxLength(24)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("TargetCanonicalPath")
+                        .IsRequired()
+                        .HasMaxLength(4096)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("TargetCaseSensitivity")
+                        .IsRequired()
+                        .HasMaxLength(16)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("TargetCaseSensitivityMode")
+                        .IsRequired()
+                        .HasMaxLength(16)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("TargetIdentityBoundary")
+                        .IsRequired()
+                        .HasMaxLength(4096)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("TargetIdentityLookupKey")
+                        .IsRequired()
+                        .HasMaxLength(160)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("TargetOwnershipKey")
+                        .IsRequired()
+                        .HasMaxLength(160)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("TargetPathSyntax")
+                        .IsRequired()
+                        .HasMaxLength(16)
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime>("UpdatedAt")
+                        .HasColumnType("TEXT");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("RelocationId");
+
+                    b.HasIndex("TargetOwnershipKey")
+                        .IsUnique();
+
+                    b.HasIndex("OwnershipId", "RelocationId")
+                        .IsUnique();
+
+                    b.ToTable("LibraryDirectoryOwnershipPathMigrations", (string)null);
+                });
+
+            modelBuilder.Entity("Listenarr.Domain.Audiobooks.LibraryDirectoryOwnershipRetiredMarker", b =>
+                {
+                    b.Property<long>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("CanonicalMarkerPath")
+                        .HasMaxLength(4096)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("CanonicalOwnershipPath")
+                        .IsRequired()
+                        .HasMaxLength(4096)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("CanonicalPayload")
+                        .HasMaxLength(16384)
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("DirectoryObjectIdentity")
+                        .HasMaxLength(256)
+                        .HasColumnType("TEXT");
+
+                    b.Property<int?>("DirectoryObjectIdentityVersion")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<int?>("OriginalManagedRootFolderId")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long>("OwnershipId")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("OwnershipToken")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("PathCaseSensitivity")
+                        .IsRequired()
+                        .HasMaxLength(16)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("PathCaseSensitivityMode")
+                        .IsRequired()
+                        .HasMaxLength(16)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("PathIdentityBoundary")
+                        .IsRequired()
+                        .HasMaxLength(4096)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("PathSyntax")
+                        .IsRequired()
+                        .HasMaxLength(16)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("PayloadSha256")
+                        .HasMaxLength(64)
+                        .HasColumnType("TEXT");
+
+                    b.Property<int>("PayloadVersion")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("State")
+                        .IsRequired()
+                        .HasMaxLength(16)
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime>("UpdatedAt")
+                        .HasColumnType("TEXT");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("CanonicalMarkerPath")
+                        .IsUnique();
+
+                    b.HasIndex("OwnershipId")
+                        .IsUnique();
+
+                    b.ToTable("LibraryDirectoryOwnershipRetiredMarkers", (string)null);
+                });
+
             modelBuilder.Entity("Listenarr.Domain.Audiobooks.MonitoredAuthor", b =>
                 {
                     b.Property<int>("Id")
@@ -1283,6 +1475,13 @@ namespace Listenarr.Infrastructure.Persistence.Migrations
                     b.Property<int?>("TargetDirectoryObjectIdentityVersion")
                         .HasColumnType("INTEGER");
 
+                    b.Property<string>("TargetIdentityEnrollmentState")
+                        .IsRequired()
+                        .ValueGeneratedOnAdd()
+                        .HasMaxLength(24)
+                        .HasColumnType("TEXT")
+                        .HasDefaultValue("Authorized");
+
                     b.Property<string>("TargetPath")
                         .IsRequired()
                         .HasMaxLength(1000)
@@ -1303,6 +1502,54 @@ namespace Listenarr.Infrastructure.Persistence.Migrations
                     b.HasIndex("RootFolderId");
 
                     b.ToTable("RootFolderRelocations", (string)null);
+                });
+
+            modelBuilder.Entity("Listenarr.Domain.Audiobooks.RootFolderRelocationCreatedDirectory", b =>
+                {
+                    b.Property<long>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("CanonicalPath")
+                        .IsRequired()
+                        .HasMaxLength(4096)
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("DirectoryObjectIdentity")
+                        .HasMaxLength(256)
+                        .HasColumnType("TEXT");
+
+                    b.Property<int?>("DirectoryObjectIdentityVersion")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("OwnershipToken")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid>("RelocationId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("State")
+                        .IsRequired()
+                        .HasMaxLength(16)
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime>("UpdatedAt")
+                        .HasColumnType("TEXT");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("OwnershipToken")
+                        .IsUnique();
+
+                    b.HasIndex("RelocationId", "CanonicalPath")
+                        .IsUnique();
+
+                    b.ToTable("RootFolderRelocationCreatedDirectories", (string)null);
                 });
 
             modelBuilder.Entity("Listenarr.Domain.Audiobooks.RootFolderRelocationSkippedItem", b =>
@@ -2068,6 +2315,44 @@ namespace Listenarr.Infrastructure.Persistence.Migrations
                     b.Navigation("Audiobook");
                 });
 
+            modelBuilder.Entity("Listenarr.Domain.Audiobooks.LibraryDirectoryOwnership", b =>
+                {
+                    b.HasOne("Listenarr.Domain.Audiobooks.RootFolder", null)
+                        .WithMany()
+                        .HasForeignKey("ManagedRootFolderId")
+                        .OnDelete(DeleteBehavior.SetNull);
+                });
+
+            modelBuilder.Entity("Listenarr.Domain.Audiobooks.LibraryDirectoryOwnershipPathMigration", b =>
+                {
+                    b.HasOne("Listenarr.Domain.Audiobooks.LibraryDirectoryOwnership", "Ownership")
+                        .WithMany("PathMigrations")
+                        .HasForeignKey("OwnershipId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("Listenarr.Domain.Audiobooks.RootFolderRelocation", "Relocation")
+                        .WithMany("OwnershipPathMigrations")
+                        .HasForeignKey("RelocationId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.Navigation("Ownership");
+
+                    b.Navigation("Relocation");
+                });
+
+            modelBuilder.Entity("Listenarr.Domain.Audiobooks.LibraryDirectoryOwnershipRetiredMarker", b =>
+                {
+                    b.HasOne("Listenarr.Domain.Audiobooks.LibraryDirectoryOwnership", "Ownership")
+                        .WithOne("RetiredMarker")
+                        .HasForeignKey("Listenarr.Domain.Audiobooks.LibraryDirectoryOwnershipRetiredMarker", "OwnershipId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Ownership");
+                });
+
             modelBuilder.Entity("Listenarr.Domain.Audiobooks.MoveJob", b =>
                 {
                     b.HasOne("Listenarr.Domain.Audiobooks.RootFolderRelocation", "Relocation")
@@ -2121,6 +2406,17 @@ namespace Listenarr.Infrastructure.Persistence.Migrations
                     b.Navigation("RootFolder");
                 });
 
+            modelBuilder.Entity("Listenarr.Domain.Audiobooks.RootFolderRelocationCreatedDirectory", b =>
+                {
+                    b.HasOne("Listenarr.Domain.Audiobooks.RootFolderRelocation", "Relocation")
+                        .WithMany("CreatedDirectories")
+                        .HasForeignKey("RelocationId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.Navigation("Relocation");
+                });
+
             modelBuilder.Entity("Listenarr.Domain.Audiobooks.RootFolderRelocationSkippedItem", b =>
                 {
                     b.HasOne("Listenarr.Domain.Audiobooks.RootFolderRelocation", "Relocation")
@@ -2141,6 +2437,13 @@ namespace Listenarr.Infrastructure.Persistence.Migrations
                     b.Navigation("SeriesMemberships");
                 });
 
+            modelBuilder.Entity("Listenarr.Domain.Audiobooks.LibraryDirectoryOwnership", b =>
+                {
+                    b.Navigation("PathMigrations");
+
+                    b.Navigation("RetiredMarker");
+                });
+
             modelBuilder.Entity("Listenarr.Domain.Audiobooks.MoveJob", b =>
                 {
                     b.Navigation("CreatedDirectories");
@@ -2157,7 +2460,11 @@ namespace Listenarr.Infrastructure.Persistence.Migrations
 
             modelBuilder.Entity("Listenarr.Domain.Audiobooks.RootFolderRelocation", b =>
                 {
+                    b.Navigation("CreatedDirectories");
+
                     b.Navigation("MoveJobs");
+
+                    b.Navigation("OwnershipPathMigrations");
 
                     b.Navigation("SkippedItems");
                 });

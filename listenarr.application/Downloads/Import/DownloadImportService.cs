@@ -49,7 +49,6 @@ namespace Listenarr.Application.Downloads.Import
             }
 
             var settings = await configurationService.GetApplicationSettingsAsync();
-            var importOperationId = Guid.NewGuid();
             var expectedBasePath = audiobook.BasePath;
             var destinationResolution = await ResolveDestinationResolutionAsync(
                 expectedBasePath,
@@ -172,7 +171,12 @@ namespace Listenarr.Application.Downloads.Import
                                         destination,
                                         destinationOwnershipBoundary,
                                         destinationSemantics,
-                                        importOperationId,
+                                        FileMoveOperationIdentity.Create(
+                                            "download-import",
+                                            audiobook.Id,
+                                            completedFileAction,
+                                            Path.GetFullPath(file),
+                                            Path.GetFullPath(destination)),
                                         audiobook.Id,
                                         ct))
                                 {
@@ -310,7 +314,12 @@ namespace Listenarr.Application.Downloads.Import
                                     destination,
                                     destinationOwnershipBoundary,
                                     destinationSemantics,
-                                    importOperationId,
+                                    FileMoveOperationIdentity.Create(
+                                        "download-import",
+                                        audiobook.Id,
+                                        completedFileAction,
+                                        Path.GetFullPath(file),
+                                        Path.GetFullPath(destination)),
                                     audiobook.Id,
                                     ct))
                             {

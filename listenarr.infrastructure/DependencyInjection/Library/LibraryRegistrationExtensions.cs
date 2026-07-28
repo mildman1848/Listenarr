@@ -55,6 +55,7 @@ internal static class LibraryRegistrationExtensions
     public static IServiceCollection AddLibraryInfrastructure(this IServiceCollection services)
     {
         services.AddScoped<IAudiobookRepository, AudiobookRepository>();
+        services.AddScoped<ILibraryAddCommitStore, EfLibraryAddCommitStore>();
         services.AddScoped<IQualityProfileRepository, QualityProfileRepository>();
         services.AddScoped<IAudiobookFileRepository, EfAudiobookFileRepository>();
         services.AddScoped<IMoveJobRepository, EfMoveJobRepository>();

@@ -16,6 +16,8 @@
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.Http;
+using Microsoft.Extensions.Logging.Abstractions;
 using Listenarr.Tests.Common;
 using Listenarr.Tests.Builders;
 
@@ -33,8 +35,14 @@ namespace Listenarr.Tests.Features.Api.Features.Library
 
         public override async Task InitializeAsync()
         {
-            imageCacheServiceMock.Setup(m => m.MoveToLibraryStorageAsync(It.IsAny<string>(), imageUrl1)).ReturnsAsync("config/cache/images/library/B000TEST01.jpg");
-            imageCacheServiceMock.Setup(m => m.MoveToLibraryStorageAsync(It.IsAny<string>(), imageUrl2)).ReturnsAsync("config/cache/images/library/derived.jpg");
+            imageCacheServiceMock
+                .Setup(m => m.MoveToLibraryStorageAsync("B000TEST01", null))
+                .ReturnsAsync("config/cache/images/library/B000TEST01.jpg");
+            imageCacheServiceMock
+                .Setup(m => m.MoveToLibraryStorageAsync(
+                    It.Is<string>(value => value.StartsWith("img-", StringComparison.Ordinal)),
+                    null))
+                .ReturnsAsync("config/cache/images/library/derived.jpg");
             destinationGuardMock
                 .Setup(guard => guard.GetBlockingReasonAsync(
                     It.IsAny<string>(),
@@ -43,7 +51,10 @@ namespace Listenarr.Tests.Features.Api.Features.Library
 
             Init(services => services
                 .WithSingleton(imageCacheServiceMock.Object)
-                .WithSingleton(destinationGuardMock.Object));
+                .WithSingleton(destinationGuardMock.Object)
+                .WithScoped<ILibraryAddCommitStore>(provider =>
+                    new InMemoryLibraryAddCommitStore(
+                        provider.GetRequiredService<ListenArrDbContext>())));
             await InitDataAsync();
         }
 
@@ -62,8 +73,23 @@ namespace Listenarr.Tests.Features.Api.Features.Library
                 .Build());
         }
 
+        private async Task ReinitializeAsync(Action<ServiceCollectionBuilder> configure)
+        {
+            Init(builder =>
+            {
+                builder
+                    .WithSingleton(imageCacheServiceMock.Object)
+                    .WithSingleton(destinationGuardMock.Object)
+                    .WithScoped<ILibraryAddCommitStore>(provider =>
+                        new InMemoryLibraryAddCommitStore(
+                            provider.GetRequiredService<ListenArrDbContext>()));
+                configure(builder);
+            });
+            await InitDataAsync();
+        }
+
         [Fact]
-        public async Task AddToLibrary_WaitsForGlobalFilesystemMutationAndNestedServiceCallIsReentrant()
+        public async Task AddToLibrary_FinalCommitWaitsForGlobalFilesystemMutation()
         {
             var coordinator = _provider.GetRequiredService<IFilesystemMutationCoordinator>();
             var lockEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -92,6 +118,165 @@ namespace Listenarr.Tests.Features.Api.Features.Library
             await blocker;
             Assert.IsType<OkObjectResult>(await addTask);
             Assert.Single(await _audiobookRepository.GetAllAsync());
+        }
+
+        [Fact]
+        public async Task AddToLibrary_BlockedAuthorLookupDoesNotBlockUnrelatedFilesystemMutation()
+        {
+            using var httpClient = new HttpClient();
+            var audible = new Mock<AudibleService>(
+                httpClient,
+                NullLogger<AudibleService>.Instance);
+            var lookupEntered = new TaskCompletionSource(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+            var releaseLookup = new TaskCompletionSource(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+            audible
+                .Setup(service => service.LookupAuthorAsync("Slow Author", "us"))
+                .Returns(async () =>
+                {
+                    lookupEntered.SetResult();
+                    await releaseLookup.Task;
+                    return null;
+                });
+            await ReinitializeAsync(builder =>
+                builder.WithSingleton<AudibleService>(audible.Object));
+
+            var addTask = _provider.GetRequiredService<LibraryController>().AddToLibrary(
+                new LibraryController.AddToLibraryRequest
+                {
+                    Metadata = new AudibleBookMetadata
+                    {
+                        Title = "Slow Enrichment",
+                        Authors = ["Slow Author"]
+                    },
+                    Monitored = true
+                });
+            await lookupEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+            var unrelatedMutationCompleted = false;
+            await _provider
+                .GetRequiredService<IFilesystemMutationCoordinator>()
+                .ExecuteExclusiveAsync(_ =>
+                {
+                    unrelatedMutationCompleted = true;
+                    return Task.CompletedTask;
+                })
+                .WaitAsync(TimeSpan.FromSeconds(5));
+
+            Assert.True(unrelatedMutationCompleted);
+            Assert.False(addTask.IsCompleted);
+            releaseLookup.SetResult();
+            Assert.IsType<OkObjectResult>(await addTask);
+        }
+
+        [Fact]
+        public async Task AddToLibrary_CancelledWhileWaitingForCommitGate_DoesNotPersist()
+        {
+            var coordinator = _provider.GetRequiredService<IFilesystemMutationCoordinator>();
+            var lockEntered = new TaskCompletionSource(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+            var releaseLock = new TaskCompletionSource(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+            var blocker = coordinator.ExecuteExclusiveAsync(async _ =>
+            {
+                lockEntered.SetResult();
+                await releaseLock.Task;
+            });
+            await lockEntered.Task;
+            using var cancellation = new CancellationTokenSource();
+
+            try
+            {
+                var addTask = _provider.GetRequiredService<LibraryController>().AddToLibrary(
+                    new LibraryController.AddToLibraryRequest
+                    {
+                        Metadata = new AudibleBookMetadata
+                        {
+                            Title = "Cancelled Commit",
+                            Authors = []
+                        },
+                        Monitored = true
+                    },
+                    cancellation.Token);
+                cancellation.Cancel();
+
+                await Assert.ThrowsAnyAsync<OperationCanceledException>(() => addTask);
+                Assert.Empty(await _audiobookRepository.GetAllAsync());
+            }
+            finally
+            {
+                releaseLock.TrySetResult();
+                await blocker;
+            }
+        }
+
+        [Fact]
+        public async Task AddToLibrary_PostCommitWebhookFailure_DoesNotFailCommittedAdd()
+        {
+            var notifications = new Mock<INotificationService>();
+            notifications
+                .Setup(service => service.SendNotificationAsync(
+                    It.IsAny<string>(),
+                    It.IsAny<object>(),
+                    It.IsAny<string>(),
+                    It.IsAny<List<string>>()))
+                .ThrowsAsync(new HttpRequestException("webhook unavailable"));
+            await ReinitializeAsync(builder =>
+                builder.WithSingleton<INotificationService>(notifications.Object));
+
+            var result = await _provider.GetRequiredService<LibraryController>().AddToLibrary(
+                new LibraryController.AddToLibraryRequest
+                {
+                    Metadata = new AudibleBookMetadata
+                    {
+                        Title = "Committed Despite Side Effects",
+                        Authors = []
+                    },
+                    Monitored = true
+                });
+
+            Assert.IsType<OkObjectResult>(result);
+            var audiobook = Assert.Single(await _audiobookRepository.GetAllAsync());
+            var history = Assert.Single(await _historyRepository.GetByAudiobookIdAsync(audiobook.Id));
+            Assert.Equal("Added", history.EventType);
+            Assert.Equal(audiobook.Id, history.AudiobookId);
+            notifications.Verify(
+                service => service.SendNotificationAsync(
+                    "book-added",
+                    It.IsAny<object>(),
+                    It.IsAny<string>(),
+                    It.IsAny<List<string>>()),
+                Times.Once);
+        }
+
+        [Fact]
+        public async Task AddToLibrary_AtomicCommitFailure_PersistsNeitherAudiobookNorHistory()
+        {
+            var commitStore = new Mock<ILibraryAddCommitStore>();
+            commitStore
+                .Setup(store => store.CommitAsync(
+                    It.IsAny<Audiobook>(),
+                    It.IsAny<History>(),
+                    It.IsAny<CancellationToken>()))
+                .ThrowsAsync(new InvalidOperationException("commit unavailable"));
+            await ReinitializeAsync(builder =>
+                builder.WithSingleton<ILibraryAddCommitStore>(commitStore.Object));
+
+            var controller = _provider.GetRequiredService<LibraryController>();
+            await Assert.ThrowsAsync<InvalidOperationException>(() =>
+                controller.AddToLibrary(new LibraryController.AddToLibraryRequest
+                {
+                    Metadata = new AudibleBookMetadata
+                    {
+                        Title = "Atomic Commit Failure",
+                        Authors = []
+                    },
+                    Monitored = true
+                }));
+
+            Assert.Empty(await _audiobookRepository.GetAllAsync());
+            Assert.Equal(0, await _historyRepository.CountAsync());
         }
 
         [Fact]
@@ -293,7 +478,8 @@ namespace Listenarr.Tests.Features.Api.Features.Library
             var stored = (await _audiobookRepository.GetAllAsync()).First();
             Assert.NotNull(stored);
             Assert.Equal($"/config/cache/images/library/B000TEST01.jpg", stored.ImageUrl);
-            imageCacheServiceMock.Verify(m => m.MoveToLibraryStorageAsync(asin, imageUrl1), Times.Once);
+            imageCacheServiceMock.Verify(m => m.DownloadAndCacheImageAsync(imageUrl1, asin), Times.Once);
+            imageCacheServiceMock.Verify(m => m.MoveToLibraryStorageAsync(asin, null), Times.Once);
         }
 
         [Fact]
@@ -324,7 +510,87 @@ namespace Listenarr.Tests.Features.Api.Features.Library
             var stored = (await _audiobookRepository.GetAllAsync()).First();
             Assert.NotNull(stored);
             Assert.Equal($"/config/cache/images/library/derived.jpg", stored.ImageUrl);
-            imageCacheServiceMock.Verify(m => m.MoveToLibraryStorageAsync(It.IsAny<string>(), imageUrl2), Times.Once);
+            imageCacheServiceMock.Verify(
+                m => m.DownloadAndCacheImageAsync(
+                    imageUrl2,
+                    It.Is<string>(value => value.StartsWith("img-", StringComparison.Ordinal))),
+                Times.Once);
+            imageCacheServiceMock.Verify(
+                m => m.MoveToLibraryStorageAsync(
+                    It.Is<string>(value => value.StartsWith("img-", StringComparison.Ordinal)),
+                    null),
+                Times.Once);
+        }
+
+        [Fact]
+        public async Task AddToLibrary_ImagePreparationFailure_UsesFallbackAndCommitsHistory()
+        {
+            const string asin = "B000FALLBACK";
+            const string imageUrl = "https://example.com/fallback.jpg";
+            imageCacheServiceMock
+                .Setup(service => service.DownloadAndCacheImageAsync(imageUrl, asin))
+                .ThrowsAsync(new HttpRequestException("image unavailable"));
+            imageCacheServiceMock
+                .Setup(service => service.MoveToLibraryStorageAsync(asin, null))
+                .ReturnsAsync((string?)null);
+
+            var result = await _provider.GetRequiredService<LibraryController>().AddToLibrary(
+                new LibraryController.AddToLibraryRequest
+                {
+                    Metadata = new AudibleBookMetadata
+                    {
+                        Title = "Fallback Image",
+                        Asin = asin,
+                        ImageUrl = imageUrl,
+                        Authors = []
+                    },
+                    Monitored = true
+                });
+
+            Assert.IsType<OkObjectResult>(result);
+            var audiobook = Assert.Single(await _audiobookRepository.GetAllAsync());
+            Assert.Equal(imageUrl, audiobook.ImageUrl);
+            Assert.Single(await _historyRepository.GetByAudiobookIdAsync(audiobook.Id));
+        }
+
+        [Fact]
+        public async Task AddToLibrary_InvalidDestination_DoesNotStartExternalPreparation()
+        {
+            using var httpClient = new HttpClient();
+            var audible = new Mock<AudibleService>(
+                httpClient,
+                NullLogger<AudibleService>.Instance);
+            await ReinitializeAsync(builder =>
+                builder.WithSingleton<AudibleService>(audible.Object));
+            imageCacheServiceMock.Invocations.Clear();
+            var outsideRoot = FileService.GetTempDirectory("outside-add-root");
+
+            var result = await _provider.GetRequiredService<LibraryController>().AddToLibrary(
+                new LibraryController.AddToLibraryRequest
+                {
+                    Metadata = new AudibleBookMetadata
+                    {
+                        Title = "Invalid Destination",
+                        Asin = "B000INVALID",
+                        ImageUrl = imageUrl1,
+                        Authors = ["External Author"]
+                    },
+                    DestinationPath = Path.Join(outsideRoot, "Book"),
+                    Monitored = true
+                });
+
+            var badRequest = Assert.IsType<BadRequestObjectResult>(result);
+            Assert.Equal(StatusCodes.Status400BadRequest, badRequest.StatusCode);
+            imageCacheServiceMock.Verify(
+                service => service.DownloadAndCacheImageAsync(
+                    It.IsAny<string>(),
+                    It.IsAny<string>()),
+                Times.Never);
+            audible.Verify(
+                service => service.LookupAuthorAsync(
+                    It.IsAny<string>(),
+                    It.IsAny<string>()),
+                Times.Never);
         }
 
         [Fact]
@@ -381,7 +647,10 @@ namespace Listenarr.Tests.Features.Api.Features.Library
 
             Assert.IsType<OkObjectResult>(result);
             var audiobook = Assert.Single(await _audiobookRepository.GetAllAsync());
-            Assert.Equal(FileUtils.NormalizeStoredPath(destination), audiobook.BasePath);
+            Assert.EndsWith(
+                Path.Join("Valid Author", "Valid Title"),
+                audiobook.BasePath,
+                StringComparison.OrdinalIgnoreCase);
         }
 
         [Fact]
@@ -416,7 +685,10 @@ namespace Listenarr.Tests.Features.Api.Features.Library
 
             Assert.IsType<OkObjectResult>(result);
             var audiobook = Assert.Single(await _audiobookRepository.GetAllAsync());
-            Assert.Equal(FileUtils.NormalizeStoredPath(destination), audiobook.BasePath);
+            Assert.EndsWith(
+                Path.Join("Fallback Author", "Fallback Title"),
+                audiobook.BasePath,
+                StringComparison.OrdinalIgnoreCase);
         }
 
         [Fact]
@@ -446,9 +718,10 @@ namespace Listenarr.Tests.Features.Api.Features.Library
                 "destination_path_outside_roots",
                 payloadRoot.GetProperty("code").GetString());
             Assert.Equal("destinationPath", payloadRoot.GetProperty("field").GetString());
-            Assert.Equal(
-                FileUtils.NormalizeStoredPath(customPath),
-                payloadRoot.GetProperty("resolvedDestination").GetString());
+            Assert.EndsWith(
+                Path.Join("Author", "Title"),
+                payloadRoot.GetProperty("resolvedDestination").GetString(),
+                StringComparison.OrdinalIgnoreCase);
             Assert.Empty(await _audiobookRepository.GetAllAsync());
         }
 
@@ -581,6 +854,22 @@ namespace Listenarr.Tests.Features.Api.Features.Library
             var badRequest = Assert.IsType<BadRequestObjectResult>(actionResult);
             Assert.Contains("DestinationPath", badRequest.Value.ToString(), StringComparison.OrdinalIgnoreCase);
             Assert.Empty(await _audiobookRepository.GetAllAsync());
+        }
+
+        private sealed class InMemoryLibraryAddCommitStore(ListenArrDbContext db)
+            : ILibraryAddCommitStore
+        {
+            public async Task CommitAsync(
+                Audiobook audiobook,
+                History history,
+                CancellationToken cancellationToken = default)
+            {
+                db.Audiobooks.Add(audiobook);
+                Assert.True(audiobook.Id > 0);
+                history.AudiobookId = audiobook.Id;
+                db.History.Add(history);
+                await db.SaveChangesAsync(cancellationToken);
+            }
         }
     }
 }

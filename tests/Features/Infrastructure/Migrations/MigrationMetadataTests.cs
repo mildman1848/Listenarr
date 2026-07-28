@@ -59,5 +59,36 @@ namespace Listenarr.Tests.Features.Infrastructure.Migrations
 
             Assert.Contains("'Queued', 'Processing', 'RetryScheduled'", sql, StringComparison.Ordinal);
         }
+
+        [Fact]
+        public void OwnershipRecoveryProtocols_DownBlocksAnyPathMigrationJournal()
+        {
+            var migration = new AddOwnershipRecoveryProtocols();
+            var builder = new MigrationBuilder(
+                "Microsoft.EntityFrameworkCore.Sqlite");
+            typeof(AddOwnershipRecoveryProtocols)
+                .GetMethod(
+                    "Down",
+                    BindingFlags.Instance | BindingFlags.NonPublic)!
+                .Invoke(migration, [builder]);
+
+            var sql = string.Join(
+                Environment.NewLine,
+                builder.Operations
+                    .OfType<SqlOperation>()
+                    .Select(operation => operation.Sql));
+
+            Assert.Contains(
+                "FROM \"LibraryDirectoryOwnershipPathMigrations\"",
+                sql,
+                StringComparison.Ordinal);
+            Assert.DoesNotContain(
+                """
+                FROM "LibraryDirectoryOwnershipPathMigrations"
+                        WHERE
+                """,
+                sql,
+                StringComparison.Ordinal);
+        }
     }
 }

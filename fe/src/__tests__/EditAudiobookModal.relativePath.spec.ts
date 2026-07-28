@@ -288,6 +288,39 @@ describe('EditAudiobookModal relative path calculation', () => {
     )
   })
 
+  it('preserves a trailing backslash in an explicit Unix custom destination', async () => {
+    vi.mocked(apiService.getRootFolders).mockResolvedValueOnce([
+      {
+        id: 8,
+        name: 'Unix root',
+        path: '/library',
+        pathSyntax: 'Unix',
+        isDefault: true,
+        resolvedCaseSensitivity: 'Sensitive',
+      },
+    ])
+    const wrapper = mount(EditAudiobookModal, {
+      props: {
+        isOpen: true,
+        audiobook: {
+          ...audiobook,
+          basePath: '/library/Author/Title',
+        },
+      },
+      attachTo: document.body,
+      global: {
+        plugins: [(await import('pinia')).createPinia()],
+      },
+    })
+
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    ;(wrapper.vm as unknown).selectedRootId = 0
+    ;(wrapper.vm as unknown).customRootPath = '/library/Book\\'
+    await nextTick()
+
+    expect((wrapper.vm as unknown).combinedBasePath()).toBe('/library/Book\\')
+  })
+
   it('preserves a user-typed relative path after Done and reopen', async () => {
     const wrapper = mount(EditAudiobookModal, {
       props: {

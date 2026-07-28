@@ -169,7 +169,13 @@ public partial class RenameService
                     var moved = await _fileMover.PerformActionOn(
                         FileAction.Move,
                         rollbackSource,
-                        rollbackDestination);
+                        rollbackDestination,
+                        FileMoveOperationIdentity.Create(
+                            "audiobook-file-rename-rollback",
+                            audiobook.Id,
+                            item.FileId,
+                            rollbackSource,
+                            rollbackDestination));
                     if (!moved)
                     {
                         rollbackSucceeded = false;

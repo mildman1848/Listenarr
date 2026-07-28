@@ -111,18 +111,27 @@
         <div v-if="showResults" class="results-section">
           <h4>Bulk Update Results</h4>
           <p>
-            {{ results.filter((r) => r.success).length }} succeeded,
-            {{ results.filter((r) => !r.success).length }} failed
+            {{ successfulResults.length }} succeeded, {{ partialResults.length }} partially
+            succeeded, {{ failedResults.length }} failed
           </p>
 
           <div class="results-list">
             <div v-for="res in results" :key="res.id" class="result-item">
               <div class="result-header">
                 <strong>Audiobook ID {{ res.id }}</strong>
-                <span class="status" :class="{ success: res.success, error: !res.success }">{{
-                  res.success ? 'Success' : 'Failed'
-                }}</span>
+                <span
+                  class="status"
+                  :class="{
+                    success: res.success,
+                    partial: isPartialResult(res),
+                    error: !res.success && !isPartialResult(res),
+                  }"
+                  >{{ resultStatusLabel(res) }}</span
+                >
               </div>
+              <p v-if="isPartialResult(res)" class="partial-message">
+                {{ partialResultMessage(res) }}
+              </p>
               <ul v-if="res.errors && res.errors.length > 0" class="error-list">
                 <li v-for="(err, idx) in res.errors" :key="idx">{{ err }}</li>
               </ul>
@@ -168,7 +177,7 @@ import { Modal, ModalBody, ModalHeader } from '@/components/feedback'
 import MoveAudiobookModal from '@/components/feedback/MoveAudiobookModal.vue'
 import { apiService } from '@/services/api'
 import { useMoveJobsStore } from '@/stores/moveJobs'
-import { executeBulkEdit } from '@/utils/bulkEditOrchestration'
+import { executeBulkEdit, type BulkEditItemResult } from '@/utils/bulkEditOrchestration'
 import { buildApiPath } from '@/services/apiBase'
 import { useToast } from '@/services/toastService'
 import type { QualityProfile } from '@/types'
@@ -204,7 +213,7 @@ const saving = ref(false)
 
 // Root change helper values
 const defaultOutputPath = ref<string | null>(null)
-const results = ref<Array<{ id: number; success: boolean; errors: string[] }>>([])
+const results = ref<BulkEditItemResult[]>([])
 const showResults = ref(false)
 const bulkUpdateEndpoint = buildApiPath('/library/bulk-update')
 
@@ -227,7 +236,10 @@ const formData = ref<FormData>({
 
 const resolvedRootPath = computed(() => {
   if (!formData.value.rootChangeEnabled) return null
-  if (formData.value.rootId === 0) return formData.value.rootCustomPath?.trim() || null
+  if (formData.value.rootId === 0) {
+    const customPath = formData.value.rootCustomPath
+    return customPath && customPath.trim().length > 0 ? customPath : null
+  }
   if (formData.value.rootId && formData.value.rootId > 0) {
     return rootStore.folders.find((folder) => folder.id === formData.value.rootId)?.path ?? null
   }
@@ -245,6 +257,11 @@ const hasChanges = computed(() => {
 })
 
 const toast = useToast()
+const successfulResults = computed(() => results.value.filter((result) => result.success))
+const partialResults = computed(() => results.value.filter(isPartialResult))
+const failedResults = computed(() =>
+  results.value.filter((result) => !result.success && !isPartialResult(result)),
+)
 
 watch(
   () => props.isOpen,
@@ -397,12 +414,13 @@ async function handleSave() {
 
     results.value = outcome.results
     showResults.value = true
-    const successCount = results.value.filter((result) => result.success).length
-    const failureCount = results.value.length - successCount
-    if (failureCount > 0) {
+    const successCount = successfulResults.value.length
+    const partialCount = partialResults.value.length
+    const failureCount = failedResults.value.length
+    if (partialCount > 0 || failureCount > 0) {
       toast.error(
         'Bulk update incomplete',
-        `${successCount} succeeded and ${failureCount} failed. Review the per-audiobook results.`,
+        `${successCount} succeeded, ${partialCount} partially succeeded, and ${failureCount} failed. Review the per-audiobook results.`,
       )
       return
     }
@@ -450,6 +468,26 @@ async function handleSave() {
     toast.error('Bulk update failed', message)
   } finally {
     saving.value = false
+  }
+}
+
+function isPartialResult(result: BulkEditItemResult): boolean {
+  return !result.success && result.metadataUpdated === true
+}
+
+function resultStatusLabel(result: BulkEditItemResult): 'Success' | 'Partial' | 'Failed' {
+  if (result.success) return 'Success'
+  return isPartialResult(result) ? 'Partial' : 'Failed'
+}
+
+function partialResultMessage(result: BulkEditItemResult): string {
+  switch (result.pathChangeOutcome) {
+    case 'failed':
+      return 'Metadata saved; the requested path change failed.'
+    case 'not-enqueued':
+      return 'Metadata saved; the requested move was not queued.'
+    default:
+      return 'Metadata saved; the requested path change did not complete.'
   }
 }
 
@@ -564,6 +602,15 @@ function close() {
 
 .status.error {
   color: #f44336;
+}
+
+.status.partial,
+.partial-message {
+  color: #ffb74d;
+}
+
+.partial-message {
+  margin: 0.5rem 0 0;
 }
 
 .error-list {

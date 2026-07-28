@@ -274,6 +274,12 @@ public sealed partial class RootFolderRelocationService
             await ClearOtherDefaultsAsync(db, root.Id, cancellationToken);
         }
 
+        await FinalizeRelocationTargetReservationsAsync(
+            db,
+            relocation.Id,
+            cancellationToken);
+        relocation.TargetIdentityEnrollmentState =
+            TargetIdentityEnrollmentState.NotRequired;
         relocation.Status = RootFolderRelocationStatus.Completed;
         relocation.ActiveRootFolderId = null;
         relocation.CompletedAt = now;
@@ -416,7 +422,8 @@ public sealed partial class RootFolderRelocationService
         relocation.Status,
         relocation.TotalJobs,
         relocation.CompletedJobs,
-        relocation.Error);
+        relocation.Error,
+        relocation.TargetIdentityEnrollmentState);
 
     private async Task BroadcastAsync(
         RootFolderPathChangeResult result,

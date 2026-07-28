@@ -606,7 +606,11 @@ namespace Listenarr.Tests.Features.Application.Audiobooks.Renaming
 
             var (service, db, dbName) = BuildService(settings, fileMover =>
             {
-                fileMover.Setup(mover => mover.PerformActionOn(FileAction.Move, It.IsAny<string>(), It.Is<string>(dest => dest.EndsWith("Part 2.m4b", StringComparison.OrdinalIgnoreCase))))
+                fileMover.Setup(mover => mover.PerformActionOn(
+                    FileAction.Move,
+                    It.IsAny<string>(),
+                    It.Is<string>(dest => dest.EndsWith("Part 2.m4b", StringComparison.OrdinalIgnoreCase)),
+                    It.IsAny<Guid?>()))
                     .ReturnsAsync(false);
             });
 
@@ -1000,8 +1004,9 @@ namespace Listenarr.Tests.Features.Application.Audiobooks.Renaming
                 fileMover => fileMover.Setup(mover => mover.PerformActionOn(
                         FileAction.Move,
                         It.IsAny<string>(),
-                        It.IsAny<string>()))
-                    .Returns<FileAction, string, string>((_, source, destination) =>
+                        It.IsAny<string>(),
+                        It.IsAny<Guid?>()))
+                    .Returns<FileAction, string, string, Guid?>((_, source, destination, _) =>
                     {
                         Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
                         File.Move(source, destination, overwrite: true);
@@ -1545,8 +1550,12 @@ namespace Listenarr.Tests.Features.Application.Audiobooks.Renaming
             var repo = new AudiobookRepository(db);
             var fileNaming = new FileNamingService(config.Object, NullLogger<FileNamingService>.Instance);
             var fileMover = new Mock<IFileMover>();
-            fileMover.Setup(mover => mover.PerformActionOn(FileAction.Move, It.IsAny<string>(), It.IsAny<string>()))
-                .Returns<FileAction, string, string>((action, source, dest) =>
+            fileMover.Setup(mover => mover.PerformActionOn(
+                    FileAction.Move,
+                    It.IsAny<string>(),
+                    It.IsAny<string>(),
+                    It.IsAny<Guid?>()))
+                .Returns<FileAction, string, string, Guid?>((action, source, dest, _) =>
                 {
                     var dir = Path.GetDirectoryName(dest);
                     if (!string.IsNullOrWhiteSpace(dir))

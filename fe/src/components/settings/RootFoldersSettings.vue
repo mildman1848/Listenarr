@@ -112,12 +112,21 @@
                 }}/{{ folder.activeRelocation.totalJobs }})
               </span>
               <button
-                v-if="folder.activeRelocation.status === 'NeedsAttention'"
+                v-if="canRetryRelocation(folder)"
                 type="button"
                 class="btn btn-secondary"
                 @click="retryRelocation(folder)"
               >
                 Retry
+              </button>
+              <button
+                v-if="canReauthorizeLegacyTarget(folder)"
+                type="button"
+                class="btn btn-secondary"
+                data-cy="reauthorize-relocation-target"
+                @click="confirmLegacyTargetReauthorization(folder)"
+              >
+                Reauthorize target
               </button>
               <p v-if="folder.activeRelocation.error">{{ folder.activeRelocation.error }}</p>
             </div>
@@ -150,6 +159,28 @@
         <p>This will only remove the reference and will not delete files from disk.</p>
       </template>
     </DeleteConfirmationModal>
+
+    <DeleteConfirmationModal
+      :visible="relocationToReauthorize !== null"
+      title="Reauthorize relocation target"
+      confirm-text="Reauthorize target"
+      @close="relocationToReauthorize = null"
+      @confirm="executeLegacyTargetReauthorization"
+    >
+      <template #confirm-icon><PhShieldCheck /></template>
+      <template #default>
+        <p>
+          Confirm that this is the exact target directory you intend to authorize for the pending
+          relocation:
+        </p>
+        <p>
+          <code class="reauthorization-target-path" data-testid="reauthorization-target-path">{{
+            relocationToReauthorize?.targetPath
+          }}</code>
+        </p>
+        <p>This authorization also retries the pending relocation.</p>
+      </template>
+    </DeleteConfirmationModal>
   </div>
 </template>
 
@@ -170,8 +201,9 @@ import {
   PhFolderOpen,
   PhStar,
   PhMagnifyingGlass,
+  PhShieldCheck,
 } from '@phosphor-icons/vue'
-import type { RootFolder } from '@/types'
+import type { RootFolder, RootFolderPathChangeResult } from '@/types'
 import { signalRService } from '@/services/signalr'
 
 interface Props {
@@ -190,6 +222,10 @@ const scanningFolder = ref<RootFolder | null>(null)
 import { computed } from 'vue'
 const editingRoot = computed(() => editing.value as RootFolder | undefined)
 const toast = useToast()
+const relocationToReauthorize = ref<{
+  relocationId: string
+  targetPath: string
+} | null>(null)
 
 onMounted(async () => {
   await store.load()
@@ -262,6 +298,57 @@ const retryRelocation = async (folder: RootFolder) => {
     toast.success('Root relocation', 'Relocation queued for retry')
   } catch (e: unknown) {
     toast.error('Retry failed', (e as Error)?.message || 'Failed to retry relocation')
+  }
+}
+
+function canRetryRelocation(folder: RootFolder): boolean {
+  const relocation = folder.activeRelocation
+  return (
+    relocation?.status === 'NeedsAttention' &&
+    (relocation.targetIdentityEnrollmentState === 'Authorized' ||
+      relocation.targetIdentityEnrollmentState === 'NotRequired')
+  )
+}
+
+function canReauthorizeLegacyTarget(folder: RootFolder): boolean {
+  return (
+    folder.activeRelocation?.status === 'NeedsAttention' &&
+    folder.activeRelocation.targetIdentityEnrollmentState === 'LegacyUnenrolled'
+  )
+}
+
+function confirmLegacyTargetReauthorization(folder: RootFolder) {
+  const relocation = folder.activeRelocation
+  if (!relocation?.relocationId || !canReauthorizeLegacyTarget(folder)) {
+    return
+  }
+
+  relocationToReauthorize.value = {
+    relocationId: relocation.relocationId,
+    targetPath: relocation.targetPath,
+  }
+}
+
+async function executeLegacyTargetReauthorization() {
+  const confirmation = relocationToReauthorize.value
+  if (!confirmation) return
+  relocationToReauthorize.value = null
+  try {
+    const result: RootFolderPathChangeResult = await store.reauthorizeLegacyTarget(
+      confirmation.relocationId,
+      confirmation.targetPath,
+    )
+    toast.success(
+      'Root relocation',
+      result.status === 'Completed'
+        ? 'Target reauthorized and relocation completed'
+        : 'Target reauthorized and relocation retry started',
+    )
+  } catch (e: unknown) {
+    toast.error(
+      'Reauthorization failed',
+      (e as Error)?.message || 'Failed to reauthorize relocation target',
+    )
   }
 }
 
@@ -457,6 +544,11 @@ defineExpose({
   font-family: monospace;
   word-break: break-all;
   color: #4dabf7;
+}
+
+.reauthorization-target-path {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 .folder-actions {

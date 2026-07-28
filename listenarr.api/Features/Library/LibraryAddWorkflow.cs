@@ -58,43 +58,50 @@ namespace Listenarr.Api.Features.Library
             _libraryAddService = libraryAddService;
         }
 
-        public Task<IActionResult> AddAsync(LibraryController.AddToLibraryRequest request) =>
-            _mutationCoordinator.ExecuteExclusiveAsync(
-                _ => AddCoreAsync(request));
+        public Task<IActionResult> AddAsync(
+            LibraryController.AddToLibraryRequest request,
+            CancellationToken cancellationToken = default) =>
+            _libraryAddService != null
+                ? AddWithServiceAsync(request, cancellationToken)
+                : _mutationCoordinator.ExecuteExclusiveAsync(
+                    _ => AddCoreAsync(request),
+                    cancellationToken);
+
+        private async Task<IActionResult> AddWithServiceAsync(
+            LibraryController.AddToLibraryRequest request,
+            CancellationToken cancellationToken)
+        {
+            var result = await _libraryAddService!.AddToLibraryAsync(new LibraryAddOperationRequest
+            {
+                Metadata = request.Metadata,
+                Monitored = request.Monitored,
+                QualityProfileId = request.QualityProfileId,
+                AutoSearch = request.AutoSearch,
+                DestinationPath = request.DestinationPath,
+                SearchResult = request.SearchResult,
+                HistorySource = "AddNew",
+                HistoryMessage = $"Audiobook '{request.Metadata.Title}' added to library from Add New page"
+            }, cancellationToken);
+
+            if (result.ValidationFailed)
+            {
+                return DestinationValidationResult(
+                    result.ValidationCode ?? "destination_path_invalid",
+                    result.ValidationMessage ?? result.Message,
+                    result.ResolvedDestination,
+                    result.ValidationField ?? "destinationPath");
+            }
+
+            if (result.AlreadyExists)
+            {
+                return new ConflictObjectResult(new { message = result.Message, audiobook = result.Audiobook });
+            }
+
+            return new OkObjectResult(new { message = result.Message, audiobook = result.Audiobook });
+        }
 
         private async Task<IActionResult> AddCoreAsync(LibraryController.AddToLibraryRequest request)
         {
-            if (_libraryAddService != null)
-            {
-                var result = await _libraryAddService.AddToLibraryAsync(new LibraryAddOperationRequest
-                {
-                    Metadata = request.Metadata,
-                    Monitored = request.Monitored,
-                    QualityProfileId = request.QualityProfileId,
-                    AutoSearch = request.AutoSearch,
-                    DestinationPath = request.DestinationPath,
-                    SearchResult = request.SearchResult,
-                    HistorySource = "AddNew",
-                    HistoryMessage = $"Audiobook '{request.Metadata.Title}' added to library from Add New page"
-                });
-
-                if (result.ValidationFailed)
-                {
-                    return DestinationValidationResult(
-                        result.ValidationCode ?? "destination_path_invalid",
-                        result.ValidationMessage ?? result.Message,
-                        result.ResolvedDestination,
-                        result.ValidationField ?? "destinationPath");
-                }
-
-                if (result.AlreadyExists)
-                {
-                    return new ConflictObjectResult(new { message = result.Message, audiobook = result.Audiobook });
-                }
-
-                return new OkObjectResult(new { message = result.Message, audiobook = result.Audiobook });
-            }
-
             var metadata = request.Metadata;
 
             _logger.LogInformation("AddToLibrary received metadata: Title={Title}, Asin={Asin}, PublishYear={PublishYear}, Authors={Authors}, Series={Series}",

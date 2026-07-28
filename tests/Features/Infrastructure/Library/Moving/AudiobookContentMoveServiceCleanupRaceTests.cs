@@ -277,6 +277,37 @@ public partial class AudiobookContentMoveServiceTests
         }
     }
 
+    [Fact]
+    public async Task MoveContentsAsync_TargetBytesChangeAtFinalRemoval_PreservesQuarantine()
+    {
+        var source = FileService.GetTempDirectory("content-move-target-final-race-src");
+        await FileService.GetFileAsync(source, "book.m4b", "verified audio");
+        var target = Path.Join(
+            FileService.GetTempPath(),
+            $"content-move-target-final-race-dst-{Guid.NewGuid():N}");
+        var request = await CreateLeasedMoveRequestAsync(source, target);
+        var injector = new ReplaceTargetBytesBeforeQuarantineRemoval(
+            Path.Join(target, "book.m4b"));
+        var service = new AudiobookContentMoveService(
+            _provider.GetRequiredService<ILogger<AudiobookContentMoveService>>(),
+            _provider.GetRequiredService<IDbContextFactory<ListenArrDbContext>>(),
+            TimeProvider.System,
+            injector);
+
+        await Assert.ThrowsAsync<MoveNeedsAttentionException>(() =>
+            service.MoveContentsAsync(request, CancellationToken.None));
+
+        var quarantineRoot = Path.Join(
+            Path.GetDirectoryName(source)!,
+            $".listenarr-quarantine-{request.JobId:N}");
+        Assert.Equal(
+            "verified audio",
+            await File.ReadAllTextAsync(Path.Join(quarantineRoot, "book.m4b")));
+        Assert.Equal(
+            "tampered audio",
+            await File.ReadAllTextAsync(Path.Join(target, "book.m4b")));
+    }
+
     private sealed class ReplaceNestedSourceParentAfterRevalidation(
         string nestedSource,
         string nestedSourceBackup,
@@ -366,6 +397,26 @@ public partial class AudiobookContentMoveServiceTests
 
             File.Delete(targetFile);
             File.CreateSymbolicLink(targetFile, externalFile);
+            _replaced = true;
+        }
+    }
+
+    private sealed class ReplaceTargetBytesBeforeQuarantineRemoval(
+        string targetFile) : IMoveFaultInjector
+    {
+        private bool _replaced;
+
+        public void OnSourceCleanupMutation(
+            Guid jobId,
+            SourceCleanupFaultPoint faultPoint)
+        {
+            if (_replaced
+                || faultPoint != SourceCleanupFaultPoint.BeforeQuarantineFileRemoval)
+            {
+                return;
+            }
+
+            File.WriteAllText(targetFile, "tampered audio");
             _replaced = true;
         }
     }

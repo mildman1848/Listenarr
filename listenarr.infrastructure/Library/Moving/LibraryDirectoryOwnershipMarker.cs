@@ -77,6 +77,7 @@ internal static class LibraryDirectoryOwnershipMarker
 
         ValidateMarkerFile(ownership, marker);
         marker.Delete();
+        parent.FlushDirectoryEntry();
     }
 
     public static void Validate(
@@ -95,6 +96,35 @@ internal static class LibraryDirectoryOwnershipMarker
         {
             throw new InvalidOperationException(
                 "The durable directory ownership marker could not be pinned.",
+                exception);
+        }
+    }
+
+    public static void ValidateSiblingMarker(
+        LibraryDirectoryOwnership ownership,
+        PinnedDirectoryCreation.PinnedDirectoryAnchor parent)
+    {
+        try
+        {
+            using var sibling = parent.OpenExistingFile(
+                Path.GetFileName(GetSiblingPath(ownership)),
+                requireDeleteAccess: false);
+            ValidateMarkerFile(ownership, sibling);
+            if (!parent.VisiblePathMatches() || !sibling.VisiblePathMatches())
+            {
+                throw new InvalidOperationException(
+                    "The durable ownership sibling marker changed during validation.");
+            }
+
+            ValidateMarkerFile(ownership, sibling);
+        }
+        catch (Exception exception) when (exception is
+            IOException or UnauthorizedAccessException
+                or System.ComponentModel.Win32Exception
+                or NotSupportedException)
+        {
+            throw new InvalidOperationException(
+                "The durable directory ownership sibling marker could not be pinned.",
                 exception);
         }
     }
@@ -380,15 +410,17 @@ internal static class LibraryDirectoryOwnershipMarker
     }
 
     internal static string SerializePayload(LibraryDirectoryOwnership ownership) =>
-        JsonSerializer.Serialize(
+        SerializePayload(
             new MarkerPayload(
                 Version,
                 ownership.OwnershipToken,
                 ownership.CanonicalPath,
                 ownership.ManagedRootFolderId,
                 ownership.DirectoryObjectIdentityVersion,
-                ownership.DirectoryObjectIdentity),
-            JsonOptions);
+                ownership.DirectoryObjectIdentity));
+
+    internal static string SerializePayload(MarkerPayload payload) =>
+        JsonSerializer.Serialize(payload, JsonOptions);
 
     internal static MarkerPayload ReadPayload(
         PinnedDirectoryCreation.PinnedFileEntry markerEntry)

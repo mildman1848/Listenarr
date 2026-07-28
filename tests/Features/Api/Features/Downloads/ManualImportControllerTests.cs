@@ -318,7 +318,8 @@ namespace Listenarr.Tests.Features.Api.Features.Downloads
                 mover => mover.PerformActionOn(
                     It.IsAny<FileAction>(),
                     It.IsAny<string>(),
-                    It.IsAny<string>()),
+                    It.IsAny<string>(),
+                    It.IsAny<Guid?>()),
                 Times.Never);
             directoryOwnershipStore.VerifyAll();
         }
@@ -488,7 +489,8 @@ namespace Listenarr.Tests.Features.Api.Features.Downloads
                 mover => mover.PerformActionOn(
                     It.IsAny<FileAction>(),
                     It.IsAny<string>(),
-                    It.IsAny<string>()),
+                    It.IsAny<string>(),
+                    It.IsAny<Guid?>()),
                 Times.Never);
             audiobookFileService.VerifyAll();
         }
@@ -750,8 +752,9 @@ namespace Listenarr.Tests.Features.Api.Features.Downloads
             fileMover.Setup(mover => mover.PerformActionOn(
                     FileAction.Copy,
                     source,
-                    It.IsAny<string>()))
-                .Returns<FileAction, string, string?>((_, sourcePath, destination) =>
+                    It.IsAny<string>(),
+                    It.IsAny<Guid?>()))
+                .Returns<FileAction, string, string?, Guid?>((_, sourcePath, destination, _) =>
                 {
                     Assert.NotNull(destination);
                     Directory.CreateDirectory(Path.GetDirectoryName(destination!)!);
@@ -821,8 +824,12 @@ namespace Listenarr.Tests.Features.Api.Features.Downloads
             var attemptedDestinations = new List<string>();
             var callCount = 0;
             var fileMover = new Mock<IFileMover>();
-            fileMover.Setup(mover => mover.PerformActionOn(FileAction.Copy, It.IsAny<string>(), It.IsAny<string>()))
-                .Returns<FileAction, string, string?>((_, source, destination) =>
+            fileMover.Setup(mover => mover.PerformActionOn(
+                    FileAction.Copy,
+                    It.IsAny<string>(),
+                    It.IsAny<string>(),
+                    It.IsAny<Guid?>()))
+                .Returns<FileAction, string, string?, Guid?>((_, source, destination, _) =>
                 {
                     Assert.NotNull(destination);
                     attemptedDestinations.Add(destination!);

@@ -115,7 +115,13 @@ public partial class RenameService
                 var moved = await _fileMover.PerformActionOn(
                     FileAction.Move,
                     source,
-                    destination);
+                    destination,
+                    FileMoveOperationIdentity.Create(
+                        "audiobook-file-rename",
+                        audiobook.Id,
+                        fileOperation.FileId,
+                        source,
+                        destination));
                 if (!moved)
                 {
                     item.Error = "File move operation failed.";

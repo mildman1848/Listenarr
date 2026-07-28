@@ -419,6 +419,26 @@ public sealed class EfLibraryDirectoryOwnershipStoreTests : BaseTests
         var removing = Assert.IsType<LibraryDirectoryOwnership>(resolution.Ownership);
         Assert.Equal(LibraryDirectoryOwnershipState.Removing, removing.State);
         await restartedStore.MarkRemovedAsync(removing.Id, ownershipKey);
+        await using (var evidenceDb = await _factory.CreateDbContextAsync())
+        {
+            var retired = await evidenceDb.LibraryDirectoryOwnerships
+                .SingleAsync(candidate => candidate.Id == removing.Id);
+            var evidence = await evidenceDb
+                .LibraryDirectoryOwnershipRetiredMarkers
+                .SingleAsync(candidate =>
+                    candidate.OwnershipId == removing.Id);
+            Assert.Null(retired.ManagedRootFolderId);
+            Assert.Null(retired.PathOwnershipKey);
+            Assert.Equal(
+                LibraryDirectoryOwnershipRetiredMarkerState.Pending,
+                evidence.State);
+            Assert.False(string.IsNullOrWhiteSpace(
+                evidence.CanonicalPayload));
+            Assert.False(string.IsNullOrWhiteSpace(
+                evidence.PayloadSha256));
+            Assert.Equal(ownership.ManagedRootFolderId,
+                evidence.OriginalManagedRootFolderId);
+        }
         Assert.True(LibraryDirectoryOwnershipMarker.TryDeleteRetiredSiblingMarker(
             removing,
             out var markerDeleteReason), markerDeleteReason);
@@ -451,6 +471,8 @@ public sealed class EfLibraryDirectoryOwnershipStoreTests : BaseTests
         Directory.Delete(directory, recursive: false);
         await _store.MarkRemovedAsync(prior.Id, ownershipKey);
         Assert.True(File.Exists(retiredSiblingMarker));
+        await CreateOwnershipReconciler().ReconcileAsync();
+        Assert.False(File.Exists(retiredSiblingMarker));
         Directory.CreateDirectory(directory);
 
         var recreated = await _store.RecordCreatedAsync(
@@ -547,6 +569,40 @@ public sealed class EfLibraryDirectoryOwnershipStoreTests : BaseTests
 
         Assert.Contains("occupied by a file", exception.Message, StringComparison.OrdinalIgnoreCase);
         Assert.Equal("foreign file", await File.ReadAllTextAsync(quarantinePath));
+    }
+
+    [Fact]
+    public async Task RemovalPath_EmptyQuarantineAfterInsideMarkerRetirementCompletes()
+    {
+        var directory = Path.Join(_root, "InterruptedAfterMarkerRetirement");
+        Directory.CreateDirectory(directory);
+        var ownership = await _store.RecordCreatedAsync(
+            new LibraryDirectoryOwnershipClaim(
+                directory,
+                FileSystemPathSemantics.CurrentHostDefault,
+                "test"));
+        var ownershipKey = Assert.IsType<string>(ownership.PathOwnershipKey);
+        await _store.BeginRemovalAsync(ownership.Id, ownershipKey);
+        ownership.State = LibraryDirectoryOwnershipState.Removing;
+        var quarantinePath =
+            LibraryDirectoryOwnershipRemoval.GetQuarantinePath(ownership);
+        Directory.Move(directory, quarantinePath);
+        LibraryDirectoryOwnershipMarker.DeleteInsideMarker(
+            ownership,
+            quarantinePath);
+
+        LibraryDirectoryOwnershipRemoval.ValidateRecoverableState(ownership);
+        using var parent =
+            PinnedDirectoryCreation.OpenPinnedDirectoryNoFollow(_root);
+        var outcome = LibraryDirectoryOwnershipRemoval.RemoveEmptyDirectory(
+            ownership,
+            parent);
+
+        Assert.Equal(LibraryDirectoryRemovalOutcome.Removed, outcome);
+        Assert.False(Directory.Exists(quarantinePath));
+        Assert.True(
+            File.Exists(
+                LibraryDirectoryOwnershipMarker.GetMarkerPaths(ownership)[1]));
     }
 
     [Fact]
@@ -657,6 +713,236 @@ public sealed class EfLibraryDirectoryOwnershipStoreTests : BaseTests
         Assert.Equal(ownershipKey, persisted.PathOwnershipKey);
         LibraryDirectoryOwnershipRemoval.ValidateRecoverableState(persisted);
     }
+
+    [Fact]
+    public async Task Reconciler_LegacyMissingBothProofMarksOnlyDatabaseRowRemoved()
+    {
+        var fixture = await PrepareLegacyMissingBothAsync("LegacyMissingBoth");
+        var reconciler = CreateOwnershipReconciler();
+
+        await reconciler.ReconcileAsync();
+
+        await using var verification = await _factory.CreateDbContextAsync();
+        var persisted = await verification.LibraryDirectoryOwnerships
+            .SingleAsync(candidate => candidate.Id == fixture.Ownership.Id);
+        Assert.Equal(LibraryDirectoryOwnershipState.Removed, persisted.State);
+        Assert.Null(persisted.PathOwnershipKey);
+        Assert.True(File.Exists(fixture.SiblingMarkerPath));
+        Assert.False(Directory.Exists(fixture.DirectoryPath));
+        Assert.False(Directory.Exists(fixture.QuarantinePath));
+
+        await CreateOwnershipReconciler().ReconcileAsync();
+        Assert.False(File.Exists(fixture.SiblingMarkerPath));
+        var evidence = await verification
+            .LibraryDirectoryOwnershipRetiredMarkers
+            .SingleAsync(candidate =>
+                candidate.OwnershipId == fixture.Ownership.Id);
+        Assert.Equal(
+            LibraryDirectoryOwnershipRetiredMarkerState.Removed,
+            evidence.State);
+    }
+
+    [Fact]
+    public async Task Reconciler_LegacyMissingBothCorruptMarkerFailsClosed()
+    {
+        var fixture = await PrepareLegacyMissingBothAsync(
+            "LegacyMissingBothCorrupt");
+        File.SetAttributes(
+            fixture.SiblingMarkerPath,
+            FileAttributes.Normal);
+        await File.WriteAllTextAsync(fixture.SiblingMarkerPath, "{invalid");
+
+        await CreateOwnershipReconciler().ReconcileAsync();
+
+        await AssertLegacyRecoveryRejectedAsync(fixture);
+    }
+
+    [Fact]
+    public async Task Reconciler_LegacyMissingBothWrongTokenFailsClosed()
+    {
+        var fixture = await PrepareLegacyMissingBothAsync(
+            "LegacyMissingBothWrongToken");
+        File.SetAttributes(
+            fixture.SiblingMarkerPath,
+            FileAttributes.Normal);
+        await File.WriteAllTextAsync(
+            fixture.SiblingMarkerPath,
+            System.Text.Json.JsonSerializer.Serialize(
+                new LibraryDirectoryOwnershipMarker.MarkerPayload(
+                    1,
+                    Guid.NewGuid().ToString("N"),
+                    fixture.Ownership.CanonicalPath)));
+
+        await CreateOwnershipReconciler().ReconcileAsync();
+
+        await AssertLegacyRecoveryRejectedAsync(fixture);
+    }
+
+    [Fact]
+    public async Task Reconciler_PreUpgradeLegacyMissingBothWithoutV2IdentityMarksRemoved()
+    {
+        var fixture = await PrepareLegacyMissingBothAsync(
+            "LegacyMissingBothNoIdentity");
+        await using (var db = await _factory.CreateDbContextAsync())
+        {
+            var persisted = await db.LibraryDirectoryOwnerships
+                .SingleAsync(candidate =>
+                    candidate.Id == fixture.Ownership.Id);
+            persisted.ManagedRootFolderId = null;
+            persisted.DirectoryObjectIdentityVersion = null;
+            persisted.DirectoryObjectIdentity = null;
+            persisted.DirectoryObjectIdentityUnavailableReason = null;
+            await db.SaveChangesAsync();
+        }
+
+        await CreateOwnershipReconciler().ReconcileAsync();
+
+        await using var verification = await _factory.CreateDbContextAsync();
+        var recovered = await verification.LibraryDirectoryOwnerships
+            .SingleAsync(candidate =>
+                candidate.Id == fixture.Ownership.Id);
+        Assert.Equal(LibraryDirectoryOwnershipState.Removed, recovered.State);
+        Assert.Null(recovered.PathOwnershipKey);
+        Assert.True(File.Exists(fixture.SiblingMarkerPath));
+    }
+
+    [Fact]
+    public async Task Reconciler_LegacyMissingBothMixedUpgradeMarkersFailClosed()
+    {
+        var fixture = await PrepareLegacyMissingBothAsync(
+            "LegacyMissingBothMixed");
+        await File.WriteAllTextAsync(
+            fixture.SiblingMarkerPath + ".v2.tmp",
+            LibraryDirectoryOwnershipMarker.SerializePayload(
+                fixture.Ownership));
+
+        await CreateOwnershipReconciler().ReconcileAsync();
+
+        await AssertLegacyRecoveryRejectedAsync(fixture);
+    }
+
+    [Fact]
+    public async Task Reconciler_LegacyMissingBothReplacementDirectoryFailsClosed()
+    {
+        var fixture = await PrepareLegacyMissingBothAsync(
+            "LegacyMissingBothReplacement");
+        Directory.CreateDirectory(fixture.DirectoryPath);
+        await File.WriteAllTextAsync(
+            Path.Join(fixture.DirectoryPath, "foreign.txt"),
+            "user content");
+
+        await CreateOwnershipReconciler().ReconcileAsync();
+
+        await AssertLegacyRecoveryRejectedAsync(fixture);
+        Assert.Equal(
+            "user content",
+            await File.ReadAllTextAsync(
+                Path.Join(fixture.DirectoryPath, "foreign.txt")));
+    }
+
+    [Fact]
+    public async Task Reconciler_RetiredMarkerReplacementRemainsPending()
+    {
+        var directory = Path.Join(_root, "RetiredMarkerReplacement");
+        Directory.CreateDirectory(directory);
+        var ownership = await _store.RecordCreatedAsync(
+            new LibraryDirectoryOwnershipClaim(
+                directory,
+                FileSystemPathSemantics.CurrentHostDefault,
+                "test"));
+        var ownershipKey = Assert.IsType<string>(
+            ownership.PathOwnershipKey);
+        await _store.BeginRemovalAsync(ownership.Id, ownershipKey);
+        LibraryDirectoryOwnershipMarker.DeleteInsideMarker(
+            ownership,
+            directory);
+        Directory.Delete(directory);
+        await _store.MarkRemovedAsync(ownership.Id, ownershipKey);
+        var siblingMarkerPath =
+            LibraryDirectoryOwnershipMarker.GetMarkerPaths(ownership)[1];
+        File.SetAttributes(siblingMarkerPath, FileAttributes.Normal);
+        await File.WriteAllTextAsync(
+            siblingMarkerPath,
+            LibraryDirectoryOwnershipMarker.SerializePayload(
+                new LibraryDirectoryOwnershipMarker.MarkerPayload(
+                    LibraryDirectoryOwnershipMarker.Version,
+                    Guid.NewGuid().ToString("N"),
+                    ownership.CanonicalPath,
+                    ownership.ManagedRootFolderId,
+                    ownership.DirectoryObjectIdentityVersion,
+                    ownership.DirectoryObjectIdentity)));
+
+        await CreateOwnershipReconciler().ReconcileAsync();
+
+        Assert.True(File.Exists(siblingMarkerPath));
+        await using var verification = await _factory.CreateDbContextAsync();
+        var evidence = await verification
+            .LibraryDirectoryOwnershipRetiredMarkers
+            .SingleAsync(candidate =>
+                candidate.OwnershipId == ownership.Id);
+        Assert.Equal(
+            LibraryDirectoryOwnershipRetiredMarkerState.Pending,
+            evidence.State);
+    }
+
+    private LibraryDirectoryOwnershipReconciler CreateOwnershipReconciler() =>
+        new(
+            _factory,
+            new LibraryDirectoryOwnershipBoundaryAuthorizer(_factory),
+            new FilesystemMutationCoordinator(),
+            NullLogger<LibraryDirectoryOwnershipReconciler>.Instance);
+
+    private async Task<LegacyRemovalFixture> PrepareLegacyMissingBothAsync(
+        string directoryName)
+    {
+        var directory = Path.Join(_root, directoryName);
+        Directory.CreateDirectory(directory);
+        var ownership = await _store.RecordCreatedAsync(
+            new LibraryDirectoryOwnershipClaim(
+                directory,
+                FileSystemPathSemantics.CurrentHostDefault,
+                "test"));
+        var ownershipKey = Assert.IsType<string>(ownership.PathOwnershipKey);
+        await _store.BeginRemovalAsync(ownership.Id, ownershipKey);
+        LibraryDirectoryOwnershipMarker.DeleteInsideMarker(
+            ownership,
+            directory);
+        Directory.Delete(directory);
+        var siblingMarkerPath =
+            LibraryDirectoryOwnershipMarker.GetMarkerPaths(ownership)[1];
+        File.SetAttributes(siblingMarkerPath, FileAttributes.Normal);
+        await File.WriteAllTextAsync(
+            siblingMarkerPath,
+            System.Text.Json.JsonSerializer.Serialize(
+                new LibraryDirectoryOwnershipMarker.MarkerPayload(
+                    1,
+                    ownership.OwnershipToken,
+                    ownership.CanonicalPath)));
+        return new LegacyRemovalFixture(
+            ownership,
+            ownershipKey,
+            directory,
+            LibraryDirectoryOwnershipRemoval.GetQuarantinePath(ownership),
+            siblingMarkerPath);
+    }
+
+    private async Task AssertLegacyRecoveryRejectedAsync(
+        LegacyRemovalFixture fixture)
+    {
+        await using var verification = await _factory.CreateDbContextAsync();
+        var persisted = await verification.LibraryDirectoryOwnerships
+            .SingleAsync(candidate => candidate.Id == fixture.Ownership.Id);
+        Assert.Equal(LibraryDirectoryOwnershipState.Removing, persisted.State);
+        Assert.Equal(fixture.OwnershipKey, persisted.PathOwnershipKey);
+        Assert.False(string.IsNullOrWhiteSpace(persisted.StateReason));
+    }
+
+    private sealed record LegacyRemovalFixture(
+        LibraryDirectoryOwnership Ownership,
+        string OwnershipKey,
+        string DirectoryPath,
+        string QuarantinePath,
+        string SiblingMarkerPath);
 
     private sealed class FailFirstContextCreationFactory(
         IDbContextFactory<ListenArrDbContext> inner,

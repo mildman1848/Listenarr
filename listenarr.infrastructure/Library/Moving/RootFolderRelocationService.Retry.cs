@@ -12,11 +12,59 @@ public sealed partial class RootFolderRelocationService
     {
         var result = await _mutationCoordinator.ExecuteExclusiveAsync(
             token => ExecuteWithAllAudiobookLocksAsync(
-                lockedToken => RetryCoreAsync(relocationId, lockedToken),
+                lockedToken => RetryWithOwnershipRecoveryAsync(
+                    relocationId,
+                    lockedToken),
                 token),
             cancellationToken);
         await BroadcastAsync(result, cancellationToken);
         return result;
+    }
+
+    private async Task<RootFolderPathChangeResult>
+        RetryWithOwnershipRecoveryAsync(
+            Guid relocationId,
+            CancellationToken cancellationToken)
+    {
+        bool hasOwnershipMigration;
+        await using (var preflight =
+            await dbContextFactory.CreateDbContextAsync(cancellationToken))
+        {
+            var state = await preflight.RootFolderRelocations
+                .AsNoTracking()
+                .Where(candidate => candidate.Id == relocationId)
+                .Select(candidate => new
+                {
+                    candidate.Status,
+                    HasOwnershipMigration =
+                        candidate.OwnershipPathMigrations.Count != 0
+                })
+                .SingleOrDefaultAsync(cancellationToken)
+                ?? throw new KeyNotFoundException(
+                    "Root folder relocation not found");
+            if (state.Status !=
+                RootFolderRelocationStatus.NeedsAttention)
+            {
+                throw new InvalidOperationException(
+                    "Only relocations needing attention can be retried.");
+            }
+
+            hasOwnershipMigration = state.HasOwnershipMigration;
+        }
+
+        if (!hasOwnershipMigration)
+        {
+            return await RetryCoreAsync(
+                relocationId,
+                cancellationToken);
+        }
+
+        var recovered = await ReconcileOwnershipPathMigrationsAsync(
+            cancellationToken,
+            relocationId);
+        return recovered.SingleOrDefault()
+            ?? throw new InvalidOperationException(
+                "The ownership migration recovery journal disappeared before retry.");
     }
 
     private async Task<RootFolderPathChangeResult> RetryCoreAsync(
@@ -34,6 +82,18 @@ public sealed partial class RootFolderRelocationService
         if (relocation.Status != RootFolderRelocationStatus.NeedsAttention)
         {
             throw new InvalidOperationException("Only relocations needing attention can be retried.");
+        }
+        if (relocation.TargetIdentityEnrollmentState
+            == TargetIdentityEnrollmentState.LegacyUnenrolled)
+        {
+            throw new InvalidOperationException(
+                "The legacy relocation target must be explicitly reauthorized before retry.");
+        }
+        if (relocation.TargetIdentityEnrollmentState
+            == TargetIdentityEnrollmentState.Unavailable)
+        {
+            throw new InvalidOperationException(
+                "The relocation target identity is unavailable and cannot be retried safely.");
         }
 
         var now = timeProvider.GetUtcNow().UtcDateTime;
@@ -177,11 +237,41 @@ public sealed partial class RootFolderRelocationService
         }
         else if (relocation.MoveJobs.Count == 0)
         {
-            relocation.Status = RootFolderRelocationStatus.Completed;
-            relocation.ActiveRootFolderId = null;
+            if (relocation.TotalJobs > 0)
+            {
+                throw new InvalidOperationException(
+                    "The relocation was interrupted before its persisted move jobs were published and cannot be retried automatically.");
+            }
+            if (relocation.RootFolderId is not int emptyRootFolderId)
+            {
+                throw new InvalidOperationException(
+                    "The root folder no longer exists; this relocation cannot be retried.");
+            }
+            var emptyRoot = await db.RootFolders.SingleOrDefaultAsync(
+                candidate => candidate.Id == emptyRootFolderId,
+                cancellationToken)
+                ?? throw new InvalidOperationException(
+                    "The root folder no longer exists; this relocation cannot be retried.");
+            if (relocation.Mode == RootFolderRelocationMode.Relocate)
+            {
+                await FinalizeCompletedRelocationAsync(
+                    db,
+                    relocation,
+                    emptyRoot,
+                    now,
+                    cancellationToken);
+            }
+            else
+            {
+                relocation.Status =
+                    RootFolderRelocationStatus.Completed;
+                relocation.ActiveRootFolderId = null;
+                relocation.CompletedAt = now;
+                relocation.Error = null;
+            }
             relocation.CompletedJobs = relocation.TotalJobs;
-            relocation.CompletedAt = now;
-            relocation.Error = null;
+            relocation.TargetIdentityEnrollmentState =
+                TargetIdentityEnrollmentState.NotRequired;
         }
         else if (relocation.MoveJobs.All(job => job.Status == MoveJobStatus.Completed))
         {
@@ -214,6 +304,12 @@ public sealed partial class RootFolderRelocationService
         await db.SaveChangesAsync(cancellationToken);
         cancellationToken.ThrowIfCancellationRequested();
         await transaction.CommitAsync(CancellationToken.None);
+        if (relocation.Status == RootFolderRelocationStatus.Completed)
+        {
+            await RetireRetainedRelocationReservationMarkersAsync(
+                relocation.Id,
+                CancellationToken.None);
+        }
         var resultFallbackPath = ResolveCurrentPathFallback(relocation);
         string? rootPath = null;
         if (relocation.RootFolderId is int resultRootFolderId)

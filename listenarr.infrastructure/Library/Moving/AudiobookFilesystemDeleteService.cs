@@ -290,14 +290,37 @@ namespace Listenarr.Infrastructure.Library.Moving
                 return true;
             }
 
-            if (!FileSystemSafety.TryEnumerateTreeWithoutLinks(
-                folderPath,
-                out var files,
-                out var directories,
-                out var reason))
+            var ownershipMarkerPaths = deleteTarget.OwnedDirectories
+                .SelectMany(LibraryDirectoryOwnershipMarker.GetMarkerPaths)
+                .ToHashSet(deleteTarget.Semantics.Comparer);
+            var preflightIdentities = new Dictionary<string, string>(
+                deleteTarget.Semantics.Comparer);
+            if (!TryValidatePinnedDirectoryTree(
+                    targetAuthorization,
+                    targetAuthorization,
+                    preflightIdentities,
+                    out var reason))
             {
                 result.Warnings.Add(
-                    "Refused to recursively delete the audiobook folder because it contains a symbolic link or reparse point.");
+                    "Refused to recursively delete the audiobook folder because it contains a symbolic link or its captured filesystem generation changed.");
+                _logger.LogWarning(
+                    "Blocked recursive audiobook delete preflight for {FolderPath}: {Reason}",
+                    LogRedaction.SanitizeFilePath(folderPath),
+                    LogRedaction.SanitizeText(reason));
+                return false;
+            }
+
+            if (!TryDeletePinnedDirectoryContents(
+                    targetAuthorization,
+                    targetAuthorization,
+                    deleteTarget,
+                    ownershipMarkerPaths,
+                    preflightIdentities,
+                    result,
+                    out reason))
+            {
+                result.Warnings.Add(
+                    "Refused to continue recursively deleting the audiobook folder because its captured filesystem generation changed.");
                 _logger.LogWarning(
                     "Blocked recursive audiobook delete for {FolderPath}: {Reason}",
                     LogRedaction.SanitizeFilePath(folderPath),
@@ -305,50 +328,8 @@ namespace Listenarr.Infrastructure.Library.Moving
                 return false;
             }
 
-            var ownershipMarkerPaths = deleteTarget.OwnedDirectories
-                .SelectMany(LibraryDirectoryOwnershipMarker.GetMarkerPaths)
-                .ToHashSet(deleteTarget.Semantics.Comparer);
-            foreach (var filePath in files)
-            {
-                if (!targetAuthorization.VisiblePathMatches())
-                {
-                    result.Warnings.Add(
-                        "Refused to continue deleting audiobook contents because the authorized folder changed.");
-                    return false;
-                }
-                if (!ownershipMarkerPaths.Contains(filePath))
-                {
-                    TryDeleteFile(filePath, result, deleteTarget.AllowedMutationRoots);
-                }
-            }
-
-            foreach (var directoryPath in directories
-                .Where(path => !deleteTarget.OwnedDirectories.Any(ownership =>
-                    FileSystemPathIdentity.AreEquivalent(
-                        ownership.CanonicalPath,
-                        path,
-                        deleteTarget.Semantics)))
-                .OrderByDescending(path => path.Length))
-            {
-                if (!targetAuthorization.VisiblePathMatches())
-                {
-                    result.Warnings.Add(
-                        "Refused to continue deleting audiobook contents because the authorized folder changed.");
-                    return false;
-                }
-                if (!FileSystemSafety.TryDeleteEmptyDirectory(
-                        directoryPath,
-                        deleteTarget.AllowedMutationRoots,
-                        out var directoryReason))
-                {
-                    _logger.LogDebug(
-                        "Skipped nested audiobook directory delete for {FolderPath}: {Reason}",
-                        LogRedaction.SanitizeFilePath(directoryPath),
-                        LogRedaction.SanitizeText(directoryReason));
-                }
-            }
-
             return true;
         }
+
     }
 }

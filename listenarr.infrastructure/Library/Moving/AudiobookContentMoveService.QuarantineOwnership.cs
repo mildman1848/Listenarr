@@ -70,24 +70,28 @@ internal sealed partial class AudiobookContentMoveService
             }
             catch (InterruptedOwnershipPublicationException)
             {
-                await EnsureMutationAuthorizedAsync(
-                    jobId,
-                    leaseToken,
-                    source,
-                    target,
-                    sourceSemantics,
-                    targetSemantics,
-                    cancellationToken);
-                ValidateExistingMoveDirectory(
+                await RetirePinnedEmptyDirectoryAsync(
                     quarantineRoot,
-                    "interrupted quarantine directory");
-                if (Directory.EnumerateFileSystemEntries(quarantineRoot).Any())
-                {
-                    throw new MoveNeedsAttentionException(
-                        "An interrupted quarantine ownership publication left unexpected content.");
-                }
-
-                Directory.Delete(quarantineRoot, recursive: false);
+                    "interrupted quarantine directory",
+                    () =>
+                    {
+                        ValidateExistingMoveDirectory(
+                            quarantineRoot,
+                            "interrupted quarantine directory");
+                        if (Directory.EnumerateFileSystemEntries(quarantineRoot).Any())
+                        {
+                            throw new MoveNeedsAttentionException(
+                                "An interrupted quarantine ownership publication left unexpected content.");
+                        }
+                    },
+                    () => EnsureMutationAuthorizedAsync(
+                        jobId,
+                        leaseToken,
+                        source,
+                        target,
+                        sourceSemantics,
+                        targetSemantics,
+                        cancellationToken));
             }
         }
 

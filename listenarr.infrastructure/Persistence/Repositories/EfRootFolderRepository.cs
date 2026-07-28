@@ -60,10 +60,18 @@ namespace Listenarr.Infrastructure.Persistence.Repositories
         public async Task RemoveAsync(int id)
         {
             await using var ctx = await _dbFactory.CreateDbContextAsync();
+            await using var transaction = ctx.Database.IsRelational()
+                ? await ctx.Database.BeginTransactionAsync()
+                : null;
             var r = await ctx.RootFolders.FindAsync(id);
             if (r == null) return;
+            await EnsureNoNonRemovedDirectoryOwnershipAsync(ctx, id);
             ctx.RootFolders.Remove(r);
             await ctx.SaveChangesAsync();
+            if (transaction != null)
+            {
+                await transaction.CommitAsync();
+            }
         }
 
         public async Task UpdateAsync(RootFolder root)
@@ -125,6 +133,19 @@ namespace Listenarr.Infrastructure.Persistence.Repositories
                 .ToListAsync(ct);
         }
 
+        public async Task<bool> HasNonRemovedDirectoryOwnershipAsync(
+            int rootFolderId,
+            CancellationToken ct = default)
+        {
+            await using var ctx = await _dbFactory.CreateDbContextAsync(ct);
+            return await ctx.LibraryDirectoryOwnerships
+                .AsNoTracking()
+                .AnyAsync(
+                    ownership => ownership.ManagedRootFolderId == rootFolderId
+                        && ownership.State != LibraryDirectoryOwnershipState.Removed,
+                    ct);
+        }
+
         public async Task ReassignAudiobooksAndRemoveAsync(
             int sourceRootId,
             int targetRootId,
@@ -157,6 +178,8 @@ namespace Listenarr.Infrastructure.Persistence.Repositories
                 throw new InvalidOperationException(
                     "Root folder reassignment is blocked while a relocation is active.");
             }
+
+            await EnsureNoNonRemovedDirectoryOwnershipAsync(ctx, sourceRootId, ct);
 
             var activeMoveJobs = await ctx.MoveJobs
                 .AsNoTracking()
@@ -240,6 +263,23 @@ namespace Listenarr.Infrastructure.Persistence.Repositories
             if (transaction != null)
             {
                 await transaction.CommitAsync(ct);
+            }
+        }
+
+        private static async Task EnsureNoNonRemovedDirectoryOwnershipAsync(
+            ListenArrDbContext context,
+            int rootFolderId,
+            CancellationToken cancellationToken = default)
+        {
+            if (await context.LibraryDirectoryOwnerships
+                .AsNoTracking()
+                .AnyAsync(
+                    ownership => ownership.ManagedRootFolderId == rootFolderId
+                        && ownership.State != LibraryDirectoryOwnershipState.Removed,
+                    cancellationToken))
+            {
+                throw new InvalidOperationException(
+                    "Root folder deletion is blocked while durable directory ownership claims remain active.");
             }
         }
 

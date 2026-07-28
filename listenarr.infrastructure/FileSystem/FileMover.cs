@@ -122,6 +122,7 @@ namespace Listenarr.Infrastructure.FileSystem
             // Public directory pathnames cannot be bound to the directory object
             // across a managed Directory.Move call. Always use the verified
             // snapshot/copy/cleanup protocol below.
+            var forceVerifiedFallback = false;
             try
             {
                 BeforeDirectoryMoveAttemptForTest?.Invoke();
@@ -129,6 +130,7 @@ namespace Listenarr.Infrastructure.FileSystem
             catch (Exception exception) when (exception is not (
                 OperationCanceledException or OutOfMemoryException or StackOverflowException))
             {
+                forceVerifiedFallback = true;
                 _logger.LogDebug(
                     exception,
                     "The direct-directory-move test boundary requested the verified fallback.");
@@ -141,6 +143,17 @@ namespace Listenarr.Infrastructure.FileSystem
                     LogRedaction.SanitizeFilePath(sourceDir),
                     LogRedaction.SanitizeFilePath(destDir));
                 return false;
+            }
+
+            if (!forceVerifiedFallback)
+            {
+                var nativeMove = TryPinnedSameVolumeDirectoryMove(
+                    sourceDir,
+                    destDir);
+                if (nativeMove.HasValue)
+                {
+                    return nativeMove.Value;
+                }
             }
 
             if (!TryCaptureDirectoryCopySnapshot(
@@ -158,6 +171,16 @@ namespace Listenarr.Infrastructure.FileSystem
                 _logger.LogWarning(
                     "Blocked copy-and-delete directory fallback because a filesystem tree could not be traversed safely: {Reason}",
                     sourceTraversalReason);
+                return false;
+            }
+
+            if (!forceVerifiedFallback
+                && !CanCopyDirectoryAcrossVolumesWithoutFidelityLoss(copySnapshot))
+            {
+                _logger.LogWarning(
+                    "Blocked cross-volume directory move because hardlinks or extended metadata cannot be reproduced without fidelity loss: {Source} -> {Destination}",
+                    LogRedaction.SanitizeFilePath(sourceDir),
+                    LogRedaction.SanitizeFilePath(destDir));
                 return false;
             }
 

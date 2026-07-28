@@ -115,6 +115,88 @@ internal sealed partial class PinnedDirectoryCreation
             "Pinned directory identity is supported only on Windows, Linux, and macOS.");
     }
 
+    private static void FlushHandleToDisk(
+        SafeFileHandle handle,
+        string description)
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            if (!FlushFileBuffers(handle))
+            {
+                throw new PlatformNotSupportedException(
+                    $"The filesystem could not durably flush {description} (Windows error {Marshal.GetLastWin32Error()}).");
+            }
+            return;
+        }
+
+        if (OperatingSystem.IsMacOS())
+        {
+            const int fullFileSystemSync = 51;
+            if (FcntlGetPath(
+                    handle.DangerousGetHandle().ToInt32(),
+                    fullFileSystemSync,
+                    IntPtr.Zero) != 0)
+            {
+                throw new PlatformNotSupportedException(
+                    $"The filesystem could not provide a full durable flush for {description} (errno {Marshal.GetLastWin32Error()}).");
+            }
+            return;
+        }
+        if (OperatingSystem.IsLinux())
+        {
+            while (FSync(handle.DangerousGetHandle().ToInt32()) != 0)
+            {
+                var error = Marshal.GetLastWin32Error();
+                if (error == 4)
+                {
+                    continue;
+                }
+                throw new PlatformNotSupportedException(
+                    $"The filesystem could not durably flush {description} (errno {error}).");
+            }
+            return;
+        }
+
+        throw new PlatformNotSupportedException(
+            "Durable filesystem barriers are supported only on Windows, Linux, and macOS.");
+    }
+
+    private static void FlushDirectoryPathToDisk(
+        SafeFileHandle pinnedHandle,
+        string path)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            FlushHandleToDisk(pinnedHandle, $"directory '{path}'");
+            return;
+        }
+
+        using var flushHandle = CreateFileWindows(
+            path,
+            GenericRead | GenericWrite | Synchronize,
+            FileShareAll,
+            IntPtr.Zero,
+            OpenExisting,
+            FileFlagBackupSemantics | FileFlagOpenReparsePoint,
+            IntPtr.Zero);
+        if (flushHandle.IsInvalid)
+        {
+            throw new PlatformNotSupportedException(
+                $"The filesystem could not open a durable directory barrier for '{path}' (Windows error {Marshal.GetLastWin32Error()}).");
+        }
+        EnsureWindowsParentIsNotReparsePoint(flushHandle, path);
+        if (!HandlesIdentifySameDirectory(pinnedHandle, flushHandle))
+        {
+            throw new InvalidOperationException(
+                "The directory changed while its durability barrier was opened.");
+        }
+        if (!FlushFileBuffers(flushHandle))
+        {
+            throw new PlatformNotSupportedException(
+                $"The filesystem could not durably flush directory '{path}' (Windows error {Marshal.GetLastWin32Error()}).");
+        }
+    }
+
     private static string GetDirectoryObjectIdentity(SafeFileHandle handle)
     {
         if (OperatingSystem.IsWindows())
@@ -189,182 +271,119 @@ internal sealed partial class PinnedDirectoryCreation
             information.FileId.HighPart);
     }
 
-    private static LinuxFileIdentity GetLinuxIdentity(SafeFileHandle handle)
+    private static uint GetHandleLinkCount(SafeFileHandle handle)
     {
-        if (Statx(
-                handle.DangerousGetHandle().ToInt32(),
-                string.Empty,
-                0x1000,
-                0x00000100 | 0x00001000,
-                out var information) != 0)
+        if (OperatingSystem.IsWindows())
         {
-            throw new Win32Exception(Marshal.GetLastWin32Error());
-        }
-
-        return new LinuxFileIdentity(
-            information.DeviceMajor,
-            information.DeviceMinor,
-            information.Inode,
-            information.MountId);
-    }
-
-    private static string GetMacHandlePath(SafeFileHandle handle)
-    {
-        var buffer = Marshal.AllocHGlobal(4096);
-        try
-        {
-            if (FcntlGetPath(
-                    handle.DangerousGetHandle().ToInt32(),
-                    50,
-                    buffer) != 0)
+            if (!GetFileStandardInformationByHandleEx(
+                    handle,
+                    FileInformationClass.FileStandardInfo,
+                    out var information,
+                    (uint)Marshal.SizeOf<FileStandardInformation>()))
             {
                 throw new Win32Exception(Marshal.GetLastWin32Error());
             }
 
-            return Marshal.PtrToStringUTF8(buffer)
-                ?? throw new InvalidOperationException(
-                    "Could not resolve a pinned macOS directory path.");
+            return information.NumberOfLinks;
         }
-        finally
+
+        if (OperatingSystem.IsLinux())
         {
-            Marshal.FreeHGlobal(buffer);
+            const uint statxLinkCount = 0x00000004;
+            if (Statx(
+                    handle.DangerousGetHandle().ToInt32(),
+                    string.Empty,
+                    0x1000,
+                    statxLinkCount,
+                    out var information) != 0)
+            {
+                throw new Win32Exception(Marshal.GetLastWin32Error());
+            }
+            if ((information.Mask & statxLinkCount) == 0)
+            {
+                throw new PlatformNotSupportedException(
+                    "The filesystem does not expose a pinned file link count.");
+            }
+
+            return information.LinkCount;
         }
+
+        if (OperatingSystem.IsMacOS())
+        {
+            if (FStatMac(
+                    handle.DangerousGetHandle().ToInt32(),
+                    out var information) != 0)
+            {
+                throw new Win32Exception(Marshal.GetLastWin32Error());
+            }
+
+            return information.LinkCount;
+        }
+
+        throw new PlatformNotSupportedException(
+            "Pinned file link counts are supported only on Windows, Linux, and macOS.");
     }
 
-    private static int CreateRelativeWindows(
-        SafeFileHandle rootHandle,
-        string name,
-        bool directory,
-        bool hiddenFile,
-        bool requireDirectoryDeleteAccess,
-        out IntPtr rawHandle)
+    private static bool HandlesAreOnSameVolume(
+        SafeFileHandle first,
+        SafeFileHandle second)
     {
-        var nameBuffer = Marshal.StringToHGlobalUni(name);
-        var unicodeStringPointer = IntPtr.Zero;
-        try
+        if (OperatingSystem.IsWindows())
         {
-            var unicodeString = new UnicodeString
+            return GetWindowsIdentity(first).VolumeSerialNumber
+                == GetWindowsIdentity(second).VolumeSerialNumber;
+        }
+        if (OperatingSystem.IsLinux())
+        {
+            var firstIdentity = GetLinuxIdentity(first);
+            var secondIdentity = GetLinuxIdentity(second);
+            return firstIdentity.DeviceMajor == secondIdentity.DeviceMajor
+                && firstIdentity.DeviceMinor == secondIdentity.DeviceMinor
+                && firstIdentity.MountId == secondIdentity.MountId;
+        }
+        if (OperatingSystem.IsMacOS())
+        {
+            if (FStatMac(first.DangerousGetHandle().ToInt32(), out var firstInfo) != 0
+                || FStatMac(second.DangerousGetHandle().ToInt32(), out var secondInfo) != 0)
             {
-                Length = checked((ushort)(name.Length * sizeof(char))),
-                MaximumLength = checked((ushort)((name.Length + 1) * sizeof(char))),
-                Buffer = nameBuffer
-            };
-            unicodeStringPointer = Marshal.AllocHGlobal(Marshal.SizeOf<UnicodeString>());
-            Marshal.StructureToPtr(unicodeString, unicodeStringPointer, fDeleteOld: false);
-            var attributes = new ObjectAttributes
-            {
-                Length = (uint)Marshal.SizeOf<ObjectAttributes>(),
-                RootDirectory = rootHandle.DangerousGetHandle(),
-                ObjectName = unicodeStringPointer
-            };
-            var desiredAccess = directory
-                ? FileListDirectory | FileReadAttributes | Synchronize
-                    | (requireDirectoryDeleteAccess ? DeleteAccess : 0u)
-                : GenericRead | GenericWrite | DeleteAccess | Synchronize;
-            var createOptions = (directory ? FileDirectoryFile : FileNonDirectoryFile)
-                | FileSynchronousIoNonAlert
-                | FileOpenReparsePoint;
-            return NtCreateFile(
-                out rawHandle,
-                desiredAccess,
-                ref attributes,
-                out _,
-                IntPtr.Zero,
-                directory
-                    ? FileAttributeDirectory
-                    : hiddenFile ? FileAttributeHidden : 0u,
-                FileShareAll,
-                FileCreate,
-                createOptions,
+                throw new Win32Exception(Marshal.GetLastWin32Error());
+            }
+            return firstInfo.Device == secondInfo.Device;
+        }
+
+        throw new PlatformNotSupportedException(
+            "Filesystem-volume identity is supported only on Windows, Linux, and macOS.");
+    }
+
+    private static bool HasUnsupportedCrossVolumeMetadata(
+        SafeFileHandle handle,
+        bool requireSingleLink)
+    {
+        if (requireSingleLink && GetHandleLinkCount(handle) != 1)
+        {
+            return true;
+        }
+        if (OperatingSystem.IsWindows() || OperatingSystem.IsMacOS())
+        {
+            // ADS/security descriptors and resource forks/ACLs cannot be
+            // reproduced by the managed fallback without loss.
+            return true;
+        }
+        if (OperatingSystem.IsLinux())
+        {
+            var size = FListXattrLinux(
+                handle.DangerousGetHandle().ToInt32(),
                 IntPtr.Zero,
                 0);
-        }
-        finally
-        {
-            if (unicodeStringPointer != IntPtr.Zero)
+            if (size < 0)
             {
-                Marshal.FreeHGlobal(unicodeStringPointer);
+                throw new PlatformNotSupportedException(
+                    $"Extended metadata could not be inspected before a cross-volume move (errno {Marshal.GetLastWin32Error()}).");
             }
-            Marshal.FreeHGlobal(nameBuffer);
+            return size != 0;
         }
-    }
 
-    private static Win32Exception CreateNtException(
-        int status,
-        string parent,
-        string child)
-    {
-        var error = RtlNtStatusToDosError(status);
-        return new Win32Exception(
-            unchecked((int)error),
-            $"Could not create '{child}' relative to '{parent}'.");
-    }
-
-    private static int GetUnixDirectoryFlags(bool noFollow)
-    {
-        var flags = OperatingSystem.IsMacOS()
-            ? 0x100000 | 0x1000000
-            : 0x10000 | 0x80000;
-        if (noFollow)
-        {
-            flags |= OperatingSystem.IsMacOS() ? 0x100 : 0x20000;
-        }
-        return flags;
-    }
-
-    private static int GetUnixWriteFlags() => OperatingSystem.IsMacOS()
-        ? 0x1 | 0x200 | 0x800 | 0x100 | 0x1000000
-        : 0x1 | 0x40 | 0x80 | 0x20000 | 0x80000;
-
-    private static void RemoveDirectoryAtUnix(
-        SafeFileHandle parentHandle,
-        string childName)
-    {
-        var flags = OperatingSystem.IsMacOS() ? AtRemovedirMac : AtRemovedirLinux;
-        if (UnlinkAt(
-                parentHandle.DangerousGetHandle().ToInt32(),
-                childName,
-                flags) != 0)
-        {
-            throw new Win32Exception(
-                Marshal.GetLastWin32Error(),
-                "Could not remove a pinned temporary directory.");
-        }
-    }
-
-    private static void TryRemoveDirectoryAtUnix(
-        SafeFileHandle parentHandle,
-        string childName)
-    {
-        try
-        {
-            RemoveDirectoryAtUnix(parentHandle, childName);
-        }
-        catch (Win32Exception exception) when (exception.NativeErrorCode == UnixNoEntry)
-        {
-        }
-        catch (Win32Exception)
-        {
-            // A changed temporary path is preserved rather than recursively removed.
-        }
-    }
-
-    private static void ValidateLeafName(string name)
-    {
-        ArgumentException.ThrowIfNullOrWhiteSpace(name);
-        if (name is "." or ".."
-            || Path.IsPathRooted(name)
-            || name.IndexOfAny([Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar]) >= 0)
-        {
-            throw new ArgumentException(
-                "A pinned filesystem operation requires one non-navigation path segment.",
-                nameof(name));
-        }
-    }
-
-    private void ThrowIfDisposed()
-    {
-        ObjectDisposedException.ThrowIf(_disposed, this);
+        return true;
     }
 
 }

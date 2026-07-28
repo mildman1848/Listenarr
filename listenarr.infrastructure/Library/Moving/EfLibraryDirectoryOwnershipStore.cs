@@ -20,13 +20,20 @@ internal sealed partial class EfLibraryDirectoryOwnershipStore(
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(claim);
+        ArgumentException.ThrowIfNullOrWhiteSpace(claim.Path);
+        ArgumentException.ThrowIfNullOrWhiteSpace(claim.CreationWorkflow);
+        EnsureResolved(claim.Semantics);
+        var canonicalPath = FileSystemPathIdentity.Canonicalize(
+            claim.Path,
+            claim.Semantics.Syntax);
+        await ThrowIfPersistedPathConflictAsync(
+            canonicalPath,
+            claim.Semantics,
+            cancellationToken);
         using var authorization = await _boundaryAuthorizer.AuthorizeContainingRootAsync(
             claim.Path,
             claim.Semantics,
             cancellationToken);
-        var canonicalPath = FileSystemPathIdentity.Canonicalize(
-            claim.Path,
-            claim.Semantics.Syntax);
         using var existing = authorization.ParentAnchor.OpenExistingChildForPublication(
             Path.GetFileName(canonicalPath));
         return await RecordCreatedCoreAsync(

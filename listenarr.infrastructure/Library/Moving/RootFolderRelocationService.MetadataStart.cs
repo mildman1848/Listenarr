@@ -1,0 +1,282 @@
+using Listenarr.Domain.Common;
+using Listenarr.Infrastructure.Persistence;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Storage;
+
+namespace Listenarr.Infrastructure.Library.Moving;
+
+public sealed partial class RootFolderRelocationService
+{
+    internal Action? AfterMetadataOnlyCommitForTest
+    {
+        get;
+        set;
+    }
+
+    private async Task<StartOutcome> StartMetadataOnlyAsync(
+        ListenArrDbContext db,
+        IDbContextTransaction transaction,
+        RootFolder root,
+        RootFolderPathChangeCommand command,
+        string targetPath,
+        FileSystemSemanticsResolution targetResolution,
+        DirectoryObjectIdentityResolution targetObjectIdentity,
+        string targetIdentityKey,
+        FileSystemCaseSensitivityMode sourceCaseSensitivityMode,
+        IReadOnlyList<AudiobookPathCandidate> affected,
+        IReadOnlyList<AudiobookPathCandidate> invalidStoredBasePaths,
+        FileSystemPathSemantics? metadataSourceSemantics,
+        int rootFolderId,
+        DateTimeOffset now,
+        CancellationToken cancellationToken)
+    {
+        var nowUtc = now.UtcDateTime;
+        var sourcePath = root.Path;
+        var skipped = invalidStoredBasePaths
+            .Select(candidate => new RootFolderRelocationSkippedItem
+            {
+                AudiobookId = candidate.Audiobook.Id,
+                Reason = "Stored audiobook base path is invalid or case-ambiguous and could not be compared safely with the source root.",
+                CreatedAt = now
+            })
+            .ToList();
+        var metadataTotal = affected.Count + skipped.Count;
+        var completed = 0;
+        var metadataPlans =
+            new List<(AudiobookPathCandidate Candidate, string Destination)>();
+
+        foreach (var candidate in affected)
+        {
+            var audiobook = candidate.Audiobook;
+            var sourceSemantics = metadataSourceSemantics
+                ?? throw new InvalidOperationException(
+                    "Stored source path semantics are unavailable.");
+            var sourceBasePath = candidate.StoredBasePath;
+            try
+            {
+                var destinationBasePath = MapTargetPath(
+                    sourcePath,
+                    targetPath,
+                    sourceBasePath,
+                    sourceSemantics,
+                    targetResolution.Semantics);
+                metadataPlans.Add((candidate, destinationBasePath));
+            }
+            catch (InvalidOperationException exception)
+            {
+                skipped.Add(new RootFolderRelocationSkippedItem
+                {
+                    AudiobookId = audiobook.Id,
+                    Reason = exception.Message,
+                    CreatedAt = now
+                });
+            }
+        }
+
+        if (metadataPlans.Count > 0)
+        {
+            PreflightMetadataPathRewrites(
+                db,
+                metadataPlans,
+                metadataSourceSemantics
+                    ?? throw new InvalidOperationException(
+                        "Stored source path semantics are unavailable."),
+                targetResolution.Semantics,
+                command.TargetCaseSensitivityMode);
+        }
+
+        var metadataRelocation = new RootFolderRelocation
+        {
+            RootFolderId = root.Id,
+            ActiveRootFolderId = root.Id,
+            SourcePath = sourcePath,
+            SourceCaseSensitivityMode = sourceCaseSensitivityMode,
+            TargetPath = targetPath,
+            TargetDirectoryObjectIdentityVersion =
+                targetObjectIdentity.Version,
+            TargetDirectoryObjectIdentity =
+                targetObjectIdentity.Value,
+            TargetDirectoryObjectIdentityUnavailableReason =
+                targetObjectIdentity.UnavailableReason,
+            TargetIdentityEnrollmentState =
+                targetObjectIdentity.IsAvailable
+                    ? TargetIdentityEnrollmentState.Authorized
+                    : TargetIdentityEnrollmentState.Unavailable,
+            Mode = command.Mode,
+            Status = RootFolderRelocationStatus.Pending,
+            DeleteEmptySource = command.DeleteEmptySource,
+            DesiredName = command.DesiredName.Trim(),
+            DesiredIsDefault = command.DesiredIsDefault,
+            TargetCaseSensitivityMode =
+                command.TargetCaseSensitivityMode,
+            TotalJobs = metadataTotal,
+            CompletedJobs = 0,
+            CreatedAt = nowUtc,
+            UpdatedAt = nowUtc
+        };
+        foreach (var skippedItem in skipped)
+        {
+            metadataRelocation.SkippedItems.Add(skippedItem);
+        }
+        db.RootFolderRelocations.Add(metadataRelocation);
+
+        var ownershipPlans = await PrepareOwnershipMigrationsAsync(
+            db,
+            metadataRelocation,
+            root,
+            metadataSourceSemantics,
+            targetResolution.Semantics,
+            cancellationToken);
+        await db.SaveChangesAsync(cancellationToken);
+        cancellationToken.ThrowIfCancellationRequested();
+        await transaction.CommitAsync(CancellationToken.None);
+
+        try
+        {
+            await PublishOwnershipMigrationTargetsAsync(
+                ownershipPlans,
+                cancellationToken);
+            foreach (var plan in ownershipPlans)
+            {
+                plan.Journal.State =
+                    LibraryDirectoryOwnershipPathMigrationState
+                        .MarkersPublished;
+                plan.Journal.UpdatedAt = DateTime.UtcNow;
+            }
+            await db.SaveChangesAsync(cancellationToken);
+        }
+        catch (Exception exception) when (exception is not (
+            OperationCanceledException or OutOfMemoryException
+                or StackOverflowException))
+        {
+            metadataRelocation.Status =
+                RootFolderRelocationStatus.NeedsAttention;
+            metadataRelocation.Error =
+                $"Directory ownership marker migration requires attention: {exception.Message}";
+            metadataRelocation.UpdatedAt =
+                timeProvider.GetUtcNow().UtcDateTime;
+            await db.SaveChangesAsync(CancellationToken.None);
+            throw;
+        }
+
+        await using var metadataTransaction =
+            await db.Database.BeginTransactionAsync(cancellationToken);
+        foreach (var plan in metadataPlans)
+        {
+            AudiobookPathReferenceRewriter.Rewrite(
+                plan.Candidate.Audiobook,
+                plan.Candidate.StoredBasePath,
+                plan.Destination,
+                metadataSourceSemantics!.Value,
+                targetResolution.Semantics,
+                command.TargetCaseSensitivityMode);
+            completed++;
+        }
+
+        RejectDuplicateAudiobookFileOwnership(db);
+        ApplyOwnershipMigrationMetadata(ownershipPlans, nowUtc);
+        await db.SaveChangesAsync(cancellationToken);
+        AssignOwnershipMigrationKeys(ownershipPlans, nowUtc);
+        ApplyRootMetadata(
+            root,
+            command,
+            targetPath,
+            targetResolution,
+            targetIdentityKey);
+        ApplyRootDirectoryObjectIdentity(root, targetObjectIdentity);
+        if (command.DesiredIsDefault)
+        {
+            await ClearOtherDefaultsAsync(
+                db,
+                rootFolderId,
+                cancellationToken);
+        }
+
+        metadataRelocation.CompletedJobs = completed;
+        metadataRelocation.Status = skipped.Count > 0
+            ? RootFolderRelocationStatus.NeedsAttention
+            : RootFolderRelocationStatus.Completed;
+        metadataRelocation.ActiveRootFolderId =
+            skipped.Count > 0 ? root.Id : null;
+        metadataRelocation.CompletedAt =
+            skipped.Count > 0 ? null : nowUtc;
+        metadataRelocation.Error = skipped.Count > 0
+            ? BuildSkippedMetadataError(skipped.Count)
+            : null;
+        metadataRelocation.TargetIdentityEnrollmentState =
+            skipped.Count > 0
+                ? metadataRelocation.TargetIdentityEnrollmentState
+                : TargetIdentityEnrollmentState.NotRequired;
+        metadataRelocation.UpdatedAt = nowUtc;
+        await db.SaveChangesAsync(cancellationToken);
+        cancellationToken.ThrowIfCancellationRequested();
+        await metadataTransaction.CommitAsync(CancellationToken.None);
+
+        try
+        {
+            AfterMetadataOnlyCommitForTest?.Invoke();
+            await PublishOwnershipMigrationTargetsAsync(
+                ownershipPlans,
+                CancellationToken.None);
+            RetireOwnershipMigrationSources(ownershipPlans);
+            db.LibraryDirectoryOwnershipPathMigrations.RemoveRange(
+                ownershipPlans.Select(plan => plan.Journal));
+            var completedWithoutAttention = skipped.Count == 0;
+            if (completedWithoutAttention)
+            {
+                db.RootFolderRelocations.Remove(metadataRelocation);
+            }
+            await db.SaveChangesAsync(CancellationToken.None);
+            var metadataResult = new RootFolderPathChangeResult(
+                completedWithoutAttention ? null : metadataRelocation.Id,
+                root.Id,
+                root.Path,
+                targetPath,
+                metadataRelocation.Status,
+                metadataTotal,
+                completed,
+                metadataRelocation.Error,
+                metadataRelocation.TargetIdentityEnrollmentState);
+            return new StartOutcome(metadataResult, true);
+        }
+        catch (Exception exception) when (exception is not (
+            OutOfMemoryException or StackOverflowException))
+        {
+            return await PersistMetadataOnlyPostCommitAttentionAsync(
+                metadataRelocation.Id,
+                root.Id,
+                exception,
+                CancellationToken.None);
+        }
+    }
+
+    private async Task<StartOutcome>
+        PersistMetadataOnlyPostCommitAttentionAsync(
+            Guid relocationId,
+            int rootFolderId,
+            Exception exception,
+            CancellationToken cancellationToken)
+    {
+        await using var recoveryDb =
+            await dbContextFactory.CreateDbContextAsync(cancellationToken);
+        var relocation = await recoveryDb.RootFolderRelocations
+            .SingleAsync(
+                candidate => candidate.Id == relocationId,
+                cancellationToken);
+        relocation.Status = RootFolderRelocationStatus.NeedsAttention;
+        relocation.ActiveRootFolderId = rootFolderId;
+        relocation.CompletedAt = null;
+        relocation.Error =
+            $"Directory ownership migration cleanup requires attention: {exception.Message}";
+        relocation.UpdatedAt = timeProvider.GetUtcNow().UtcDateTime;
+        await recoveryDb.SaveChangesAsync(cancellationToken);
+        var currentPath = await recoveryDb.RootFolders
+            .AsNoTracking()
+            .Where(root => root.Id == rootFolderId)
+            .Select(root => root.Path)
+            .SingleAsync(cancellationToken);
+        return new StartOutcome(
+            Map(relocation, currentPath),
+            Broadcast: true);
+    }
+}

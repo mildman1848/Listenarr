@@ -57,6 +57,10 @@ public partial class DownloadImportService
             audiobookId,
             cancellationToken);
         cancellationToken.ThrowIfCancellationRequested();
-        return await fileMover.PerformActionOn(action, source, destination);
+        return await fileMover.PerformActionOn(
+            action,
+            source,
+            destination,
+            operationId);
     }
 }

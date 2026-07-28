@@ -39,6 +39,9 @@ namespace Listenarr.Application.Audiobooks.Contracts.Repositories
             FileSystemPathSemantics semantics,
             CancellationToken ct = default);
         Task<List<int>> GetAllAudiobookIdsAsync(CancellationToken ct = default);
+        Task<bool> HasNonRemovedDirectoryOwnershipAsync(
+            int rootFolderId,
+            CancellationToken ct = default);
         Task ReassignAudiobooksAndRemoveAsync(
             int sourceRootId,
             int targetRootId,

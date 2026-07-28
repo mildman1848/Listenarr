@@ -50,6 +50,14 @@ public sealed class RootFolderObjectIdentityReconciler(
             root.DirectoryObjectIdentityUnavailableReason = null;
         }
 
+        var relocations = await db.RootFolderRelocations
+            .ToListAsync(cancellationToken);
+        foreach (var relocation in relocations)
+        {
+            relocation.TargetIdentityEnrollmentState =
+                TargetIdentityEnrollment.Classify(relocation);
+        }
+
         await db.SaveChangesAsync(cancellationToken);
     }
 }

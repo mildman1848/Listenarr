@@ -155,9 +155,9 @@ public partial class FileMover
         }
 
         var published = false;
+        using var stagingAnchor = stagingCreation.OpenCreatedDirectoryAnchor();
         try
         {
-            using var stagingAnchor = stagingCreation.OpenCreatedDirectoryAnchor();
             await PopulateDirectoryCopyStagingAsync(snapshot, stagingAnchor);
             if (!stagingCreation.VisiblePathMatches()
                 || !stagingAnchor.VisiblePathMatches()
@@ -219,7 +219,11 @@ public partial class FileMover
         {
             if (!published && stagingCreation.VisiblePathMatches())
             {
-                await TryCleanupDirectoryCopyStagingAsync(snapshot, stagingRoot);
+                await TryCleanupDirectoryCopyStagingAsync(
+                    snapshot,
+                    stagingCreation,
+                    stagingAnchor,
+                    stagingRoot);
             }
         }
     }

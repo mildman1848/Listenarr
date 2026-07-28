@@ -28,16 +28,26 @@ public partial class ManualImportController
                 "The manual import destination has no managed ownership boundary.");
         }
 
+        var operationId = FileMoveOperationIdentity.Create(
+            "manual-import",
+            audiobook.Id,
+            action,
+            Path.GetFullPath(source),
+            Path.GetFullPath(destination));
         await _directoryOwnershipStore.EnsureCreatedHierarchyAsync(
             destinationDirectory,
             boundary,
             semantics,
             "manual-import",
-            Guid.NewGuid(),
+            operationId,
             audiobook.Id,
             cancellationToken);
 
         cancellationToken.ThrowIfCancellationRequested();
-        return await _fileMover.PerformActionOn(action, source, destination);
+        return await _fileMover.PerformActionOn(
+            action,
+            source,
+            destination,
+            operationId);
     }
 }

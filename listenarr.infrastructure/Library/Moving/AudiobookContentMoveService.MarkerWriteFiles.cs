@@ -60,6 +60,40 @@ internal sealed partial class AudiobookContentMoveService
         }
     }
 
+    private static MarkerReadResult<T> ReadJsonMarker<T>(
+        PinnedDirectoryCreation.PinnedFileEntry entry)
+    {
+        ArgumentNullException.ThrowIfNull(entry);
+        try
+        {
+            using var stream = entry.OpenReadStream(
+                bufferSize: 4096,
+                asynchronous: false);
+            if (stream.Length > MaximumMarkerLength)
+            {
+                return new MarkerReadResult<T>(MarkerReadState.CorruptOrTruncated);
+            }
+
+            stream.Position = 0;
+            var marker = System.Text.Json.JsonSerializer.Deserialize<T>(stream);
+            return marker == null
+                ? new MarkerReadResult<T>(MarkerReadState.CorruptOrTruncated)
+                : new MarkerReadResult<T>(MarkerReadState.Valid, marker);
+        }
+        catch (System.Text.Json.JsonException exception)
+        {
+            return new MarkerReadResult<T>(
+                MarkerReadState.CorruptOrTruncated,
+                Error: exception);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            return new MarkerReadResult<T>(
+                MarkerReadState.TemporarilyUnreadable,
+                Error: exception);
+        }
+    }
+
     private static string CreateMarkerWritePath(
         string markerPath,
         Guid jobId,

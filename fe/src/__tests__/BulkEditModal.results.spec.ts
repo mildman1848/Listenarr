@@ -37,8 +37,14 @@ describe('BulkEditModal results', () => {
   it('keeps the modal open and does not emit saved when any item fails', async () => {
     executeBulkEditMock.mockResolvedValue({
       results: [
-        { id: 1, success: true, errors: [] },
-        { id: 2, success: false, errors: ['queue unavailable'] },
+        { id: 1, success: true, pathChangeOutcome: 'none', errors: [] },
+        {
+          id: 2,
+          success: false,
+          metadataUpdated: false,
+          pathChangeOutcome: 'failed',
+          errors: ['queue unavailable'],
+        },
       ],
     })
     const pinia = createPinia()
@@ -73,12 +79,69 @@ describe('BulkEditModal results', () => {
 
     expect(vm.showResults).toBe(true)
     expect(vm.results).toEqual([
-      { id: 1, success: true, errors: [] },
-      { id: 2, success: false, errors: ['queue unavailable'] },
+      { id: 1, success: true, pathChangeOutcome: 'none', errors: [] },
+      {
+        id: 2,
+        success: false,
+        metadataUpdated: false,
+        pathChangeOutcome: 'failed',
+        errors: ['queue unavailable'],
+      },
     ])
     expect(error).toHaveBeenCalledWith(
       'Bulk update incomplete',
-      expect.stringContaining('1 succeeded and 1 failed'),
+      expect.stringContaining('1 succeeded, 0 partially succeeded, and 1 failed'),
+    )
+    expect(wrapper.emitted('saved')).toBeUndefined()
+    expect(wrapper.emitted('close')).toBeUndefined()
+  })
+
+  it('renders a partial result distinctly and keeps the modal open', async () => {
+    executeBulkEditMock.mockResolvedValue({
+      results: [
+        {
+          id: 1,
+          success: false,
+          metadataUpdated: true,
+          pathChangeOutcome: 'not-enqueued',
+          errors: ['queue unavailable'],
+        },
+      ],
+    })
+    const pinia = createPinia()
+    setActivePinia(pinia)
+    const wrapper = mount(BulkEditModal, {
+      props: {
+        isOpen: true,
+        selectedCount: 1,
+        selectedIds: new Set([1]),
+      },
+      global: {
+        plugins: [pinia],
+        stubs: {
+          Modal: { template: '<div><slot /><slot name="footer" /></div>' },
+          ModalBody: { template: '<div><slot /></div>' },
+          ModalHeader: true,
+          MoveAudiobookModal: true,
+          RootFolderSelect: true,
+          Checkbox: true,
+        },
+      },
+    })
+    const vm = wrapper.vm as unknown as {
+      formData: { monitored: boolean | null }
+      handleSave: () => Promise<void>
+    }
+    vm.formData.monitored = true
+
+    await vm.handleSave()
+
+    expect(wrapper.text()).toContain('0 succeeded, 1 partially succeeded, 0 failed')
+    expect(wrapper.text()).toContain('Partial')
+    expect(wrapper.text()).toContain('Metadata saved; the requested move was not queued.')
+    expect(error).toHaveBeenCalledWith(
+      'Bulk update incomplete',
+      expect.stringContaining('0 succeeded, 1 partially succeeded, and 0 failed'),
     )
     expect(wrapper.emitted('saved')).toBeUndefined()
     expect(wrapper.emitted('close')).toBeUndefined()
@@ -87,8 +150,8 @@ describe('BulkEditModal results', () => {
   it('emits saved and closes only when every item succeeds', async () => {
     executeBulkEditMock.mockResolvedValue({
       results: [
-        { id: 1, success: true, errors: [] },
-        { id: 2, success: true, errors: [] },
+        { id: 1, success: true, pathChangeOutcome: 'none', errors: [] },
+        { id: 2, success: true, pathChangeOutcome: 'none', errors: [] },
       ],
     })
     const pinia = createPinia()

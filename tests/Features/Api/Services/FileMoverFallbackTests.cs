@@ -353,11 +353,17 @@ namespace Listenarr.Tests.Features.Api.Services
             Assert.False(Directory.Exists(destination));
             Assert.Equal("original", await File.ReadAllTextAsync(Path.Join(source, "original.m4b")));
             Assert.Equal("late", await File.ReadAllTextAsync(Path.Join(source, "late", "late.m4b")));
-            Assert.DoesNotContain(
-                Directory.EnumerateDirectories(_root),
-                directory => Path.GetFileName(directory).Contains(
+            var retainedCopyDirectories = Directory.EnumerateDirectories(_root)
+                .Where(directory => Path.GetFileName(directory).Contains(
                     ".listenarr-copy-",
-                    StringComparison.Ordinal));
+                    StringComparison.Ordinal))
+                .ToList();
+            Assert.True(
+                retainedCopyDirectories.Count == 0,
+                string.Join(
+                    Environment.NewLine,
+                    retainedCopyDirectories.Select(directory =>
+                        $"{directory}: {string.Join(", ", Directory.EnumerateFileSystemEntries(directory).Select(Path.GetFileName))}")));
         }
 
         [Fact]
@@ -521,7 +527,7 @@ namespace Listenarr.Tests.Features.Api.Services
 
             var moved = await mover.MoveFileAsync(sourceFile, destinationFile);
 
-            Assert.True(moved);
+            Assert.False(moved);
             Assert.Equal("replacement", await File.ReadAllTextAsync(sourceFile));
             Assert.Equal("original", await File.ReadAllTextAsync(destinationFile));
             Assert.DoesNotContain(
@@ -550,7 +556,7 @@ namespace Listenarr.Tests.Features.Api.Services
 
             var moved = await mover.MoveFileAsync(sourceFile, destinationFile);
 
-            Assert.True(moved);
+            Assert.False(moved);
             Assert.Equal("replacement", await File.ReadAllTextAsync(sourceFile));
             Assert.Equal("original", await File.ReadAllTextAsync(destinationFile));
             Assert.DoesNotContain(
@@ -569,6 +575,7 @@ namespace Listenarr.Tests.Features.Api.Services
                 new NullLogger<FileMover>(),
                 semanticsResolver: new FileSystemSemanticsResolver())
             {
+                DisableNativeFileRenameForTest = true,
                 AfterDestinationQuarantinedForTestAsync = async (claimedDestination, claimPath) =>
                 {
                     Assert.Equal(destinationFile, claimedDestination);
@@ -712,6 +719,7 @@ namespace Listenarr.Tests.Features.Api.Services
                 new NullLogger<FileMover>(),
                 semanticsResolver: new FileSystemSemanticsResolver())
             {
+                DisableNativeFileRenameForTest = true,
                 AfterSourceClaimDeletedForTestAsync = () =>
                 {
                     File.WriteAllText(destinationFile, "replacement");
@@ -776,6 +784,7 @@ namespace Listenarr.Tests.Features.Api.Services
                 new NullLogger<FileMover>(),
                 semanticsResolver: new FileSystemSemanticsResolver())
             {
+                DisableNativeFileRenameForTest = true,
                 AfterDestinationQuarantinedForTestAsync = (_, _) =>
                     throw new OperationCanceledException("simulated staged interruption")
             };
@@ -859,6 +868,7 @@ namespace Listenarr.Tests.Features.Api.Services
                 new NullLogger<FileMover>(),
                 semanticsResolver: new FileSystemSemanticsResolver())
             {
+                DisableNativeFileRenameForTest = true,
                 AfterDestinationQuarantinedForTestAsync = (_, _) =>
                     throw new OperationCanceledException("simulated stage interruption")
             };
@@ -920,7 +930,7 @@ namespace Listenarr.Tests.Features.Api.Services
                 semanticsResolver: new FileSystemSemanticsResolver())
                 .MoveFileAsync(sourceFile, destinationFile);
 
-            Assert.True(retried);
+            Assert.False(retried);
             Assert.Equal("replacement", await File.ReadAllTextAsync(sourceFile));
             Assert.Equal("original", await File.ReadAllTextAsync(destinationFile));
             Assert.Empty(Directory.EnumerateFiles(
@@ -940,6 +950,7 @@ namespace Listenarr.Tests.Features.Api.Services
                 new NullLogger<FileMover>(),
                 semanticsResolver: new FileSystemSemanticsResolver())
             {
+                DisableNativeFileRenameForTest = true,
                 AfterSourceClaimDeletedForTestAsync = () =>
                     throw new OperationCanceledException("simulated retirement interruption")
             };
@@ -980,6 +991,7 @@ namespace Listenarr.Tests.Features.Api.Services
                 new NullLogger<FileMover>(),
                 semanticsResolver: new FileSystemSemanticsResolver())
             {
+                DisableNativeFileRenameForTest = true,
                 AfterSourceClaimDeletedForTestAsync = () =>
                 {
                     File.WriteAllText(sourceFile, "replacement");
@@ -1003,7 +1015,7 @@ namespace Listenarr.Tests.Features.Api.Services
                 semanticsResolver: new FileSystemSemanticsResolver())
                 .MoveFileAsync(sourceFile, destinationFile);
 
-            Assert.True(retried);
+            Assert.False(retried);
             Assert.Equal("replacement", await File.ReadAllTextAsync(sourceFile));
             Assert.Equal("original", await File.ReadAllTextAsync(destinationFile));
         }
@@ -1085,7 +1097,7 @@ namespace Listenarr.Tests.Features.Api.Services
                 semanticsResolver: new FileSystemSemanticsResolver())
                 .MoveFileAsync(sourceFile, destinationFile);
 
-            Assert.True(retried);
+            Assert.False(retried);
             Assert.Equal("replacement", await File.ReadAllTextAsync(sourceFile));
             Assert.Equal("original", await File.ReadAllTextAsync(destinationFile));
             Assert.Single(Directory.EnumerateFiles(
@@ -1123,7 +1135,7 @@ namespace Listenarr.Tests.Features.Api.Services
                 semanticsResolver: new FileSystemSemanticsResolver())
                 .MoveFileAsync(sourceFile, destinationFile);
 
-            Assert.True(retried);
+            Assert.False(retried);
             Assert.Equal("replacement", await File.ReadAllTextAsync(sourceFile));
             Assert.Equal("original", await File.ReadAllTextAsync(destinationFile));
         }
@@ -1531,10 +1543,16 @@ namespace Listenarr.Tests.Features.Api.Services
                 _root,
                 "destination.previous",
                 SearchOption.AllDirectories));
-            Assert.Empty(Directory.EnumerateDirectories(
+            var remainingPublicationState = Directory.EnumerateDirectories(
                 _root,
                 ".listenarr-file-publication-*.state",
-                SearchOption.TopDirectoryOnly));
+                SearchOption.TopDirectoryOnly).ToList();
+            Assert.True(
+                remainingPublicationState.Count == 0,
+                string.Join(
+                    Environment.NewLine,
+                    remainingPublicationState.Select(directory =>
+                        $"{directory}: {string.Join(", ", Directory.EnumerateFileSystemEntries(directory).Select(Path.GetFileName))}")));
         }
 
         [Fact]
@@ -1663,7 +1681,7 @@ namespace Listenarr.Tests.Features.Api.Services
 
             Assert.True(cleanup.DestinationVerified);
             Assert.False(cleanup.SourceRemoved);
-            Assert.False(File.Exists(Path.Join(source, "book.m4b")));
+            Assert.True(File.Exists(Path.Join(source, "book.m4b")));
             Assert.True(File.Exists(Path.Join(source, "arrived-late.txt")));
             Assert.Equal("audio", await File.ReadAllTextAsync(
                 Path.Join(destination, "book.m4b")));

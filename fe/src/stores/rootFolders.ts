@@ -116,11 +116,30 @@ export const useRootFoldersStore = defineStore('rootFolders', () => {
     return result
   }
 
+  async function reauthorizeLegacyTarget(relocationId: string, confirmedTargetPath: string) {
+    const result = await apiService.reauthorizeLegacyRootFolderRelocationTarget(
+      relocationId,
+      confirmedTargetPath,
+    )
+    await load()
+    return result
+  }
+
   async function remove(id: number, reassignTo?: number) {
     const r = await apiService.deleteRootFolder(id, reassignTo)
     await load()
     return r
   }
 
-  return { folders, loading, defaultFolder, load, create, update, retryRelocation, remove }
+  return {
+    folders,
+    loading,
+    defaultFolder,
+    load,
+    create,
+    update,
+    retryRelocation,
+    reauthorizeLegacyTarget,
+    remove,
+  }
 })

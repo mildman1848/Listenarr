@@ -141,8 +141,10 @@ public partial class FileMover
         return true;
     }
 
-    private static async Task TryCleanupDirectoryCopyStagingAsync(
+    private async Task TryCleanupDirectoryCopyStagingAsync(
         DirectoryCopySnapshot snapshot,
+        PinnedDirectoryCreation stagingPublication,
+        PinnedDirectoryCreation.PinnedDirectoryAnchor stagingAnchor,
         string stagingRoot)
     {
         try
@@ -153,21 +155,19 @@ public partial class FileMover
                     stagingRoot,
                     out var files,
                     out var directories,
-                    out _))
+                    out _)
+                || !TryGetDirectoryIdentity(stagingRoot, out var stagingRootIdentity))
             {
                 return;
             }
 
+            var comparer = OperatingSystem.IsWindows()
+                ? StringComparer.OrdinalIgnoreCase
+                : StringComparer.Ordinal;
             var expectedFiles = snapshot.Files
                 .Select(file => file.RelativePath)
-                .ToHashSet(
-                OperatingSystem.IsWindows()
-                    ? StringComparer.OrdinalIgnoreCase
-                    : StringComparer.Ordinal);
-            var expectedDirectories = snapshot.RelativeDirectories.ToHashSet(
-                OperatingSystem.IsWindows()
-                    ? StringComparer.OrdinalIgnoreCase
-                    : StringComparer.Ordinal);
+                .ToHashSet(comparer);
+            var expectedDirectories = snapshot.RelativeDirectories.ToHashSet(comparer);
             var relativeFiles = files
                 .Select(path => GetVerifiedRelativePath(stagingRoot, path))
                 .ToArray();
@@ -180,6 +180,7 @@ public partial class FileMover
                 return;
             }
 
+            var stagingFileIdentities = new Dictionary<string, RegularFileIdentity>(comparer);
             foreach (var relativeFile in relativeFiles)
             {
                 var stagingFile = ResolveSnapshotPath(
@@ -192,36 +193,213 @@ public partial class FileMover
                     "source cleanup file");
                 if (IsLinkedOrUnverifiableEntry(stagingFile)
                     || !File.Exists(sourceFile)
+                    || !TryGetRegularFileIdentity(stagingFile, out var stagingIdentity)
                     || !await FileSystemSafety.FilesHaveSameContentAsync(
                         sourceFile,
                         stagingFile))
                 {
                     return;
                 }
+
+                stagingFileIdentities.Add(relativeFile, stagingIdentity);
+            }
+
+            var stagingDirectoryIdentities =
+                new Dictionary<string, RegularFileIdentity>(comparer);
+            foreach (var relativeDirectory in relativeDirectories)
+            {
+                var directoryPath = ResolveSnapshotPath(
+                    stagingRoot,
+                    relativeDirectory,
+                    "staging cleanup directory");
+                if (!TryGetDirectoryIdentity(directoryPath, out var directoryIdentity))
+                {
+                    return;
+                }
+
+                stagingDirectoryIdentities.Add(relativeDirectory, directoryIdentity);
+            }
+
+            var stagingName = Path.GetFileName(stagingRoot);
+            using (var rootHandle = stagingAnchor.DuplicateHandleForOperation())
+            {
+                if (!TryGetRegularFileIdentity(rootHandle, out var pinnedRootIdentity)
+                    || pinnedRootIdentity != stagingRootIdentity)
+                {
+                    return;
+                }
+            }
+
+            if (BeforeDirectoryCopyStagingCleanupForTestAsync != null)
+            {
+                await BeforeDirectoryCopyStagingCleanupForTestAsync(stagingRoot);
+            }
+            if (!stagingPublication.VisiblePathMatches()
+                || !stagingAnchor.VisiblePathMatches())
+            {
+                return;
             }
 
             foreach (var relativeFile in relativeFiles)
             {
-                File.Delete(ResolveSnapshotPath(
-                    stagingRoot,
+                using var parent = OpenPinnedRelativeDirectory(
+                    stagingAnchor,
+                    Path.GetDirectoryName(relativeFile));
+                using var entry = parent.OpenExistingFile(
+                    Path.GetFileName(relativeFile),
+                    requireDeleteAccess: true);
+                using var handle = entry.DuplicateHandleForOperation();
+                var sourceFile = ResolveSnapshotPath(
+                    snapshot.SourceRoot,
                     relativeFile,
-                    "staging cleanup file"));
+                    "source cleanup file");
+                var sourceSnapshot = snapshot.Files.Single(file =>
+                    comparer.Equals(file.RelativePath, relativeFile));
+                var identityMatches = TryGetRegularFileIdentity(
+                    handle,
+                    out var currentIdentity)
+                    && currentIdentity == stagingFileIdentities[relativeFile];
+                var entryVisible = entry.VisiblePathMatches();
+                var parentVisible = parent.VisiblePathMatches();
+                var sourceSafe = !IsLinkedOrUnverifiableEntry(sourceFile);
+                var sourceIdentityMatches = TryGetRegularFileIdentity(
+                    sourceFile,
+                    out var sourceIdentity)
+                    && sourceIdentity == sourceSnapshot.Identity;
+                var contentMatches = await PinnedFileMatchesPathAsync(
+                    entry,
+                    sourceFile);
+                if (!identityMatches
+                    || !entryVisible
+                    || !parentVisible
+                    || !sourceSafe
+                    || !sourceIdentityMatches
+                    || !contentMatches)
+                {
+                    return;
+                }
+
+                entry.Delete(immediateWindows: true);
             }
+
             foreach (var relativeDirectory in relativeDirectories
                          .OrderByDescending(PathDepth))
             {
-                Directory.Delete(ResolveSnapshotPath(
-                    stagingRoot,
-                    relativeDirectory,
-                    "staging cleanup directory"),
-                    recursive: false);
+                var parentRelative = Path.GetDirectoryName(relativeDirectory);
+                var childName = Path.GetFileName(relativeDirectory);
+                using var parent = OpenPinnedRelativeDirectory(
+                    stagingAnchor,
+                    parentRelative);
+                using var directory = parent.TryOpenExistingChildForPublication(childName);
+                if (directory == null)
+                {
+                    return;
+                }
+                using var child = directory.OpenCreatedDirectoryAnchor();
+                using var handle = child.DuplicateHandleForOperation();
+                if (!TryGetRegularFileIdentity(handle, out var currentIdentity)
+                    || currentIdentity != stagingDirectoryIdentities[relativeDirectory]
+                    || !directory.VisiblePathMatches()
+                    || !child.VisiblePathMatches()
+                    || Directory.EnumerateFileSystemEntries(child.FullPath).Any())
+                {
+                    return;
+                }
+
+                child.Dispose();
+                directory.DeletePinnedEmptyDirectory(
+                    childName,
+                    immediateWindows: true);
             }
-            Directory.Delete(stagingRoot, recursive: false);
+
+            if (Directory.EnumerateFileSystemEntries(stagingAnchor.FullPath).Any()
+                || !stagingPublication.VisiblePathMatches()
+                || !stagingAnchor.VisiblePathMatches())
+            {
+                return;
+            }
+
+            stagingAnchor.Dispose();
+            stagingPublication.DeletePinnedEmptyDirectory(
+                stagingName,
+                immediateWindows: true);
         }
         catch (Exception exception) when (exception is not (
             OperationCanceledException or OutOfMemoryException or StackOverflowException))
         {
             // Uncertain or externally changed staging is preserved for diagnosis.
+        }
+    }
+
+    private static PinnedDirectoryCreation.PinnedDirectoryAnchor OpenPinnedRelativeDirectory(
+        PinnedDirectoryCreation.PinnedDirectoryAnchor root,
+        string? relativePath)
+    {
+        var current = root.Duplicate();
+        try
+        {
+            if (string.IsNullOrWhiteSpace(relativePath)
+                || relativePath == ".")
+            {
+                return current;
+            }
+
+            foreach (var segment in relativePath.Split(
+                [Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar],
+                StringSplitOptions.RemoveEmptyEntries))
+            {
+                var next = current.OpenExistingChild(segment);
+                current.Dispose();
+                current = next;
+            }
+
+            return current;
+        }
+        catch
+        {
+            current.Dispose();
+            throw;
+        }
+    }
+
+    private static async Task<bool> PinnedFileMatchesPathAsync(
+        PinnedDirectoryCreation.PinnedFileEntry candidate,
+        string sourcePath)
+    {
+        await using var source = new FileStream(
+            sourcePath,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.Read,
+            bufferSize: 64 * 1024,
+            FileOptions.Asynchronous | FileOptions.SequentialScan);
+        using var staged = candidate.OpenReadStream(
+            bufferSize: 64 * 1024,
+            asynchronous: false);
+        if (source.Length != staged.Length)
+        {
+            return false;
+        }
+
+        var sourceBuffer = new byte[64 * 1024];
+        var stagedBuffer = new byte[64 * 1024];
+        while (true)
+        {
+            var sourceRead = await source.ReadAsync(sourceBuffer);
+            var stagedRead = await staged.ReadAsync(stagedBuffer);
+            if (sourceRead != stagedRead)
+            {
+                return false;
+            }
+            if (sourceRead == 0)
+            {
+                return true;
+            }
+            if (!sourceBuffer.AsSpan(0, sourceRead)
+                .SequenceEqual(stagedBuffer.AsSpan(0, stagedRead)))
+            {
+                return false;
+            }
         }
     }
 

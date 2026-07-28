@@ -14,7 +14,13 @@ namespace Listenarr.Infrastructure.FileSystem
 {
     public partial class FileMover
     {
-        public async Task<bool> MoveFileAsync(string sourceFile, string destFile)
+        public Task<bool> MoveFileAsync(string sourceFile, string destFile) =>
+            MoveFileAsync(sourceFile, destFile, operationId: null);
+
+        internal async Task<bool> MoveFileAsync(
+            string sourceFile,
+            string destFile,
+            Guid? operationId)
         {
             if (string.Equals(
                     Path.GetFullPath(sourceFile),
@@ -33,7 +39,8 @@ namespace Listenarr.Infrastructure.FileSystem
             }
 
             var recoveryOutcome = await TryRecoverInterruptedFileMoveClaimsAsync(
-                pathLock);
+                pathLock,
+                operationId);
             if (recoveryOutcome == FileMoveClaimRecoveryOutcome.Completed)
             {
                 return true;
@@ -43,12 +50,25 @@ namespace Listenarr.Infrastructure.FileSystem
             {
                 return false;
             }
+            if (recoveryOutcome == FileMoveClaimRecoveryOutcome.SourceRecreated)
+            {
+                LogMutation(
+                    FileMutationOutcome.Blocked,
+                    FileAction.Move,
+                    sourceFile,
+                    destFile,
+                    "A new source generation exists beside committed move state");
+                return false;
+            }
 
             return await MoveFileWithLocksAsync(
-                pathLock);
+                pathLock,
+                operationId);
         }
 
-        private async Task<bool> MoveFileWithLocksAsync(FileMoveGateLease lease)
+        private async Task<bool> MoveFileWithLocksAsync(
+            FileMoveGateLease lease,
+            Guid? operationId)
         {
             var sourceFile = lease.SourcePath;
             var destFile = lease.DestinationPath;
@@ -67,7 +87,8 @@ namespace Listenarr.Infrastructure.FileSystem
             }
 
             var idempotentOutcome = await TryCompleteIdempotentFileMoveAsync(
-                lease);
+                lease,
+                operationId);
             if (idempotentOutcome == IdempotentFileMoveOutcome.Completed)
             {
                 return true;
@@ -96,7 +117,8 @@ namespace Listenarr.Infrastructure.FileSystem
             }
 
             var managedFallback = await TryManagedFileMoveFallbackAsync(
-                lease);
+                lease,
+                operationId);
             if (managedFallback == FileMoveFallbackOutcome.Success)
             {
                 LogMutation(

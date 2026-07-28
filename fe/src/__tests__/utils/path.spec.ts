@@ -19,6 +19,7 @@ import { describe, it, expect } from 'vitest'
 import {
   toForward,
   trimTrailingSlash,
+  trimTrailingDirectorySeparators,
   normalizeForCompare,
   isAbsolutePath,
   hasRelativePathSegment,
@@ -55,6 +56,13 @@ describe('path utils', () => {
     expect(trimTrailingSlash('C:\\')).toBe('C:\\')
     expect(trimTrailingSlash('C:\\\\')).toBe('C:\\')
     expect(trimTrailingSlash('C:////')).toBe('C:/')
+  })
+
+  it('preserves a trailing backslash as part of a Unix directory name', () => {
+    expect(trimTrailingDirectorySeparators('/library/Book\\', 'unix')).toBe('/library/Book\\')
+    expect(pathsEqual('/library/Book\\', '/library/Book', 'unix', 'Sensitive')).toBe(false)
+    expect(stripRootPrefix('/library', '/library/Book\\', 'Sensitive', 'unix')).toBe('Book\\')
+    expect(joinPaths('/library', 'Book\\', 'unix')).toBe('/library/Book\\')
   })
 
   it('normalizeForCompare lowercases and trims', () => {

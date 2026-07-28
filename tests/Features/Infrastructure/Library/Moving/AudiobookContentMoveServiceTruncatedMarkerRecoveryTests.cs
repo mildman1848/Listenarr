@@ -32,6 +32,39 @@ public partial class AudiobookContentMoveServiceTests
     }
 
     [Fact]
+    public async Task MoveContentsAsync_PredecessorRecoveryWriteReplacedBeforeDeletion_PreservesReplacement()
+    {
+        var source = FileService.GetTempDirectory("content-move-replaced-recovery-write-src");
+        await FileService.GetFileAsync(source, "book.m4b", "audio");
+        var target = Path.Join(
+            FileService.GetTempPath(),
+            $"content-move-replaced-recovery-write-dst-{Guid.NewGuid():N}");
+        var initialRequest = await CreateLeasedMoveRequestAsync(source, target);
+        var request = await ReplaceMarkerTestLeaseAsync(initialRequest);
+        var markerPath = Path.Join(
+            source,
+            $".listenarr-move-{request.JobId:N}.pending");
+        var writePath = CreateTruncatedMarkerWritePath(
+            markerPath,
+            request.JobId,
+            initialRequest.LeaseGeneration);
+        var displacedPath = writePath + ".validated";
+        await File.WriteAllTextAsync(writePath, "{\"Version\":1");
+        var service = new AudiobookContentMoveService(
+            _provider.GetRequiredService<ILogger<AudiobookContentMoveService>>(),
+            _provider.GetRequiredService<IDbContextFactory<ListenArrDbContext>>(),
+            TimeProvider.System,
+            new ReplaceRecoveryWriteBeforeDeletion(writePath, displacedPath));
+
+        await Assert.ThrowsAsync<MoveNeedsAttentionException>(() =>
+            service.MoveContentsAsync(request, CancellationToken.None));
+
+        Assert.Equal("replacement", await File.ReadAllTextAsync(writePath));
+        Assert.True(File.Exists(displacedPath));
+        Assert.True(File.Exists(Path.Join(source, "book.m4b")));
+    }
+
+    [Fact]
     public async Task GetRecoverableMoveAsync_CompletePredecessorRecoveryWrite_IsPublished()
     {
         var source = FileService.GetTempDirectory("content-move-complete-recovery-write-src");
@@ -472,6 +505,28 @@ public partial class AudiobookContentMoveServiceTests
         int leaseGeneration) =>
         markerPath
         + $".writing-{jobId:N}-g{leaseGeneration}-{Guid.NewGuid():N}";
+
+    private sealed class ReplaceRecoveryWriteBeforeDeletion(
+        string writePath,
+        string displacedPath) : IMoveFaultInjector
+    {
+        private bool _replaced;
+
+        public void OnRecoveryMarkerWrite(
+            Guid jobId,
+            RecoveryMarkerWriteFaultPoint faultPoint)
+        {
+            if (_replaced
+                || faultPoint != RecoveryMarkerWriteFaultPoint.BeforeTemporaryFileDeletion)
+            {
+                return;
+            }
+
+            _replaced = true;
+            File.Move(writePath, displacedPath);
+            File.WriteAllText(writePath, "replacement");
+        }
+    }
 
     private sealed class StopBeforeRecoveryMarkerPublication : IMoveFaultInjector
     {

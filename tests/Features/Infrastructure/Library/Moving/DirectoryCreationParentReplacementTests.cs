@@ -1,31 +1,99 @@
 using Listenarr.Tests.Common;
+using Xunit.Sdk;
 
 namespace Listenarr.Tests.Features.Infrastructure.Library.Moving;
+
+public sealed class DirectoryLinkFactAttribute : FactAttribute
+{
+    public DirectoryLinkFactAttribute()
+    {
+        if (IsRequired() || CanCreateDirectoryLink(out _))
+        {
+            return;
+        }
+
+        Skip = "Directory symbolic links are unavailable on this test runner.";
+    }
+
+    private static bool IsRequired() =>
+        string.Equals(
+            Environment.GetEnvironmentVariable("LISTENARR_REQUIRE_DIRECTORY_LINK_TESTS"),
+            "true",
+            StringComparison.OrdinalIgnoreCase);
+
+    private static bool CanCreateDirectoryLink(out string? reason)
+    {
+        var root = Path.Join(
+            Path.GetTempPath(),
+            $"listenarr-directory-link-capability-{Guid.NewGuid():N}");
+        var target = Path.Join(root, "target");
+        var link = Path.Join(root, "link");
+        try
+        {
+            Directory.CreateDirectory(target);
+            Directory.CreateSymbolicLink(link, target);
+            reason = null;
+            return (File.GetAttributes(link) & FileAttributes.ReparsePoint) != 0
+                && Directory.ResolveLinkTarget(link, returnFinalTarget: true) != null;
+        }
+        catch (Exception exception) when (exception is
+            IOException or UnauthorizedAccessException or PlatformNotSupportedException)
+        {
+            reason = exception.Message;
+            return false;
+        }
+        finally
+        {
+            try
+            {
+                if (Directory.Exists(link)
+                    && (File.GetAttributes(link) & FileAttributes.ReparsePoint) != 0)
+                {
+                    Directory.Delete(link);
+                }
+
+                if (Directory.Exists(target))
+                {
+                    Directory.Delete(target);
+                }
+
+                if (Directory.Exists(root))
+                {
+                    Directory.Delete(root);
+                }
+            }
+            catch (Exception exception) when (exception is
+                IOException or UnauthorizedAccessException)
+            {
+                // Best effort discovery-time cleanup.
+            }
+        }
+    }
+}
 
 [Trait("Area", "Library")]
 [Trait("Name", "DirectoryCreationParentReplacementTests")]
 [Trait("Category", "Infrastructure")]
 public sealed class DirectoryCreationParentReplacementTests : BaseTests
 {
-    [Fact]
+    [DirectoryLinkFact]
     public Task EnsureCreatedHierarchyAsync_ParentReplacedBeforeHandleOpen_DoesNotCreateOutsideBoundary() =>
         AssertParentReplacementBlockedAsync(replaceBeforeOpen: true);
 
-    [Fact]
+    [DirectoryLinkFact]
     public Task EnsureCreatedHierarchyAsync_ParentReplacedAfterHandleOpen_DoesNotCreateOutsideBoundary() =>
         AssertParentReplacementBlockedAsync(replaceBeforeOpen: false);
 
-    [Fact]
+    [DirectoryLinkFact]
     public async Task EnsureCreatedHierarchyAsync_LinkedManagedBoundary_CreatesInsidePinnedTarget()
     {
         var root = FileService.GetTempDirectory("directory-create-linked-boundary");
         var physicalBoundary = Path.Join(root, "physical");
         var linkedBoundary = Path.Join(root, "linked");
         Directory.CreateDirectory(physicalBoundary);
-        if (!TryCreateDirectoryLink(linkedBoundary, physicalBoundary))
-        {
-            return;
-        }
+        RequireDirectoryLinkCapability(root);
+        Directory.CreateSymbolicLink(linkedBoundary, physicalBoundary);
+        await AddAuthorizedRootAsync(linkedBoundary, "Linked Boundary Test Root");
 
         var destination = Path.Join(linkedBoundary, "Author", "Book");
         var semantics = FileSystemPathSemantics.CurrentHostDefault;
@@ -66,19 +134,15 @@ public sealed class DirectoryCreationParentReplacementTests : BaseTests
         var parent = Path.Join(root, "Author");
         var displacedParent = Path.Join(root, "Author.original");
         var external = FileService.GetTempDirectory($"directory-create-parent-race-external-{suffix}");
-        var probe = Path.Join(root, "link-probe");
         Directory.CreateDirectory(parent);
-
-        if (!TryCreateDirectoryLink(probe, external))
-        {
-            return;
-        }
-        Directory.Delete(probe);
+        RequireDirectoryLinkCapability(root);
+        await AddAuthorizedRootAsync(root, "Parent Replacement Test Root");
 
         var destination = Path.Join(parent, "Book");
         var semantics = FileSystemPathSemantics.CurrentHostDefault;
         var store = _provider.GetRequiredService<ILibraryDirectoryOwnershipStore>();
         var hookRan = false;
+        Exception? hookFailure = null;
         void ReplaceParent(string path)
         {
             var expectedPath = replaceBeforeOpen ? parent : destination;
@@ -88,8 +152,16 @@ public sealed class DirectoryCreationParentReplacementTests : BaseTests
             }
 
             hookRan = true;
-            Directory.Move(parent, displacedParent);
-            Directory.CreateSymbolicLink(parent, external);
+            try
+            {
+                Directory.Move(parent, displacedParent);
+                Directory.CreateSymbolicLink(parent, external);
+            }
+            catch (Exception exception)
+            {
+                hookFailure = exception;
+                throw;
+            }
         }
 
         using var hook = replaceBeforeOpen
@@ -106,6 +178,7 @@ public sealed class DirectoryCreationParentReplacementTests : BaseTests
                     "parent-replacement-regression"));
 
             Assert.True(hookRan);
+            Assert.Null(hookFailure);
             Assert.Empty(Directory.EnumerateFileSystemEntries(external));
             Assert.False(File.Exists(Path.Join(
                 external,
@@ -129,17 +202,48 @@ public sealed class DirectoryCreationParentReplacementTests : BaseTests
         }
     }
 
-    private static bool TryCreateDirectoryLink(string linkPath, string targetPath)
+    private static void RequireDirectoryLinkCapability(string root)
     {
+        var targetPath = Path.Join(root, $"link-capability-target-{Guid.NewGuid():N}");
+        var linkPath = Path.Join(root, $"link-capability-link-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(targetPath);
         try
         {
             Directory.CreateSymbolicLink(linkPath, targetPath);
-            return true;
+            var attributes = File.GetAttributes(linkPath);
+            Assert.True(
+                (attributes & FileAttributes.ReparsePoint) != 0,
+                "The directory-link capability probe did not create a reparse point.");
+            Assert.NotNull(Directory.ResolveLinkTarget(linkPath, returnFinalTarget: true));
         }
         catch (Exception exception) when (exception is
             IOException or UnauthorizedAccessException or PlatformNotSupportedException)
         {
-            return false;
+            var reason =
+                $"Directory symbolic links are unavailable on this test runner: {exception.Message}";
+            if (string.Equals(
+                Environment.GetEnvironmentVariable("LISTENARR_REQUIRE_DIRECTORY_LINK_TESTS"),
+                "true",
+                StringComparison.OrdinalIgnoreCase))
+            {
+                throw new XunitException(reason);
+            }
+
+            throw new XunitException(
+                $"{reason} The capability changed after test discovery.");
+        }
+        finally
+        {
+            TryDeleteDirectoryLink(linkPath);
+            try
+            {
+                Directory.Delete(targetPath);
+            }
+            catch (Exception exception) when (exception is
+                IOException or UnauthorizedAccessException)
+            {
+                // Best effort test cleanup. The per-test temporary root is removed by BaseTests.
+            }
         }
     }
 

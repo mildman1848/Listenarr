@@ -137,7 +137,6 @@ public sealed class ManualImportCompanionImporter
         }
 
         var importedCount = 0;
-        var operationId = Guid.NewGuid();
         foreach (var companionFile in companionFiles)
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -174,6 +173,12 @@ public sealed class ManualImportCompanionImporter
                     destinationPath,
                     cancellationToken);
                 destinationPath = destinationReservation.Path;
+                var operationId = FileMoveOperationIdentity.Create(
+                    "manual-import-companion",
+                    audiobookIds[0],
+                    action,
+                    Path.GetFullPath(companionFile),
+                    Path.GetFullPath(destinationPath));
 
                 var destinationDirectory = Path.GetDirectoryName(destinationPath)
                     ?? throw new InvalidOperationException(
@@ -218,7 +223,8 @@ public sealed class ManualImportCompanionImporter
                 var success = await _fileMover.PerformActionOn(
                     action,
                     companionFile,
-                    destinationPath);
+                    destinationPath,
+                    operationId);
                 if (success)
                 {
                     destinationTracker.Commit(destinationReservation);

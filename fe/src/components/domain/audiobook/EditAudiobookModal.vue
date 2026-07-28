@@ -1412,7 +1412,8 @@ async function initializeForm(audiobook: Audiobook) {
       })
       .sort(
         (first, second) =>
-          trimTrailingSlash(second.path).length - trimTrailingSlash(first.path).length,
+          trimTrailingDirectorySeparators(second.path, rootFolderPathKind(second)).length -
+          trimTrailingDirectorySeparators(first.path, rootFolderPathKind(first)).length,
       )[0]
 
     if (matchingRoot) {
@@ -1495,7 +1496,7 @@ async function initializeForm(audiobook: Audiobook) {
 
 import {
   toForward,
-  trimTrailingSlash,
+  trimTrailingDirectorySeparators,
   normalizeForCompare,
   isAbsolutePath,
   validateLibraryDestinationPath,
@@ -1581,7 +1582,7 @@ function combinedBasePath(): string | null {
   if (selectedRootId.value === 0) {
     const pathKind = detectPathKind(r)
     const normalized = pathKind === 'windows' ? toForward(r) : r
-    return trimTrailingSlash(normalized)
+    return trimTrailingDirectorySeparators(normalized, pathKind)
   }
 
   if (!rel) return r

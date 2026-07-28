@@ -104,27 +104,40 @@ internal sealed partial class AudiobookContentMoveService
                         "A current or future-generation recovery-marker write file is truncated and was preserved.");
                 }
 
-                await EnsureMutationAuthorizedAsync(request, source, target, cancellationToken);
                 ValidateRecoveryMarkerWritePath(safeWritePath, markerDirectory);
-                var currentRead = ReadRecoveryMarkerWriteResult(safeWritePath);
-                if (currentRead.State == MarkerReadState.TemporarilyUnreadable)
-                {
-                    throw new IOException(
-                        "A predecessor recovery-marker write file became temporarily unreadable and was preserved.",
-                        currentRead.Error);
-                }
-                if (currentRead.State != MarkerReadState.CorruptOrTruncated
-                    || !TryParseMarkerWriteIdentity(
-                        safeWritePath,
-                        authoritativeMarkerPath,
-                        out var currentIdentity)
-                    || currentIdentity != writeIdentity)
-                {
-                    throw new MoveNeedsAttentionException(
-                        "A truncated recovery-marker write file changed before cleanup.");
-                }
-
-                File.Delete(safeWritePath);
+                await RetirePinnedArtifactAsync(
+                    safeWritePath,
+                    entry =>
+                    {
+                        var currentRead = ReadRecoveryMarkerWriteResult(entry);
+                        if (currentRead.State == MarkerReadState.TemporarilyUnreadable)
+                        {
+                            throw new IOException(
+                                "A predecessor recovery-marker write file became temporarily unreadable and was preserved.",
+                                currentRead.Error);
+                        }
+                        if (currentRead.State != MarkerReadState.CorruptOrTruncated
+                            || !TryParseMarkerWriteIdentity(
+                                safeWritePath,
+                                authoritativeMarkerPath,
+                                out var currentIdentity)
+                            || currentIdentity != writeIdentity)
+                        {
+                            throw new MoveNeedsAttentionException(
+                                "A truncated recovery-marker write file changed before cleanup.");
+                        }
+                    },
+                    async () =>
+                    {
+                        await EnsureMutationAuthorizedAsync(
+                            request,
+                            source,
+                            target,
+                            cancellationToken);
+                        faultInjector?.OnRecoveryMarkerWrite(
+                            request.JobId,
+                            RecoveryMarkerWriteFaultPoint.BeforeTemporaryFileDeletion);
+                    });
                 logger.LogInformation(
                     "Removed truncated predecessor recovery-marker write file for move job {JobId}",
                     request.JobId);
@@ -179,25 +192,39 @@ internal sealed partial class AudiobookContentMoveService
                 }
             }
 
-            await EnsureMutationAuthorizedAsync(request, source, target, cancellationToken);
             ValidateRecoveryMarkerWritePath(safeWritePath, markerDirectory);
-            var currentReadAfterAuthorization = ReadRecoveryMarkerWriteResult(safeWritePath);
-            if (currentReadAfterAuthorization.State == MarkerReadState.TemporarilyUnreadable)
-            {
-                throw new IOException(
-                    "A recovery-marker write file became temporarily unreadable and was preserved.",
-                    currentReadAfterAuthorization.Error);
-            }
-            var currentMarker = currentReadAfterAuthorization.State == MarkerReadState.Valid
-                ? currentReadAfterAuthorization.Marker!
-                : throw new MoveNeedsAttentionException(
-                    "A recovery-marker write-temporary file changed before deletion.");
-            ValidateRecoveryMarker(
-                new ParsedRecoveryMarker(currentMarker, ObsoleteStage: null),
-                request,
-                source,
-                target);
-            File.Delete(safeWritePath);
+            await RetirePinnedArtifactAsync(
+                safeWritePath,
+                entry =>
+                {
+                    var currentRead = ReadRecoveryMarkerWriteResult(entry);
+                    if (currentRead.State == MarkerReadState.TemporarilyUnreadable)
+                    {
+                        throw new IOException(
+                            "A recovery-marker write file became temporarily unreadable and was preserved.",
+                            currentRead.Error);
+                    }
+                    var currentMarker = currentRead.State == MarkerReadState.Valid
+                        ? currentRead.Marker!
+                        : throw new MoveNeedsAttentionException(
+                            "A recovery-marker write-temporary file changed before deletion.");
+                    ValidateRecoveryMarker(
+                        new ParsedRecoveryMarker(currentMarker, ObsoleteStage: null),
+                        request,
+                        source,
+                        target);
+                },
+                async () =>
+                {
+                    await EnsureMutationAuthorizedAsync(
+                        request,
+                        source,
+                        target,
+                        cancellationToken);
+                    faultInjector?.OnRecoveryMarkerWrite(
+                        request.JobId,
+                        RecoveryMarkerWriteFaultPoint.BeforeTemporaryFileDeletion);
+                });
             logger.LogInformation(
                 "Removed validated orphan recovery-marker write file for move job {JobId}",
                 request.JobId);
@@ -208,6 +235,19 @@ internal sealed partial class AudiobookContentMoveService
         string writePath)
     {
         var result = ReadJsonMarker<MoveRecoveryMarker>(writePath);
+        return ClassifyRecoveryMarkerWriteResult(result);
+    }
+
+    private static MarkerReadResult<MoveRecoveryMarker> ReadRecoveryMarkerWriteResult(
+        PinnedDirectoryCreation.PinnedFileEntry entry)
+    {
+        var result = ReadJsonMarker<MoveRecoveryMarker>(entry);
+        return ClassifyRecoveryMarkerWriteResult(result);
+    }
+
+    private static MarkerReadResult<MoveRecoveryMarker> ClassifyRecoveryMarkerWriteResult(
+        MarkerReadResult<MoveRecoveryMarker> result)
+    {
         if (result.State == MarkerReadState.Valid
             && (result.Marker!.Version != RecoveryMarkerVersion
                 || !IsKnownRecoveryStage(result.Marker.Stage)))

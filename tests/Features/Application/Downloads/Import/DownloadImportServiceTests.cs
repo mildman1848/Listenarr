@@ -249,7 +249,8 @@ namespace Listenarr.Tests.Features.Application.Downloads.Import
                 service => service.PerformActionOn(
                     It.IsAny<FileAction>(),
                     It.IsAny<string>(),
-                    It.IsAny<string>()),
+                    It.IsAny<string>(),
+                    It.IsAny<Guid?>()),
                 Times.Never);
             ownershipStore.VerifyAll();
         }
@@ -648,7 +649,8 @@ namespace Listenarr.Tests.Features.Application.Downloads.Import
                 mover => mover.PerformActionOn(
                     It.IsAny<FileAction>(),
                     It.IsAny<string>(),
-                    It.IsAny<string>()),
+                    It.IsAny<string>(),
+                    It.IsAny<Guid?>()),
                 Times.Never);
         }
 
@@ -658,8 +660,12 @@ namespace Listenarr.Tests.Features.Application.Downloads.Import
             var attemptedDestinations = new List<string>();
             var callCount = 0;
             var fileMover = new Mock<IFileMover>();
-            fileMover.Setup(mover => mover.PerformActionOn(FileAction.Copy, It.IsAny<string>(), It.IsAny<string>()))
-                .Returns<FileAction, string, string?>((_, source, destination) =>
+            fileMover.Setup(mover => mover.PerformActionOn(
+                    FileAction.Copy,
+                    It.IsAny<string>(),
+                    It.IsAny<string>(),
+                    It.IsAny<Guid?>()))
+                .Returns<FileAction, string, string?, Guid?>((_, source, destination, _) =>
                 {
                     Assert.NotNull(destination);
                     attemptedDestinations.Add(destination!);

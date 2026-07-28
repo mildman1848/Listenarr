@@ -319,14 +319,24 @@ internal sealed partial class AudiobookContentMoveService
 
             foreach (var directory in directories.OrderByDescending(path => path.Length))
             {
-                ValidateOwnedCleanupEntry(directory, directoryPath);
-                if (Directory.Exists(directory)
-                    && !Directory.EnumerateFileSystemEntries(directory).Any())
+                if (!Directory.Exists(directory))
                 {
-                    await authorizeMutation();
-                    ValidateOwnedCleanupEntry(directory, directoryPath);
-                    Directory.Delete(directory, recursive: false);
+                    continue;
                 }
+
+                await RetirePinnedEmptyDirectoryAsync(
+                    directory,
+                    "owned cleanup child directory",
+                    () =>
+                    {
+                        ValidateOwnedCleanupEntry(directory, directoryPath);
+                        if (Directory.EnumerateFileSystemEntries(directory).Any())
+                        {
+                            throw new MoveNeedsAttentionException(
+                                "An owned cleanup child directory changed before retirement.");
+                        }
+                    },
+                    authorizeMutation);
             }
 
             if (hasDirectoryMarker)
@@ -367,27 +377,26 @@ internal sealed partial class AudiobookContentMoveService
                     "The owned directory still contains unexpected content after cleanup.");
             }
 
-            faultInjector?.OnOwnershipCleanup(
-                expectedTombstone.JobId,
-                markerKind,
-                OwnershipCleanupFaultPoint.BeforeDirectoryDelete);
-            ValidateExistingMoveDirectory(directoryPath, "owned cleanup directory");
-            if (Directory.EnumerateFileSystemEntries(directoryPath).Any())
-            {
-                throw new MoveNeedsAttentionException(
-                    "The owned directory changed before final deletion.");
-            }
-
-            await authorizeMutation();
-            RejectRecreatedOriginalOwnedPath(expectedTombstone);
-            ValidateExistingMoveDirectory(directoryPath, "owned cleanup directory");
-            if (Directory.EnumerateFileSystemEntries(directoryPath).Any())
-            {
-                throw new MoveNeedsAttentionException(
-                    "The owned cleanup directory changed during final authorization.");
-            }
-
-            Directory.Delete(directoryPath, recursive: false);
+            await RetirePinnedEmptyDirectoryAsync(
+                directoryPath,
+                "owned cleanup directory",
+                () =>
+                {
+                    RejectRecreatedOriginalOwnedPath(expectedTombstone);
+                    ValidateExistingMoveDirectory(
+                        directoryPath,
+                        "owned cleanup directory");
+                    if (Directory.EnumerateFileSystemEntries(directoryPath).Any())
+                    {
+                        throw new MoveNeedsAttentionException(
+                            "The owned cleanup directory changed before retirement.");
+                    }
+                },
+                authorizeMutation,
+                () => faultInjector?.OnOwnershipCleanup(
+                    expectedTombstone.JobId,
+                    markerKind,
+                    OwnershipCleanupFaultPoint.BeforeDirectoryDelete));
         }
 
         ValidateExistingMoveDirectory(tombstoneParent, "cleanup tombstone directory");

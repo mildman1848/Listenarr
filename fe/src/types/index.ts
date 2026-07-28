@@ -308,6 +308,7 @@ export interface RootFolderPathChangeResult {
   totalJobs: number
   completedJobs: number
   error?: string | null
+  targetIdentityEnrollmentState: 'NotRequired' | 'Authorized' | 'LegacyUnenrolled' | 'Unavailable'
 }
 
 export interface TranslatePathRequest {

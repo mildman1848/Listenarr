@@ -104,6 +104,7 @@ namespace Listenarr.Application.Audiobooks.RootFolders
             }
 
             await EnsureNoActiveRelocationAsync(root.Id);
+            await EnsureNoNonRemovedDirectoryOwnershipAsync(root.Id);
 
             var sourceSemantics = await ResolveSemanticsAsync(root.Path, root.CaseSensitivityMode);
             await EnsureNoActiveMoveJobsTouchRootAsync(root.Path, sourceSemantics.Semantics);
@@ -337,6 +338,16 @@ namespace Listenarr.Application.Audiobooks.RootFolders
             {
                 throw new InvalidOperationException(
                     "Root folder metadata and deletion are locked while a relocation is active.");
+            }
+        }
+
+        private async Task EnsureNoNonRemovedDirectoryOwnershipAsync(
+            int rootFolderId)
+        {
+            if (await _repo.HasNonRemovedDirectoryOwnershipAsync(rootFolderId))
+            {
+                throw new InvalidOperationException(
+                    "Root folder deletion is blocked while durable directory ownership claims remain active.");
             }
         }
 

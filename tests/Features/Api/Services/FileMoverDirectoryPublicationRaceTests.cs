@@ -172,17 +172,63 @@ public sealed class FileMoverDirectoryPublicationRaceTests : BaseTests
         }
     }
 
+    [Fact]
+    public async Task CopyDirectoryAsync_StagingFileReplacedBeforeCleanup_PreservesReplacement()
+    {
+        var root = FileService.GetTempDirectory("directory-copy-cleanup-race");
+        var source = Path.Join(root, "source");
+        var destination = Path.Join(root, "destination");
+        Directory.CreateDirectory(source);
+        await File.WriteAllTextAsync(Path.Join(source, "book.m4b"), "source-audio");
+        string? stagingRoot = null;
+        string? displacedFile = null;
+        var mover = CreateMover(
+            beforePublication: _ =>
+                throw new IOException("Force staging cleanup."),
+            beforeStagingCleanup: async path =>
+            {
+                stagingRoot = path;
+                var stagingFile = Path.Join(path, "book.m4b");
+                displacedFile = stagingFile + ".validated";
+                File.Move(stagingFile, displacedFile);
+                await File.WriteAllTextAsync(stagingFile, "replacement");
+            });
+
+        try
+        {
+            var result = await mover.CopyDirectoryAsync(source, destination);
+
+            Assert.False(result);
+            Assert.NotNull(stagingRoot);
+            Assert.NotNull(displacedFile);
+            Assert.Equal(
+                "replacement",
+                await File.ReadAllTextAsync(Path.Join(stagingRoot!, "book.m4b")));
+            Assert.Equal("source-audio", await File.ReadAllTextAsync(displacedFile!));
+            Assert.False(Directory.Exists(destination));
+        }
+        finally
+        {
+            if (stagingRoot != null && Directory.Exists(stagingRoot))
+            {
+                Directory.Delete(stagingRoot, recursive: true);
+            }
+        }
+    }
+
     private static FileMover CreateMover(
         Func<Task>? afterPreflight = null,
         Func<string, Task>? afterStagingDirectoriesCreated = null,
-        Func<string, Task>? beforePublication = null) => new(
+        Func<string, Task>? beforePublication = null,
+        Func<string, Task>? beforeStagingCleanup = null) => new(
         new NullLogger<FileMover>(),
         options: Options.Create(new FileMoverOptions { MaxRetries = 1 }),
         semanticsResolver: new FileSystemSemanticsResolver())
         {
             AfterDirectoryCopyPreflightForTestAsync = afterPreflight,
             AfterDirectoryCopyStagingDirectoriesCreatedForTestAsync = afterStagingDirectoriesCreated,
-            BeforeDirectoryCopyPublicationForTestAsync = beforePublication
+            BeforeDirectoryCopyPublicationForTestAsync = beforePublication,
+            BeforeDirectoryCopyStagingCleanupForTestAsync = beforeStagingCleanup
         };
 
     private static bool TryCreateDirectoryLink(string linkPath, string targetPath)

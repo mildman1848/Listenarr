@@ -109,24 +109,49 @@ internal sealed partial class AudiobookContentMoveService
         string quarantineRoot,
         MoveJobEntry manifestEntry,
         FileSystemPathSemantics sourceSemantics,
+        FileSystemPathSemantics targetSemantics,
         CancellationToken cancellationToken)
     {
-        var (directorySegments, fileName) = SplitPinnedRelativeFilePath(
+        var (quarantineDirectorySegments, fileName) = SplitPinnedRelativeFilePath(
             manifestEntry.RelativePath,
             sourceSemantics);
+        var (targetDirectorySegments, targetFileName) = SplitPinnedRelativeFilePath(
+            manifestEntry.RelativePath,
+            targetSemantics);
+        if (!FileSystemPathIdentity.TryResolveRelativePathWithinBase(
+                target,
+                manifestEntry.RelativePath,
+                targetSemantics,
+                out var targetFile))
+        {
+            throw new MoveNeedsAttentionException(
+                $"Published target path escaped before pinned source deletion: {manifestEntry.RelativePath}");
+        }
+
         try
         {
             using var quarantinePath = PinnedMoveDirectoryPath.OpenExisting(
                 quarantineRoot,
-                directorySegments);
+                quarantineDirectorySegments);
+            using var targetPath = PinnedMoveDirectoryPath.OpenExisting(
+                target,
+                targetDirectorySegments);
             ValidatePinnedParentPath(
                 quarantinePath.Current.FullPath,
                 quarantineFile,
                 sourceSemantics,
                 "quarantine deletion");
+            ValidatePinnedParentPath(
+                targetPath.Current.FullPath,
+                targetFile,
+                targetSemantics,
+                "target verification");
             using var quarantineEntry = quarantinePath.Current.OpenExistingFile(
                 fileName,
                 requireDeleteAccess: true);
+            using var targetEntry = targetPath.Current.OpenExistingFile(
+                targetFileName,
+                requireDeleteAccess: false);
             if (!quarantineEntry.VisiblePathMatches()
                 || !await quarantineEntry.MatchesAsync(
                     manifestEntry.Length,
@@ -147,6 +172,7 @@ internal sealed partial class AudiobookContentMoveService
                 target,
                 cancellationToken);
             quarantinePath.EnsureVisibleHierarchy();
+            targetPath.EnsureVisibleHierarchy();
             if (!quarantineEntry.VisiblePathMatches()
                 || !await quarantineEntry.MatchesAsync(
                     manifestEntry.Length,
@@ -155,6 +181,28 @@ internal sealed partial class AudiobookContentMoveService
             {
                 throw new MoveNeedsAttentionException(
                     $"The pinned quarantine entry changed at deletion: {manifestEntry.RelativePath}");
+            }
+
+            // The target is deliberately verified last. No callback, lease await,
+            // pathname reopen, or other asynchronous work may occur between this
+            // content check and retiring the only recoverable source generation.
+            if (!targetEntry.VisiblePathMatches()
+                || !await targetEntry.MatchesAsync(
+                    manifestEntry.Length,
+                    manifestEntry.Sha256,
+                    cancellationToken))
+            {
+                throw new MoveNeedsAttentionException(
+                    $"The pinned published target changed at source deletion: {manifestEntry.RelativePath}");
+            }
+
+            quarantinePath.EnsureVisibleHierarchy();
+            targetPath.EnsureVisibleHierarchy();
+            if (!quarantineEntry.VisiblePathMatches()
+                || !targetEntry.VisiblePathMatches())
+            {
+                throw new MoveNeedsAttentionException(
+                    $"The pinned source or target generation changed at deletion: {manifestEntry.RelativePath}");
             }
 
             quarantineEntry.Delete();

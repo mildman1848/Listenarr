@@ -4,6 +4,7 @@ using Listenarr.Infrastructure.DependencyInjection;
 using Listenarr.Infrastructure.DependencyInjection.Downloads;
 using Listenarr.Infrastructure.Downloads.DirectDownload;
 using Listenarr.Infrastructure.HostedServices;
+using Listenarr.Tests.Common;
 using Listenarr.Tests.Mocks;
 using Listenarr.Tests.Mocks.Api;
 using Microsoft.AspNetCore.DataProtection;
@@ -146,6 +147,8 @@ namespace Listenarr.Tests.Builders
             services.AddListenarrInfrastructure(
                 options => options.UseInMemoryDatabase(databaseName: Guid.NewGuid().ToString()),
                 contentRootPath: _contentRootPath);
+            services.Replace(
+                ServiceDescriptor.Scoped<ILibraryAddCommitStore, InMemoryLibraryAddCommitStore>());
 
             var appMetricsServiceMock = new Mock<IAppMetricsService>();
             services.AddSingleton(appMetricsServiceMock);

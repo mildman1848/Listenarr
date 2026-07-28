@@ -1,5 +1,4 @@
 using System.ComponentModel;
-using System.Runtime.InteropServices;
 using Microsoft.Win32.SafeHandles;
 
 namespace Listenarr.Infrastructure.FileSystem;
@@ -28,6 +27,59 @@ internal sealed partial class PinnedDirectoryCreation
         anchor.Dispose();
         throw new InvalidOperationException(
             "The managed directory boundary changed while it was being pinned.");
+    }
+
+    internal static PinnedDirectoryAnchor OpenPinnedHierarchyNoFollow(
+        string path,
+        bool createMissing)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(path);
+        var fullPath = Path.GetFullPath(path);
+        var root = Path.GetPathRoot(fullPath);
+        if (string.IsNullOrWhiteSpace(root))
+        {
+            throw new InvalidOperationException(
+                "A pinned filesystem hierarchy requires an absolute root.");
+        }
+
+        var current = OpenPinnedDirectoryNoFollow(root);
+        try
+        {
+            var relative = Path.GetRelativePath(root, fullPath);
+            if (relative == ".")
+            {
+                return current;
+            }
+
+            foreach (var segment in relative.Split(
+                [Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar],
+                StringSplitOptions.RemoveEmptyEntries))
+            {
+                PinnedDirectoryAnchor next;
+                try
+                {
+                    next = current.OpenExistingChild(segment);
+                }
+                catch (Win32Exception exception) when (
+                    createMissing && exception.NativeErrorCode is 2 or 3)
+                {
+                    using var creation = current.TryCreateChild(segment);
+                    next = creation.Created
+                        ? creation.OpenCreatedDirectoryAnchor()
+                        : current.OpenExistingChild(segment);
+                }
+
+                current.Dispose();
+                current = next;
+            }
+
+            return current;
+        }
+        catch
+        {
+            current.Dispose();
+            throw;
+        }
     }
 
     internal PinnedDirectoryAnchor OpenCreatedDirectoryAnchor()
@@ -73,6 +125,28 @@ internal sealed partial class PinnedDirectoryCreation
         {
             ThrowIfDisposed();
             return DuplicateSafeHandle(_handle);
+        }
+
+        internal void FlushDirectoryEntry()
+        {
+            ThrowIfDisposed();
+            FlushDirectoryPathToDisk(_handle, FullPath);
+        }
+
+        internal bool IsOnSameVolume(PinnedDirectoryAnchor directory)
+        {
+            ThrowIfDisposed();
+            ArgumentNullException.ThrowIfNull(directory);
+            using var other = directory.DuplicateHandleForOperation();
+            return HandlesAreOnSameVolume(_handle, other);
+        }
+
+        internal bool HasUnsupportedCrossVolumeMetadata()
+        {
+            ThrowIfDisposed();
+            return PinnedDirectoryCreation.HasUnsupportedCrossVolumeMetadata(
+                _handle,
+                requireSingleLink: false);
         }
 
         internal PinnedDirectoryAnchor Duplicate()
@@ -229,272 +303,4 @@ internal sealed partial class PinnedDirectoryCreation
         }
     }
 
-    private static PinnedDirectoryCreation TryCreateRelative(
-        SafeFileHandle parentHandle,
-        string parentPath,
-        string childName,
-        bool requireDirectoryDeleteAccess) => OperatingSystem.IsWindows()
-            ? TryCreateRelativeWindows(
-                parentHandle,
-                parentPath,
-                childName,
-                requireDirectoryDeleteAccess)
-            : TryCreateRelativeUnix(parentHandle, parentPath, childName);
-
-    private static PinnedDirectoryCreation TryCreateRelativeWindows(
-        SafeFileHandle parentHandle,
-        string parentPath,
-        string childName,
-        bool requireDirectoryDeleteAccess)
-    {
-        var ownedParentHandle = DuplicateSafeHandle(parentHandle);
-        try
-        {
-            var status = CreateRelativeWindows(
-                parentHandle,
-                childName,
-                directory: true,
-                hiddenFile: false,
-                requireDirectoryDeleteAccess,
-                out var rawHandle);
-            if (status == StatusObjectNameCollision)
-            {
-                return new PinnedDirectoryCreation(
-                    ownedParentHandle,
-                    directoryHandle: null,
-                    parentPath,
-                    childName,
-                    created: false);
-            }
-            if (status < 0)
-            {
-                throw CreateNtException(status, parentPath, childName);
-            }
-
-            return new PinnedDirectoryCreation(
-                ownedParentHandle,
-                new SafeFileHandle(rawHandle, ownsHandle: true),
-                parentPath,
-                childName,
-                created: true);
-        }
-        catch
-        {
-            ownedParentHandle.Dispose();
-            throw;
-        }
-    }
-
-    private static PinnedDirectoryCreation TryCreateRelativeUnix(
-        SafeFileHandle parentHandle,
-        string parentPath,
-        string childName)
-    {
-        var ownedParentHandle = DuplicateSafeHandle(parentHandle);
-        var temporaryName = $".listenarr-create-{Guid.NewGuid():N}";
-        SafeFileHandle? directoryHandle = null;
-        var temporaryExists = false;
-        try
-        {
-            var parentFd = parentHandle.DangerousGetHandle().ToInt32();
-            if (MkdirAt(parentFd, temporaryName, UnixDirectoryMode) != 0)
-            {
-                throw new Win32Exception(
-                    Marshal.GetLastWin32Error(),
-                    $"Could not create a pinned temporary directory beneath '{parentPath}'.");
-            }
-            temporaryExists = true;
-
-            directoryHandle = OpenDirectoryAtUnix(parentHandle, temporaryName);
-            var renameResult = OperatingSystem.IsMacOS()
-                ? RenameAtExclusiveMac(
-                    parentFd,
-                    temporaryName,
-                    parentFd,
-                    childName,
-                    RenameExclusiveMac)
-                : RenameAtNoReplaceLinux(
-                    parentFd,
-                    temporaryName,
-                    parentFd,
-                    childName,
-                    RenameNoReplace);
-            if (renameResult != 0)
-            {
-                var error = Marshal.GetLastWin32Error();
-                if (error == UnixAlreadyExists)
-                {
-                    directoryHandle.Dispose();
-                    directoryHandle = null;
-                    RemoveDirectoryAtUnix(parentHandle, temporaryName);
-                    temporaryExists = false;
-                    return new PinnedDirectoryCreation(
-                        ownedParentHandle,
-                        directoryHandle: null,
-                        parentPath,
-                        childName,
-                        created: false);
-                }
-
-                throw new Win32Exception(
-                    error,
-                    $"Could not publish a pinned directory beneath '{parentPath}'.");
-            }
-
-            temporaryExists = false;
-            return new PinnedDirectoryCreation(
-                ownedParentHandle,
-                directoryHandle,
-                parentPath,
-                childName,
-                created: true);
-        }
-        catch
-        {
-            directoryHandle?.Dispose();
-            if (temporaryExists)
-            {
-                TryRemoveDirectoryAtUnix(parentHandle, temporaryName);
-            }
-            ownedParentHandle.Dispose();
-            throw;
-        }
-    }
-
-    private static SafeFileHandle OpenRelativeDirectoryWindows(
-        SafeFileHandle parentHandle,
-        string childName,
-        string childPath,
-        bool requireDeleteAccess = false)
-    {
-        var status = OpenRelativeDirectoryWindowsCore(
-            parentHandle,
-            childName,
-            requireDeleteAccess,
-            out var rawHandle);
-        if (status < 0)
-        {
-            throw CreateNtOpenException(status, childPath);
-        }
-
-        var handle = new SafeFileHandle(rawHandle, ownsHandle: true);
-        try
-        {
-            EnsureWindowsParentIsNotReparsePoint(handle, childPath);
-            return handle;
-        }
-        catch
-        {
-            handle.Dispose();
-            throw;
-        }
-    }
-
-    private static int OpenRelativeDirectoryWindowsCore(
-        SafeFileHandle parentHandle,
-        string childName,
-        bool requireDeleteAccess,
-        out IntPtr rawHandle)
-    {
-        var nameBuffer = Marshal.StringToHGlobalUni(childName);
-        var unicodeStringPointer = IntPtr.Zero;
-        try
-        {
-            var unicodeString = new UnicodeString
-            {
-                Length = checked((ushort)(childName.Length * sizeof(char))),
-                MaximumLength = checked((ushort)((childName.Length + 1) * sizeof(char))),
-                Buffer = nameBuffer
-            };
-            unicodeStringPointer = Marshal.AllocHGlobal(Marshal.SizeOf<UnicodeString>());
-            Marshal.StructureToPtr(unicodeString, unicodeStringPointer, fDeleteOld: false);
-            var attributes = new ObjectAttributes
-            {
-                Length = (uint)Marshal.SizeOf<ObjectAttributes>(),
-                RootDirectory = parentHandle.DangerousGetHandle(),
-                ObjectName = unicodeStringPointer
-            };
-            var desiredAccess = FileListDirectory | FileReadAttributes | Synchronize
-                | (requireDeleteAccess ? DeleteAccess : 0u);
-            return NtCreateFile(
-                out rawHandle,
-                desiredAccess,
-                ref attributes,
-                out _,
-                IntPtr.Zero,
-                FileAttributeDirectory,
-                FileShareAll,
-                FileOpen,
-                FileDirectoryFile | FileSynchronousIoNonAlert | FileOpenReparsePoint,
-                IntPtr.Zero,
-                0);
-        }
-        finally
-        {
-            if (unicodeStringPointer != IntPtr.Zero)
-            {
-                Marshal.FreeHGlobal(unicodeStringPointer);
-            }
-            Marshal.FreeHGlobal(nameBuffer);
-        }
-    }
-
-    private static Win32Exception CreateNtOpenException(int status, string path)
-    {
-        var error = RtlNtStatusToDosError(status);
-        return new Win32Exception(
-            unchecked((int)error),
-            $"Could not open pinned filesystem entry '{path}' (Windows error {error}).");
-    }
-
-    private static SafeFileHandle DuplicateSafeHandle(SafeFileHandle sourceHandle)
-    {
-        if (OperatingSystem.IsWindows())
-        {
-            var process = GetCurrentProcess();
-            if (DuplicateHandleWindows(
-                    process,
-                    sourceHandle.DangerousGetHandle(),
-                    process,
-                    out var duplicate,
-                    desiredAccess: 0,
-                    inheritHandle: false,
-                    DuplicateSameAccess))
-            {
-                return duplicate;
-            }
-
-            throw new Win32Exception(
-                Marshal.GetLastWin32Error(),
-                "Could not duplicate a pinned directory handle.");
-        }
-
-        var descriptor = DuplicateFileDescriptor(
-            sourceHandle.DangerousGetHandle().ToInt32());
-        if (descriptor >= 0)
-        {
-            return new SafeFileHandle(new IntPtr(descriptor), ownsHandle: true);
-        }
-
-        throw new Win32Exception(
-            Marshal.GetLastWin32Error(),
-            "Could not duplicate a pinned directory descriptor.");
-    }
-
-    [DllImport("kernel32.dll")]
-    private static extern IntPtr GetCurrentProcess();
-
-    [DllImport("kernel32.dll", EntryPoint = "DuplicateHandle", SetLastError = true)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool DuplicateHandleWindows(
-        IntPtr sourceProcessHandle,
-        IntPtr sourceHandle,
-        IntPtr targetProcessHandle,
-        out SafeFileHandle targetHandle,
-        uint desiredAccess,
-        [MarshalAs(UnmanagedType.Bool)] bool inheritHandle,
-        uint options);
-
-    [DllImport("libc", EntryPoint = "dup", SetLastError = true)]
-    private static extern int DuplicateFileDescriptor(int fileDescriptor);
 }

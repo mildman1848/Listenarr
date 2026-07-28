@@ -53,6 +53,36 @@ internal static class LibraryDirectoryOwnershipRemoval
 
         if (quarantineExists)
         {
+            var insideMarkerPath = Path.Join(
+                quarantinePath,
+                LibraryDirectoryOwnershipMarker.FileName);
+            if (!File.Exists(insideMarkerPath)
+                && !Directory.EnumerateFileSystemEntries(quarantinePath).Any())
+            {
+                var parentPath = Path.GetDirectoryName(ownership.CanonicalPath)
+                    ?? throw new InvalidOperationException(
+                        "The durable directory ownership path has no parent directory.");
+                using var parent =
+                    PinnedDirectoryCreation.OpenPinnedDirectoryNoFollow(parentPath);
+                using var publication =
+                    parent.OpenExistingChildForPublication(
+                        Path.GetFileName(quarantinePath));
+                using var quarantine = publication.OpenCreatedDirectoryAnchor();
+                EnsurePhysicalIdentity(ownership, quarantine);
+                LibraryDirectoryOwnershipMarker.ValidateSiblingMarker(
+                    ownership,
+                    parent);
+                if (Directory.EnumerateFileSystemEntries(quarantinePath).Any()
+                    || !quarantine.VisiblePathMatches()
+                    || !parent.VisiblePathMatches())
+                {
+                    throw new InvalidOperationException(
+                        "The owned directory removal quarantine changed during recovery validation.");
+                }
+
+                return;
+            }
+
             LibraryDirectoryOwnershipMarker.Validate(
                 ownership,
                 quarantinePath);
@@ -64,6 +94,76 @@ internal static class LibraryDirectoryOwnershipRemoval
             throw new InvalidOperationException(
                 "The missing owned directory has no valid interrupted-removal proof.");
         }
+    }
+
+    public static bool TryValidateLegacyMissingBothRecovery(
+        LibraryDirectoryOwnership ownership,
+        out LibraryDirectoryOwnershipMarker.MarkerPayload? legacyPayload)
+    {
+        ArgumentNullException.ThrowIfNull(ownership);
+        legacyPayload = null;
+        var originalPath = ownership.CanonicalPath;
+        var quarantinePath = GetQuarantinePath(ownership);
+        if (Directory.Exists(originalPath)
+            || File.Exists(originalPath)
+            || Directory.Exists(quarantinePath)
+            || File.Exists(quarantinePath))
+        {
+            return false;
+        }
+
+        var parentPath = Path.GetDirectoryName(originalPath)
+            ?? throw new InvalidOperationException(
+                "The durable directory ownership path has no parent directory.");
+        var siblingPath = LibraryDirectoryOwnershipMarker
+            .GetMarkerPaths(ownership)[1];
+        var temporaryName = Path.GetFileName(siblingPath) + ".v2.tmp";
+        using var parent =
+            PinnedDirectoryCreation.OpenPinnedDirectoryNoFollow(parentPath);
+        using var temporary = parent.TryOpenExistingFile(
+            temporaryName,
+            requireDeleteAccess: false);
+        if (temporary != null || Directory.Exists(Path.Join(parentPath, temporaryName)))
+        {
+            throw new InvalidOperationException(
+                "Legacy ownership removal proof is mixed with an incomplete v2 marker upgrade.");
+        }
+
+        using var sibling = parent.OpenExistingFile(
+            Path.GetFileName(siblingPath),
+            requireDeleteAccess: false);
+        var payload = LibraryDirectoryOwnershipMarker.ReadPayload(sibling);
+        if (LibraryDirectoryOwnershipMarker.MatchesCurrentPayload(
+                ownership,
+                payload))
+        {
+            return false;
+        }
+        if (!LibraryDirectoryOwnershipMarker.MatchesLegacyPayload(
+                ownership,
+                payload))
+        {
+            throw new InvalidOperationException(
+                "The missing owned directory has no exact legacy removal proof.");
+        }
+        if (!parent.VisiblePathMatches()
+            || !sibling.VisiblePathMatches()
+            || Directory.Exists(originalPath)
+            || File.Exists(originalPath)
+            || Directory.Exists(quarantinePath)
+            || File.Exists(quarantinePath)
+            || File.Exists(Path.Join(parentPath, temporaryName))
+            || Directory.Exists(Path.Join(parentPath, temporaryName))
+            || !LibraryDirectoryOwnershipMarker.MatchesLegacyPayload(
+                ownership,
+                LibraryDirectoryOwnershipMarker.ReadPayload(sibling)))
+        {
+            throw new InvalidOperationException(
+                "The legacy ownership removal proof changed during validation.");
+        }
+
+        legacyPayload = payload;
+        return true;
     }
 
     public static LibraryDirectoryRemovalOutcome RemoveEmptyDirectory(
@@ -148,13 +248,35 @@ internal static class LibraryDirectoryOwnershipRemoval
         try
         {
             EnsurePhysicalIdentity(ownership, quarantineAnchor);
+            var insideMarkerPath = Path.Join(
+                quarantinePath,
+                LibraryDirectoryOwnershipMarker.FileName);
+            if (!File.Exists(insideMarkerPath))
+            {
+                LibraryDirectoryOwnershipMarker.ValidateSiblingMarker(
+                    ownership,
+                    parentAnchor);
+                if (Directory.EnumerateFileSystemEntries(quarantinePath).Any()
+                    || !quarantineAnchor.VisiblePathMatches()
+                    || !parentAnchor.VisiblePathMatches())
+                {
+                    throw new InvalidOperationException(
+                        "The owned directory removal quarantine is not empty after its inside marker was retired.");
+                }
+
+                cancellationToken.ThrowIfCancellationRequested();
+                LibraryDirectoryOwnershipMarker.ValidateSiblingMarker(
+                    ownership,
+                    parentAnchor);
+                pinnedDirectory.DeletePinnedEmptyDirectory(
+                    Path.GetFileName(quarantinePath));
+                return LibraryDirectoryRemovalOutcome.Removed;
+            }
+
             LibraryDirectoryOwnershipMarker.Validate(
                 ownership,
                 quarantineAnchor,
                 parentAnchor);
-            var insideMarkerPath = Path.Join(
-                quarantinePath,
-                LibraryDirectoryOwnershipMarker.FileName);
             if (Directory.EnumerateFileSystemEntries(quarantinePath)
                 .Any(path => !string.Equals(path, insideMarkerPath, StringComparison.Ordinal))
                 || !quarantineAnchor.VisiblePathMatches())

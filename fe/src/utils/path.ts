@@ -46,6 +46,15 @@ export function trimTrailingSlash(s: string): string {
   return out
 }
 
+export function trimTrailingDirectorySeparators(s: string, pathKind: PathKind): string {
+  if (s === '/') return s
+  if (pathKind === 'windows') return trimTrailingSlash(s)
+
+  let out = s
+  while (out.endsWith('/')) out = out.slice(0, -1)
+  return out
+}
+
 export function detectPathKind(
   s: string | null | undefined,
   expectedKind: PathKind = 'unknown',
@@ -82,8 +91,9 @@ export function normalizeForCompare(
   pathKind: PathKind = 'unknown',
   caseSensitivity: PathCaseSensitivity = 'Unknown',
 ): string {
-  const value = trimTrailingSlash(s || '')
-  const kind = pathKind === 'unknown' ? detectPathKind(value) : pathKind
+  const rawValue = s || ''
+  const kind = pathKind === 'unknown' ? detectPathKind(rawValue) : pathKind
+  const value = trimTrailingDirectorySeparators(rawValue, kind)
   const normalized = kind === 'windows' ? value.replace(/\\/g, '/') : value
   const canonicalSyntax =
     kind === 'windows'
@@ -350,8 +360,14 @@ export function stripRootPrefix(
     const valueKind = detectPathKind(value, rootKind)
     if (rootKind === 'unknown' || (valueKind !== 'unknown' && valueKind !== rootKind)) return null
 
-    const normalizedRoot = trimTrailingSlash(rootKind === 'windows' ? toForward(root) : root)
-    const normalizedValue = trimTrailingSlash(rootKind === 'windows' ? toForward(value) : value)
+    const normalizedRoot = trimTrailingDirectorySeparators(
+      rootKind === 'windows' ? toForward(root) : root,
+      rootKind,
+    )
+    const normalizedValue = trimTrailingDirectorySeparators(
+      rootKind === 'windows' ? toForward(value) : value,
+      rootKind,
+    )
     const comparableRoot = normalizeForCompare(normalizedRoot, rootKind, caseSensitivity)
     const comparableValue = normalizeForCompare(normalizedValue, rootKind, caseSensitivity)
     const useBackslash = rootKind === 'windows' && root.includes('\\')
@@ -377,7 +393,7 @@ export function joinPaths(
   const rootKind = pathKind === 'unknown' ? detectPathKind(root) : pathKind
   const useBackslash = rootKind === 'windows' && root.includes('\\')
   const normalizedRoot = rootKind === 'windows' ? root.replace(/\\/g, '/') : root
-  const r = trimTrailingSlash(normalizedRoot)
+  const r = trimTrailingDirectorySeparators(normalizedRoot, rootKind)
   const rel = (relative || '').toString().replace(/^\/+/, '')
   const combined = rel ? `${r}${r.endsWith('/') ? '' : '/'}${rel}` : r
   return useBackslash ? combined.replace(/\//g, '\\') : combined

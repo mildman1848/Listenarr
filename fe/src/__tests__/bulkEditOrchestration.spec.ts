@@ -35,17 +35,41 @@ describe('bulk edit orchestration', () => {
 
   it('sends one backend-owned physical path-change request and registers returned jobs', async () => {
     const dependencies = createDependencies()
+    const destinationRoot = '/library-new '
+    dependencies.bulkUpdateAudiobooks.mockResolvedValueOnce({
+      message: 'updated',
+      results: [
+        {
+          id: 1,
+          success: true,
+          metadataUpdated: true,
+          pathChangeOutcome: 'enqueued',
+          moveJobId: 'job-1',
+          resolvedDestination: '/library-new /Book 1 ',
+          errors: [],
+        },
+        {
+          id: 2,
+          success: true,
+          metadataUpdated: true,
+          pathChangeOutcome: 'enqueued',
+          moveJobId: 'job-2',
+          resolvedDestination: '/library-new /Book 2 ',
+          errors: [],
+        },
+      ],
+    })
 
     const outcome = await executeBulkEdit(
       {
         ids: [1, 2],
         updates: {
           monitored: true,
-          rootFolder: '/library-new',
+          rootFolder: destinationRoot,
           moveFiles: true,
           deleteEmptySource: true,
         },
-        destinationRoot: '/library-new',
+        destinationRoot,
         moveFiles: true,
         deleteEmptySource: true,
       },
@@ -58,21 +82,102 @@ describe('bulk edit orchestration', () => {
       { monitored: true },
       {
         mode: 'Physical',
-        destinationRootOrPath: '/library-new',
+        destinationRootOrPath: destinationRoot,
         deleteEmptySource: true,
       },
     )
     expect(dependencies.trackQueuedJob).toHaveBeenNthCalledWith(1, {
       jobId: 'job-1',
       audiobookId: 1,
-      target: '/library-new/Book 1',
+      target: '/library-new /Book 1 ',
     })
     expect(dependencies.trackQueuedJob).toHaveBeenNthCalledWith(2, {
       jobId: 'job-2',
       audiobookId: 2,
-      target: '/library-new/Book 2',
+      target: '/library-new /Book 2 ',
     })
     expect(outcome.results.every((result) => result.success)).toBe(true)
+  })
+
+  it.each([
+    ['missing', undefined, 'The server did not return a path-change outcome.'],
+    ['unknown', 'queued-sometime', 'The server returned an unrecognized path-change outcome.'],
+  ])('fails closed for a %s physical path-change outcome', async (_, pathChangeOutcome, error) => {
+    const dependencies = createDependencies()
+    dependencies.bulkUpdateAudiobooks.mockResolvedValueOnce({
+      message: 'updated',
+      results: [
+        {
+          id: 1,
+          success: true,
+          metadataUpdated: true,
+          pathChangeOutcome,
+          moveJobId: 'job-1',
+          resolvedDestination: '/library-new/Book 1',
+          errors: [],
+        },
+      ],
+    })
+
+    const outcome = await executeBulkEdit(
+      {
+        ids: [1],
+        updates: {},
+        destinationRoot: '/library-new',
+        moveFiles: true,
+        deleteEmptySource: false,
+      },
+      dependencies,
+    )
+
+    expect(outcome.results[0]).toEqual(
+      expect.objectContaining({
+        id: 1,
+        success: false,
+        errors: expect.arrayContaining([error]),
+      }),
+    )
+    expect(dependencies.trackQueuedJob).not.toHaveBeenCalled()
+  })
+
+  it('fails closed when a valid outcome does not match the requested operation', async () => {
+    const dependencies = createDependencies()
+    dependencies.bulkUpdateAudiobooks.mockResolvedValueOnce({
+      message: 'updated',
+      results: [
+        {
+          id: 1,
+          success: true,
+          metadataUpdated: true,
+          pathChangeOutcome: 'metadata-updated',
+          moveJobId: 'job-1',
+          resolvedDestination: '/library-new/Book 1',
+          errors: [],
+        },
+      ],
+    })
+
+    const outcome = await executeBulkEdit(
+      {
+        ids: [1],
+        updates: {},
+        destinationRoot: '/library-new',
+        moveFiles: true,
+        deleteEmptySource: false,
+      },
+      dependencies,
+    )
+
+    expect(outcome.results[0]).toEqual(
+      expect.objectContaining({
+        id: 1,
+        success: false,
+        errors: expect.arrayContaining([
+          'The server returned a path-change outcome that does not match the request.',
+        ]),
+      }),
+    )
+    expect(dependencies.trackQueuedJob).not.toHaveBeenCalled()
   })
 
   it('surfaces backend per-item move failures without registering failed jobs', async () => {

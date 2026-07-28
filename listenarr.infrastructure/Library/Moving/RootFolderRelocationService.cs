@@ -283,201 +283,211 @@ public sealed partial class RootFolderRelocationService(
             RejectDuplicateRelocationTargets(movePlans, targetResolution.Semantics);
         }
 
-        if (command.Mode == RootFolderRelocationMode.Relocate
-            && !targetObjectIdentity.IsAvailable)
+        RootFolderRelocation? relocation = null;
+        var relocationWasPrecommitted = false;
+        var precommittedContinuationCommitted = false;
+        try
         {
-            targetObjectIdentity = await ResolveOrCreateRelocationTargetIdentityAsync(
-                targetPath,
-                cancellationToken);
-        }
-
-        var now = timeProvider.GetUtcNow();
-        var nowUtc = now.UtcDateTime;
-
-        if (command.Mode == RootFolderRelocationMode.MetadataOnly)
-        {
-            var sourcePath = root.Path;
-            var skipped = invalidStoredBasePaths
-                .Select(candidate => new RootFolderRelocationSkippedItem
-                {
-                    AudiobookId = candidate.Audiobook.Id,
-                    Reason = "Stored audiobook base path is invalid or case-ambiguous and could not be compared safely with the source root.",
-                    CreatedAt = now
-                })
-                .ToList();
-            var metadataTotal = affected.Count + skipped.Count;
-            var completed = 0;
-
-            var metadataSourceSemantics = storedSourcePathSemantics?.Semantics;
-            foreach (var candidate in affected)
+            if (command.Mode == RootFolderRelocationMode.Relocate
+                && !targetObjectIdentity.IsAvailable)
             {
-                var audiobook = candidate.Audiobook;
-                var sourceSemantics = metadataSourceSemantics
-                    ?? throw new InvalidOperationException("Stored source path semantics are unavailable.");
-                var sourceBasePath = candidate.StoredBasePath;
-                try
-                {
-                    var destinationBasePath = MapTargetPath(
-                        sourcePath,
-                        targetPath,
-                        sourceBasePath,
-                        sourceSemantics,
-                        targetResolution.Semantics);
-                    AudiobookPathReferenceRewriter.Rewrite(
-                        audiobook,
-                        sourceBasePath,
-                        destinationBasePath,
-                        sourceSemantics,
-                        targetResolution.Semantics,
-                        command.TargetCaseSensitivityMode);
-                    completed++;
-                }
-                catch (InvalidOperationException ex)
-                {
-                    skipped.Add(new RootFolderRelocationSkippedItem
-                    {
-                        AudiobookId = audiobook.Id,
-                        Reason = ex.Message,
-                        CreatedAt = now
-                    });
-                }
-            }
-
-            RejectDuplicateAudiobookFileOwnership(db);
-            ApplyRootMetadata(root, command, targetPath, targetResolution, targetIdentityKey);
-            ApplyRootDirectoryObjectIdentity(root, targetObjectIdentity);
-            if (command.DesiredIsDefault)
-            {
-                await ClearOtherDefaultsAsync(db, rootFolderId, cancellationToken);
-            }
-
-            RootFolderRelocation? metadataRelocation = null;
-            if (skipped.Count > 0)
-            {
-                metadataRelocation = new RootFolderRelocation
+                var reservationNow = timeProvider.GetUtcNow().UtcDateTime;
+                relocation = new RootFolderRelocation
                 {
                     RootFolderId = root.Id,
                     ActiveRootFolderId = root.Id,
-                    SourcePath = sourcePath,
+                    SourcePath = root.Path,
                     SourceCaseSensitivityMode = sourceCaseSensitivityMode,
                     TargetPath = targetPath,
+                    TargetIdentityEnrollmentState =
+                        TargetIdentityEnrollmentState.Unavailable,
+                    TargetDirectoryObjectIdentityUnavailableReason =
+                        "Target directory creation reservations are pending.",
                     Mode = command.Mode,
                     Status = RootFolderRelocationStatus.NeedsAttention,
                     DeleteEmptySource = command.DeleteEmptySource,
                     DesiredName = command.DesiredName.Trim(),
                     DesiredIsDefault = command.DesiredIsDefault,
-                    TargetCaseSensitivityMode = command.TargetCaseSensitivityMode,
-                    TotalJobs = metadataTotal,
-                    CompletedJobs = completed,
-                    Error = BuildSkippedMetadataError(skipped.Count),
-                    CreatedAt = nowUtc,
-                    UpdatedAt = nowUtc
+                    TargetCaseSensitivityMode =
+                        command.TargetCaseSensitivityMode,
+                    TotalJobs = movePlans.Count,
+                    Error =
+                        "Target reservations were committed before move jobs were published.",
+                    CreatedAt = reservationNow,
+                    UpdatedAt = reservationNow
                 };
-                foreach (var skippedItem in skipped)
+                db.RootFolderRelocations.Add(relocation);
+                await db.SaveChangesAsync(cancellationToken);
+                cancellationToken.ThrowIfCancellationRequested();
+                await transaction.CommitAsync(CancellationToken.None);
+                relocationWasPrecommitted = true;
+                targetObjectIdentity = await ReserveRelocationTargetAsync(
+                    relocation.Id,
+                    targetPath,
+                    cancellationToken);
+                relocation.TargetDirectoryObjectIdentityVersion =
+                    targetObjectIdentity.Version;
+                relocation.TargetDirectoryObjectIdentity =
+                    targetObjectIdentity.Value;
+                relocation.TargetDirectoryObjectIdentityUnavailableReason =
+                    targetObjectIdentity.UnavailableReason;
+                relocation.TargetIdentityEnrollmentState =
+                    targetObjectIdentity.IsAvailable
+                        ? TargetIdentityEnrollmentState.Authorized
+                        : TargetIdentityEnrollmentState.Unavailable;
+            }
+            await using var continuationTransaction = relocationWasPrecommitted
+                ? await db.Database.BeginTransactionAsync(cancellationToken)
+                : null;
+
+            var now = timeProvider.GetUtcNow();
+            var nowUtc = now.UtcDateTime;
+
+            if (command.Mode == RootFolderRelocationMode.MetadataOnly)
+            {
+                return await StartMetadataOnlyAsync(
+                    db,
+                    transaction,
+                    root,
+                    command,
+                    targetPath,
+                    targetResolution,
+                    targetObjectIdentity,
+                    targetIdentityKey,
+                    sourceCaseSensitivityMode,
+                    affected,
+                    invalidStoredBasePaths,
+                    storedSourcePathSemantics?.Semantics,
+                    rootFolderId,
+                    now,
+                    cancellationToken);
+            }
+
+            relocation ??= new RootFolderRelocation
+            {
+                RootFolderId = root.Id,
+                ActiveRootFolderId = root.Id,
+                SourcePath = root.Path,
+                SourceCaseSensitivityMode = sourceCaseSensitivityMode,
+                TargetPath = targetPath,
+                TargetDirectoryObjectIdentityVersion = targetObjectIdentity.Version,
+                TargetDirectoryObjectIdentity = targetObjectIdentity.Value,
+                TargetDirectoryObjectIdentityUnavailableReason = targetObjectIdentity.UnavailableReason,
+                TargetIdentityEnrollmentState = targetObjectIdentity.IsAvailable
+                    ? TargetIdentityEnrollmentState.Authorized
+                    : TargetIdentityEnrollmentState.Unavailable,
+                Mode = command.Mode,
+                Status = RootFolderRelocationStatus.Pending,
+                DeleteEmptySource = command.DeleteEmptySource,
+                DesiredName = command.DesiredName.Trim(),
+                DesiredIsDefault = command.DesiredIsDefault,
+                TargetCaseSensitivityMode = command.TargetCaseSensitivityMode,
+                TotalJobs = movePlans.Count,
+                CreatedAt = nowUtc
+            };
+            relocation.Status = RootFolderRelocationStatus.Pending;
+            relocation.Error = null;
+            if (!relocationWasPrecommitted)
+            {
+                db.RootFolderRelocations.Add(relocation);
+            }
+
+            foreach (var plan in movePlans)
+            {
+                var audiobook = plan.Candidate.Audiobook;
+                var entries = plan.Manifest.Entries
+                    .Select(entry => new MoveJobEntry
+                    {
+                        RelativePath = entry.RelativePath,
+                        EntryType = entry.EntryType,
+                        Length = entry.Length,
+                        LastWriteTimeUtc = entry.LastWriteTimeUtc,
+                        Sha256 = entry.Sha256,
+                        CopyState = MoveJobEntryCopyState.Pending,
+                        CleanupState = MoveJobEntryCleanupState.Pending
+                    })
+                    .ToList();
+                var moveJob = new MoveJob
                 {
-                    metadataRelocation.SkippedItems.Add(skippedItem);
+                    AudiobookId = audiobook.Id,
+                    RequestedPath = plan.RequestedPath,
+                    SourcePath = plan.Manifest.SourceRoot,
+                    SourceCleanupBoundary = root.Path,
+                    DeleteEmptySource = command.DeleteEmptySource,
+                    Status = MoveJobStatus.Queued,
+                    Phase = MoveJobPhase.None,
+                    EnqueuedAt = nowUtc,
+                    RelocationId = relocation.Id,
+                    IdentityKeyVersion = MoveManifestIdentity.Version,
+                    ActiveDeduplicationKey = MoveManifestIdentity.CreateDeduplicationKey(
+                        audiobook.Id,
+                        plan.Manifest.SourceRoot,
+                        plan.Manifest.SourceIdentity,
+                        plan.RequestedPath,
+                        plan.TargetIdentity,
+                        entries),
+                    Entries = entries
+                };
+                moveJob.SetSourceIdentity(plan.Manifest.SourceIdentity);
+                moveJob.SetTargetIdentity(plan.TargetIdentity);
+                db.MoveJobs.Add(moveJob);
+            }
+
+            await db.SaveChangesAsync(cancellationToken);
+            if (affected.Count == 0)
+            {
+                ApplyRootMetadata(root, command, targetPath, targetResolution, targetIdentityKey);
+                ApplyRootDirectoryObjectIdentity(root, targetObjectIdentity);
+                if (command.DesiredIsDefault)
+                {
+                    await ClearOtherDefaultsAsync(db, rootFolderId, cancellationToken);
                 }
 
-                db.RootFolderRelocations.Add(metadataRelocation);
+                relocation.Status = RootFolderRelocationStatus.Completed;
+                relocation.ActiveRootFolderId = null;
+                relocation.CompletedAt = nowUtc;
+                relocation.TargetIdentityEnrollmentState =
+                    TargetIdentityEnrollmentState.NotRequired;
+                await FinalizeRelocationTargetReservationsAsync(
+                    db,
+                    relocation.Id,
+                    cancellationToken);
+                await db.SaveChangesAsync(cancellationToken);
             }
 
-            await db.SaveChangesAsync(cancellationToken);
             cancellationToken.ThrowIfCancellationRequested();
-            await transaction.CommitAsync(CancellationToken.None);
-            var metadataResult = new RootFolderPathChangeResult(
-                metadataRelocation?.Id,
-                root.Id,
-                root.Path,
-                targetPath,
-                metadataRelocation?.Status ?? RootFolderRelocationStatus.Completed,
-                metadataTotal,
-                completed,
-                metadataRelocation?.Error);
-            return new StartOutcome(metadataResult, metadataRelocation != null);
-        }
-
-        var relocation = new RootFolderRelocation
-        {
-            RootFolderId = root.Id,
-            ActiveRootFolderId = root.Id,
-            SourcePath = root.Path,
-            SourceCaseSensitivityMode = sourceCaseSensitivityMode,
-            TargetPath = targetPath,
-            TargetDirectoryObjectIdentityVersion = targetObjectIdentity.Version,
-            TargetDirectoryObjectIdentity = targetObjectIdentity.Value,
-            TargetDirectoryObjectIdentityUnavailableReason = targetObjectIdentity.UnavailableReason,
-            Mode = command.Mode,
-            Status = RootFolderRelocationStatus.Pending,
-            DeleteEmptySource = command.DeleteEmptySource,
-            DesiredName = command.DesiredName.Trim(),
-            DesiredIsDefault = command.DesiredIsDefault,
-            TargetCaseSensitivityMode = command.TargetCaseSensitivityMode,
-            TotalJobs = movePlans.Count,
-            CreatedAt = nowUtc
-        };
-        db.RootFolderRelocations.Add(relocation);
-
-        foreach (var plan in movePlans)
-        {
-            var audiobook = plan.Candidate.Audiobook;
-            var entries = plan.Manifest.Entries
-                .Select(entry => new MoveJobEntry
-                {
-                    RelativePath = entry.RelativePath,
-                    EntryType = entry.EntryType,
-                    Length = entry.Length,
-                    LastWriteTimeUtc = entry.LastWriteTimeUtc,
-                    Sha256 = entry.Sha256,
-                    CopyState = MoveJobEntryCopyState.Pending,
-                    CleanupState = MoveJobEntryCleanupState.Pending
-                })
-                .ToList();
-            var moveJob = new MoveJob
+            if (continuationTransaction != null)
             {
-                AudiobookId = audiobook.Id,
-                RequestedPath = plan.RequestedPath,
-                SourcePath = plan.Manifest.SourceRoot,
-                SourceCleanupBoundary = root.Path,
-                DeleteEmptySource = command.DeleteEmptySource,
-                Status = MoveJobStatus.Queued,
-                Phase = MoveJobPhase.None,
-                EnqueuedAt = nowUtc,
-                RelocationId = relocation.Id,
-                IdentityKeyVersion = MoveManifestIdentity.Version,
-                ActiveDeduplicationKey = MoveManifestIdentity.CreateDeduplicationKey(
-                    audiobook.Id,
-                    plan.Manifest.SourceRoot,
-                    plan.Manifest.SourceIdentity,
-                    plan.RequestedPath,
-                    plan.TargetIdentity,
-                    entries),
-                Entries = entries
-            };
-            moveJob.SetSourceIdentity(plan.Manifest.SourceIdentity);
-            moveJob.SetTargetIdentity(plan.TargetIdentity);
-            db.MoveJobs.Add(moveJob);
-        }
-
-        await db.SaveChangesAsync(cancellationToken);
-        if (affected.Count == 0)
-        {
-            ApplyRootMetadata(root, command, targetPath, targetResolution, targetIdentityKey);
-            ApplyRootDirectoryObjectIdentity(root, targetObjectIdentity);
-            if (command.DesiredIsDefault)
-            {
-                await ClearOtherDefaultsAsync(db, rootFolderId, cancellationToken);
+                await continuationTransaction.CommitAsync(
+                    CancellationToken.None);
+                precommittedContinuationCommitted = true;
             }
-
-            relocation.Status = RootFolderRelocationStatus.Completed;
-            relocation.ActiveRootFolderId = null;
-            relocation.CompletedAt = nowUtc;
-            await db.SaveChangesAsync(cancellationToken);
+            else
+            {
+                await transaction.CommitAsync(CancellationToken.None);
+            }
+            if (relocation.Status == RootFolderRelocationStatus.Completed)
+            {
+                await RetireRetainedRelocationReservationMarkersAsync(
+                    relocation.Id,
+                    CancellationToken.None);
+            }
+            var result = Map(relocation, root.Path);
+            return new StartOutcome(result, true);
         }
-
-        cancellationToken.ThrowIfCancellationRequested();
-        await transaction.CommitAsync(CancellationToken.None);
-        var result = Map(relocation, root.Path);
-        return new StartOutcome(result, true);
+        catch (Exception exception) when (
+            relocationWasPrecommitted
+            && !precommittedContinuationCommitted
+            && exception is not (
+                OutOfMemoryException
+                    or StackOverflowException))
+        {
+            await MarkPrecommittedRelocationNeedsAttentionAsync(
+                relocation!.Id,
+                exception,
+                CancellationToken.None);
+            throw;
+        }
     }
 
     private sealed record StartOutcome(RootFolderPathChangeResult Result, bool Broadcast);

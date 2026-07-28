@@ -19,6 +19,7 @@ internal sealed partial class PinnedDirectoryCreation
     private enum FileInformationClass
     {
         FileBasicInfo = 0,
+        FileStandardInfo = 1,
         FileRenameInfo = 3,
         FileDispositionInfo = 4,
         FileAttributeTagInfo = 9,
@@ -55,6 +56,16 @@ internal sealed partial class PinnedDirectoryCreation
         public long LastWriteTime;
         public long ChangeTime;
         public uint FileAttributes;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct FileStandardInformation
+    {
+        public long AllocationSize;
+        public long EndOfFile;
+        public uint NumberOfLinks;
+        public byte DeletePending;
+        public byte Directory;
     }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -172,6 +183,10 @@ internal sealed partial class PinnedDirectoryCreation
         uint flagsAndAttributes,
         IntPtr templateFile);
 
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool FlushFileBuffers(SafeFileHandle fileHandle);
+
     [DllImport("kernel32.dll", EntryPoint = "GetFileInformationByHandleEx", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool GetFileAttributeTagInformationByHandleEx(
@@ -202,6 +217,14 @@ internal sealed partial class PinnedDirectoryCreation
         SafeFileHandle fileHandle,
         FileInformationClass fileInformationClass,
         out FileBasicInformation fileInformation,
+        uint bufferSize);
+
+    [DllImport("kernel32.dll", EntryPoint = "GetFileInformationByHandleEx", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetFileStandardInformationByHandleEx(
+        SafeFileHandle fileHandle,
+        FileInformationClass fileInformationClass,
+        out FileStandardInformation fileInformation,
         uint bufferSize);
 
     [DllImport("ntdll.dll")]
@@ -276,6 +299,14 @@ internal sealed partial class PinnedDirectoryCreation
         [MarshalAs(UnmanagedType.LPUTF8Str)] string path,
         int flags);
 
+    [DllImport("libc", EntryPoint = "linkat", SetLastError = true)]
+    private static extern int LinkAt(
+        int oldDirectoryFileDescriptor,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string oldPath,
+        int newDirectoryFileDescriptor,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string newPath,
+        int flags);
+
     [DllImport("libc", EntryPoint = "statx", SetLastError = true)]
     private static extern int Statx(
         int directoryFileDescriptor,
@@ -294,4 +325,13 @@ internal sealed partial class PinnedDirectoryCreation
     private static extern int FStatMac(
         int fileDescriptor,
         out MacStatInformation information);
+
+    [DllImport("libc", EntryPoint = "fsync", SetLastError = true)]
+    private static extern int FSync(int fileDescriptor);
+
+    [DllImport("libc", EntryPoint = "flistxattr", SetLastError = true)]
+    private static extern nint FListXattrLinux(
+        int fileDescriptor,
+        IntPtr list,
+        nuint size);
 }

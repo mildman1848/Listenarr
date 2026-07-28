@@ -50,8 +50,9 @@ internal sealed partial class PinnedDirectoryCreation
         {
             ThrowIfDisposed();
             ValidateLeafName(fileName);
-            EnsureVisiblePathMatches();
             var fullPath = Path.Join(FullPath, fileName);
+            ExclusiveDirectoryCreator.InvokeBeforeOpenParentHook(fullPath);
+            EnsureVisiblePathMatches();
             var handle = OperatingSystem.IsWindows()
                 ? OpenRelativeFileWindows(
                     _handle,
@@ -200,6 +201,107 @@ internal sealed partial class PinnedDirectoryCreation
                     or PlatformNotSupportedException)
             {
                 return false;
+            }
+        }
+
+        internal bool IdentifiesSameEntry(PinnedFileEntry candidate)
+        {
+            ThrowIfDisposed();
+            ArgumentNullException.ThrowIfNull(candidate);
+            candidate.ThrowIfDisposed();
+            return HandlesIdentifySameDirectory(_fileHandle, candidate._fileHandle);
+        }
+
+        internal uint GetLinkCount()
+        {
+            ThrowIfDisposed();
+            return GetHandleLinkCount(_fileHandle);
+        }
+
+        internal string GetObjectIdentity()
+        {
+            ThrowIfDisposed();
+            return GetDirectoryObjectIdentity(_fileHandle);
+        }
+
+        internal void FlushToDisk()
+        {
+            ThrowIfDisposed();
+            FlushHandleToDisk(_fileHandle, $"file '{FullPath}'");
+        }
+
+        internal bool IsOnSameVolume(PinnedDirectoryAnchor directory)
+        {
+            ThrowIfDisposed();
+            ArgumentNullException.ThrowIfNull(directory);
+            using var directoryHandle = directory.DuplicateHandleForOperation();
+            return HandlesAreOnSameVolume(_fileHandle, directoryHandle);
+        }
+
+        internal bool HasUnsupportedCrossVolumeMetadata()
+        {
+            ThrowIfDisposed();
+            return PinnedDirectoryCreation.HasUnsupportedCrossVolumeMetadata(
+                _fileHandle,
+                requireSingleLink: true);
+        }
+
+        internal PinnedFileEntry CreateHardLinkTo(
+            PinnedDirectoryAnchor destinationParent,
+            string destinationName)
+        {
+            ThrowIfDisposed();
+            ArgumentNullException.ThrowIfNull(destinationParent);
+            ValidateLeafName(destinationName);
+            if (!VisiblePathMatches() || !destinationParent.VisiblePathMatches())
+            {
+                throw new InvalidOperationException(
+                    "A pinned hardlink endpoint changed before link creation.");
+            }
+
+            using var destinationHandle =
+                destinationParent.DuplicateHandleForOperation();
+            if (OperatingSystem.IsWindows())
+            {
+                CreateRelativeHardLinkWindows(
+                    _fileHandle,
+                    destinationHandle,
+                    destinationName);
+            }
+            else if (LinkAt(
+                    _parentHandle.DangerousGetHandle().ToInt32(),
+                    _fileName,
+                    destinationHandle.DangerousGetHandle().ToInt32(),
+                    destinationName,
+                    flags: 0) != 0)
+            {
+                throw new Win32Exception(
+                    Marshal.GetLastWin32Error(),
+                    "Could not create a hardlink between pinned filesystem endpoints.");
+            }
+
+            PinnedFileEntry? linked = null;
+            try
+            {
+                linked = destinationParent.OpenExistingFile(
+                    destinationName,
+                    requireDeleteAccess: true);
+                if (!linked.VisiblePathMatches() || !IdentifiesSameEntry(linked))
+                {
+                    throw new InvalidOperationException(
+                        "The created hardlink does not identify the pinned source generation.");
+                }
+
+                return linked;
+            }
+            catch
+            {
+                if (linked != null && linked.VisiblePathMatches())
+                {
+                    linked.Delete(immediateWindows: true);
+                }
+                linked?.Dispose();
+                throw;
             }
         }
 
@@ -392,97 +494,4 @@ internal sealed partial class PinnedDirectoryCreation
         }
 
     }
-
-    private static SafeFileHandle CreateRelativeReadWriteFileUnix(
-        SafeFileHandle parentHandle,
-        string fileName)
-    {
-        var fd = OpenAt(
-            parentHandle.DangerousGetHandle().ToInt32(),
-            fileName,
-            GetUnixReadWriteCreateFlags(),
-            UnixFileMode);
-        if (fd >= 0)
-        {
-            return new SafeFileHandle(new IntPtr(fd), ownsHandle: true);
-        }
-
-        throw new Win32Exception(
-            Marshal.GetLastWin32Error(),
-            "Could not create a pinned read-write file.");
-    }
-
-    private static SafeFileHandle OpenRelativeFileUnix(
-        SafeFileHandle parentHandle,
-        string fileName,
-        string fullPath)
-    {
-        var fd = OpenAt(
-            parentHandle.DangerousGetHandle().ToInt32(),
-            fileName,
-            GetUnixReadFlags(),
-            mode: 0);
-        if (fd >= 0)
-        {
-            return new SafeFileHandle(new IntPtr(fd), ownsHandle: true);
-        }
-
-        throw new Win32Exception(
-            Marshal.GetLastWin32Error(),
-            $"Could not open pinned file '{fullPath}'.");
-    }
-
-    private static SafeFileHandle OpenRelativeFileForWriteUnix(
-        SafeFileHandle parentHandle,
-        string fileName,
-        string fullPath)
-    {
-        var fd = OpenAt(
-            parentHandle.DangerousGetHandle().ToInt32(),
-            fileName,
-            GetUnixWriteExistingFlags(),
-            mode: 0);
-        if (fd >= 0)
-        {
-            return new SafeFileHandle(new IntPtr(fd), ownsHandle: true);
-        }
-
-        throw new Win32Exception(
-            Marshal.GetLastWin32Error(),
-            $"Could not open pinned file for writing '{fullPath}'.");
-    }
-
-    private static void EnsureFileHandleIsNotReparsePoint(
-        SafeFileHandle handle,
-        string path)
-    {
-        if (!GetFileAttributeTagInformationByHandleEx(
-                handle,
-                FileInformationClass.FileAttributeTagInfo,
-                out var information,
-                (uint)Marshal.SizeOf<FileAttributeTagInformation>()))
-        {
-            throw new Win32Exception(
-                Marshal.GetLastWin32Error(),
-                $"Could not inspect pinned file '{path}'.");
-        }
-
-        if ((information.FileAttributes & FileAttributeReparsePoint) != 0)
-        {
-            throw new InvalidOperationException(
-                "A pinned file cannot be a symbolic link or reparse point.");
-        }
-    }
-
-    private static int GetUnixReadFlags() => OperatingSystem.IsMacOS()
-        ? 0x100 | 0x1000000
-        : 0x20000 | 0x80000;
-
-    private static int GetUnixReadWriteCreateFlags() => OperatingSystem.IsMacOS()
-        ? 0x2 | 0x200 | 0x800 | 0x100 | 0x1000000
-        : 0x2 | 0x40 | 0x80 | 0x20000 | 0x80000;
-
-    private static int GetUnixWriteExistingFlags() => OperatingSystem.IsMacOS()
-        ? 0x1 | 0x100 | 0x1000000
-        : 0x1 | 0x20000 | 0x80000;
 }

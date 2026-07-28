@@ -64,6 +64,10 @@ public sealed class RootFolderRelocationConfiguration : IEntityTypeConfiguration
             .HasMaxLength(16)
             .HasDefaultValue(FileSystemCaseSensitivityMode.Auto);
         builder.Property(relocation => relocation.TargetCaseSensitivityMode).HasConversion<string>().HasMaxLength(16);
+        builder.Property(relocation => relocation.TargetIdentityEnrollmentState)
+            .HasConversion<string>()
+            .HasMaxLength(24)
+            .HasDefaultValue(TargetIdentityEnrollmentState.Authorized);
         builder.Property(relocation => relocation.TargetDirectoryObjectIdentity).HasMaxLength(256);
         builder.Property(relocation => relocation.TargetDirectoryObjectIdentityUnavailableReason).HasMaxLength(1024);
         builder.HasIndex(relocation => relocation.ActiveRootFolderId)
@@ -77,6 +81,63 @@ public sealed class RootFolderRelocationConfiguration : IEntityTypeConfiguration
             .WithOne(item => item.Relocation)
             .HasForeignKey(item => item.RelocationId)
             .OnDelete(DeleteBehavior.Cascade);
+    }
+}
+
+public sealed class LibraryDirectoryOwnershipPathMigrationConfiguration
+    : IEntityTypeConfiguration<LibraryDirectoryOwnershipPathMigration>
+{
+    public void Configure(
+        EntityTypeBuilder<LibraryDirectoryOwnershipPathMigration> builder)
+    {
+        builder.ToTable("LibraryDirectoryOwnershipPathMigrations");
+        builder.Property(item => item.SourceCanonicalPath).HasMaxLength(4096);
+        builder.Property(item => item.SourcePathSyntax).HasConversion<string>().HasMaxLength(16);
+        builder.Property(item => item.SourceCaseSensitivity).HasConversion<string>().HasMaxLength(16);
+        builder.Property(item => item.SourceCaseSensitivityMode).HasConversion<string>().HasMaxLength(16);
+        builder.Property(item => item.SourceIdentityBoundary).HasMaxLength(4096);
+        builder.Property(item => item.SourceIdentityLookupKey).HasMaxLength(160);
+        builder.Property(item => item.SourceOwnershipKey).HasMaxLength(160);
+        builder.Property(item => item.TargetCanonicalPath).HasMaxLength(4096);
+        builder.Property(item => item.TargetPathSyntax).HasConversion<string>().HasMaxLength(16);
+        builder.Property(item => item.TargetCaseSensitivity).HasConversion<string>().HasMaxLength(16);
+        builder.Property(item => item.TargetCaseSensitivityMode).HasConversion<string>().HasMaxLength(16);
+        builder.Property(item => item.TargetIdentityBoundary).HasMaxLength(4096);
+        builder.Property(item => item.TargetIdentityLookupKey).HasMaxLength(160);
+        builder.Property(item => item.TargetOwnershipKey).HasMaxLength(160);
+        builder.Property(item => item.State).HasConversion<string>().HasMaxLength(24);
+        builder.HasIndex(item => new { item.OwnershipId, item.RelocationId })
+            .IsUnique();
+        builder.HasIndex(item => item.TargetOwnershipKey).IsUnique();
+        builder.HasOne(item => item.Ownership)
+            .WithMany(ownership => ownership.PathMigrations)
+            .HasForeignKey(item => item.OwnershipId)
+            .OnDelete(DeleteBehavior.Restrict);
+        builder.HasOne(item => item.Relocation)
+            .WithMany(relocation => relocation.OwnershipPathMigrations)
+            .HasForeignKey(item => item.RelocationId)
+            .OnDelete(DeleteBehavior.Restrict);
+    }
+}
+
+public sealed class RootFolderRelocationCreatedDirectoryConfiguration
+    : IEntityTypeConfiguration<RootFolderRelocationCreatedDirectory>
+{
+    public void Configure(
+        EntityTypeBuilder<RootFolderRelocationCreatedDirectory> builder)
+    {
+        builder.ToTable("RootFolderRelocationCreatedDirectories");
+        builder.Property(item => item.CanonicalPath).HasMaxLength(4096);
+        builder.Property(item => item.OwnershipToken).HasMaxLength(64);
+        builder.Property(item => item.State).HasConversion<string>().HasMaxLength(16);
+        builder.Property(item => item.DirectoryObjectIdentity).HasMaxLength(256);
+        builder.HasIndex(item => new { item.RelocationId, item.CanonicalPath })
+            .IsUnique();
+        builder.HasIndex(item => item.OwnershipToken).IsUnique();
+        builder.HasOne(item => item.Relocation)
+            .WithMany(relocation => relocation.CreatedDirectories)
+            .HasForeignKey(item => item.RelocationId)
+            .OnDelete(DeleteBehavior.Restrict);
     }
 }
 

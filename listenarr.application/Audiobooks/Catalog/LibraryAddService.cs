@@ -15,17 +15,14 @@
  * You should have received a copy of the GNU Affero General Public License
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
-using System.Security.Cryptography;
-using System.Text;
-using Listenarr.Domain.Common;
 using Microsoft.Extensions.Logging;
 
 namespace Listenarr.Application.Audiobooks.Catalog
 {
-    public class LibraryAddService : ILibraryAddService
+    public partial class LibraryAddService : ILibraryAddService
     {
         private readonly IAudiobookRepository _repo;
-        private readonly IHistoryRepository _historyRepository;
+        private readonly ILibraryAddCommitStore _commitStore;
         private readonly IImageCacheService _imageCacheService;
         private readonly ILogger<LibraryAddService> _logger;
         private readonly IQualityProfileService _qualityProfileService;
@@ -40,7 +37,7 @@ namespace Listenarr.Application.Audiobooks.Catalog
 
         public LibraryAddService(
             IAudiobookRepository repo,
-            IHistoryRepository historyRepository,
+            ILibraryAddCommitStore commitStore,
             IImageCacheService imageCacheService,
             ILogger<LibraryAddService> logger,
             IQualityProfileService qualityProfileService,
@@ -54,7 +51,7 @@ namespace Listenarr.Application.Audiobooks.Catalog
             INotificationService? notificationService = null)
         {
             _repo = repo;
-            _historyRepository = historyRepository;
+            _commitStore = commitStore;
             _imageCacheService = imageCacheService;
             _logger = logger;
             _qualityProfileService = qualityProfileService;
@@ -69,18 +66,12 @@ namespace Listenarr.Application.Audiobooks.Catalog
             _notificationService = notificationService;
         }
 
-        public Task<LibraryAddOperationResult> AddToLibraryAsync(
-            LibraryAddOperationRequest request,
-            CancellationToken cancellationToken = default) =>
-            _mutationCoordinator.ExecuteExclusiveAsync(
-                token => AddToLibraryCoreAsync(request, token),
-                cancellationToken);
-
-        private async Task<LibraryAddOperationResult> AddToLibraryCoreAsync(
+        public async Task<LibraryAddOperationResult> AddToLibraryAsync(
             LibraryAddOperationRequest request,
             CancellationToken cancellationToken)
         {
             ArgumentNullException.ThrowIfNull(request);
+            cancellationToken.ThrowIfCancellationRequested();
 
             var metadata = request.Metadata ?? new AudibleBookMetadata();
 
@@ -110,6 +101,7 @@ namespace Listenarr.Application.Audiobooks.Catalog
             if (!string.IsNullOrWhiteSpace(metadata.Asin))
             {
                 var existingByAsin = await _repo.GetByAsinAsync(metadata.Asin);
+                cancellationToken.ThrowIfCancellationRequested();
                 if (existingByAsin != null)
                 {
                     return new LibraryAddOperationResult
@@ -126,6 +118,7 @@ namespace Listenarr.Application.Audiobooks.Catalog
             if (!string.IsNullOrWhiteSpace(firstIsbn))
             {
                 var existingByIsbn = await _repo.GetByIsbnAsync(firstIsbn);
+                cancellationToken.ThrowIfCancellationRequested();
                 if (existingByIsbn != null)
                 {
                     return new LibraryAddOperationResult
@@ -162,111 +155,44 @@ namespace Listenarr.Application.Audiobooks.Catalog
                 }
             }
 
-            var settings = await _configurationService.GetApplicationSettingsAsync();
-
-            var configuredRootFolders = await _rootFolderService.GetAllAsync();
-            var allowedDestinationRoots = FileUtils.GetValidMutationRootsForCurrentOs(
-                configuredRootFolders
-                    .Select(root => root.Path)
-                    .Append(settings.OutputPath));
-
-            var requestedBaseDirectory = request.DestinationPath;
-            if (!string.IsNullOrWhiteSpace(requestedBaseDirectory))
-            {
-                // Preserve valid Unix path-segment whitespace, but reject values that only become
-                // absolute after trimming accidental leading whitespace.
-                if (FileUtils.HasLeadingWhitespaceBeforeRootedPath(requestedBaseDirectory))
-                {
-                    return ValidationFailure(
-                        "destination_path_invalid",
-                        "DestinationPath is invalid: leading whitespace before an absolute path is not allowed.",
-                        requestedBaseDirectory);
-                }
-
-                if (!FileUtils.TryNormalizeUserProvidedDirectoryPathForCurrentOs(
-                    requestedBaseDirectory,
-                    out var normalizedRequestedBaseDirectory,
-                    out var validationReason,
-                    rejectParentTraversal: true))
-                {
-                    return ValidationFailure(
-                        "destination_path_invalid",
-                        $"DestinationPath is invalid: {validationReason}",
-                        requestedBaseDirectory);
-                }
-
-                if (allowedDestinationRoots.Count == 0
-                    || !_fileSystem.TryValidateMutationTarget(
-                        normalizedRequestedBaseDirectory,
-                        allowedDestinationRoots,
-                        out normalizedRequestedBaseDirectory,
-                        out _))
-                {
-                    return ValidationFailure(
-                        "destination_path_outside_roots",
-                        "DestinationPath must be inside a configured root folder or output path",
-                        normalizedRequestedBaseDirectory);
-                }
-
-                audiobook.BasePath = normalizedRequestedBaseDirectory;
-            }
-            else
-            {
-                var rootFolder = await _rootFolderService.GetDefaultAsync();
-                var baseDirectory = rootFolder != null ? rootFolder.Path : settings.OutputPath;
-
-                // This validates the Listenarr-owned library destination. Do not use it for
-                // download-client source paths, which must preserve the client's exact path identity.
-                var generatedBasePath = Path.Join(baseDirectory, _fileNamingService.ApplyNamingPattern(settings.FolderNamingPattern, metadata));
-                if (!FileUtils.TryNormalizeUserProvidedDirectoryPathForCurrentOs(
-                    generatedBasePath,
-                    out var normalizedGeneratedBasePath,
-                    out var validationReason,
-                    rejectParentTraversal: true))
-                {
-                    return ValidationFailure(
-                        "destination_path_invalid",
-                        $"Generated library destination is invalid: {validationReason}",
-                        generatedBasePath);
-                }
-
-                if (allowedDestinationRoots.Count == 0
-                    || !_fileSystem.TryValidateMutationTarget(
-                        normalizedGeneratedBasePath,
-                        allowedDestinationRoots,
-                        out normalizedGeneratedBasePath,
-                        out _))
-                {
-                    return ValidationFailure(
-                        "destination_path_outside_roots",
-                        "Generated library destination must be inside a configured root folder or output path",
-                        normalizedGeneratedBasePath);
-                }
-
-                audiobook.BasePath = normalizedGeneratedBasePath;
-            }
-
             cancellationToken.ThrowIfCancellationRequested();
-            var destinationBlockingReason = await _destinationMutationGuard.GetBlockingReasonAsync(
-                audiobook.BasePath!,
+            var preflightFailure = await ResolveAndValidateDestinationAsync(
+                audiobook,
+                metadata,
+                request,
                 cancellationToken);
-            if (destinationBlockingReason != null)
+            if (preflightFailure != null)
             {
-                return ValidationFailure(
-                    "destination_path_blocked",
-                    destinationBlockingReason,
-                    audiobook.BasePath);
+                return preflightFailure;
             }
 
-            audiobook.ImageUrl = await MoveImageToLibraryStorageAsync(
+            var preparedImage = await PrepareLibraryImageAsync(
                 metadata,
                 request.SearchResult,
-                firstIsbn);
-            await _repo.AddAsync(audiobook);
+                firstIsbn,
+                cancellationToken);
+            cancellationToken.ThrowIfCancellationRequested();
+            var preparedAuthorImages = await EnrichAuthorAsinsAsync(audiobook, cancellationToken);
+            cancellationToken.ThrowIfCancellationRequested();
 
-            await ResolveAuthorAsinsAsync(audiobook);
-            await SendAddedNotificationAsync(audiobook);
-            await AddHistoryEntryAsync(audiobook, request, cancellationToken);
+            var result = await _mutationCoordinator.ExecuteExclusiveAsync(
+                token => CommitAsync(
+                    audiobook,
+                    metadata,
+                    request,
+                    firstIsbn,
+                    preparedImage,
+                    preparedAuthorImages,
+                    token),
+                cancellationToken);
+            if (!result.Added)
+            {
+                return result;
+            }
+
+            // The audiobook and its Added history event are now durably committed.
+            // Notifications are post-commit and may not turn this success into an API failure.
+            await TrySendAddedNotificationAsync(audiobook);
 
             _logger.LogInformation(
                 "Added audiobook '{Title}' (ASIN: {Asin}) to library with Monitored={Monitored}, QualityProfileId={QualityProfileId}, AutoSearch={AutoSearch}",
@@ -276,6 +202,61 @@ namespace Listenarr.Application.Audiobooks.Catalog
                 audiobook.QualityProfileId,
                 request.AutoSearch);
 
+            return result;
+        }
+
+        private async Task<LibraryAddOperationResult> CommitAsync(
+            Audiobook audiobook,
+            AudibleBookMetadata metadata,
+            LibraryAddOperationRequest request,
+            string? firstIsbn,
+            PreparedLibraryImage preparedImage,
+            IReadOnlyList<string> preparedAuthorImages,
+            CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            if (!string.IsNullOrWhiteSpace(metadata.Asin))
+            {
+                var existingByAsin = await _repo.GetByAsinAsync(metadata.Asin);
+                cancellationToken.ThrowIfCancellationRequested();
+                if (existingByAsin != null)
+                {
+                    return AlreadyExists(existingByAsin);
+                }
+            }
+
+            if (!string.IsNullOrWhiteSpace(firstIsbn))
+            {
+                var existingByIsbn = await _repo.GetByIsbnAsync(firstIsbn);
+                cancellationToken.ThrowIfCancellationRequested();
+                if (existingByIsbn != null)
+                {
+                    return AlreadyExists(existingByIsbn);
+                }
+            }
+
+            var destinationFailure = await ResolveAndValidateDestinationAsync(
+                audiobook,
+                metadata,
+                request,
+                cancellationToken);
+            if (destinationFailure != null)
+            {
+                return destinationFailure;
+            }
+
+            audiobook.ImageUrl = await PublishLibraryImageAsync(preparedImage);
+            foreach (var authorImageKey in preparedAuthorImages)
+            {
+                await PublishAuthorImageAsync(authorImageKey);
+            }
+
+            cancellationToken.ThrowIfCancellationRequested();
+            await _commitStore.CommitAsync(
+                audiobook,
+                CreateHistoryEntry(audiobook, request),
+                cancellationToken);
             return new LibraryAddOperationResult
             {
                 Added = true,
@@ -284,170 +265,12 @@ namespace Listenarr.Application.Audiobooks.Catalog
             };
         }
 
-        private async Task<string?> MoveImageToLibraryStorageAsync(
-            AudibleBookMetadata metadata,
-            SearchResult? searchResult,
-            string? firstIsbn)
+        private static LibraryAddOperationResult AlreadyExists(Audiobook audiobook) => new()
         {
-            var imageUrl = metadata.ImageUrl;
-
-            if (!string.IsNullOrWhiteSpace(metadata.Asin))
-            {
-                return await TryMoveImageAsync(metadata.Asin, metadata.ImageUrl) ?? imageUrl;
-            }
-
-            if (!string.IsNullOrWhiteSpace(firstIsbn))
-            {
-                var derivedKey = "img-" + ComputeShortHash(firstIsbn);
-                return await TryMoveImageAsync(derivedKey, metadata.ImageUrl) ?? imageUrl;
-            }
-
-            if (!string.IsNullOrWhiteSpace(metadata.ImageUrl))
-            {
-                var rawKey = searchResult?.Id ?? searchResult?.ResultUrl ?? searchResult?.ProductUrl ?? metadata.ImageUrl;
-                var derivedKey = "img-" + ComputeShortHash(rawKey);
-                return await TryMoveImageAsync(derivedKey, metadata.ImageUrl) ?? imageUrl;
-            }
-
-            return imageUrl;
-        }
-
-        private async Task<string?> TryMoveImageAsync(string imageKey, string? sourceImageUrl)
-        {
-            try
-            {
-                var libraryImagePath = await _imageCacheService.MoveToLibraryStorageAsync(imageKey, sourceImageUrl);
-                return string.IsNullOrWhiteSpace(libraryImagePath) ? null : $"/{libraryImagePath}";
-            }
-            catch (IOException ex)
-            {
-                _logger.LogWarning(ex, "Error moving image for key {ImageKey} to library storage", imageKey);
-            }
-            catch (UnauthorizedAccessException ex)
-            {
-                _logger.LogWarning(ex, "Error moving image for key {ImageKey} to library storage", imageKey);
-            }
-            catch (HttpRequestException ex)
-            {
-                _logger.LogWarning(ex, "Error moving image for key {ImageKey} to library storage", imageKey);
-            }
-            catch (TaskCanceledException ex)
-            {
-                _logger.LogWarning(ex, "Error moving image for key {ImageKey} to library storage", imageKey);
-            }
-            catch (InvalidOperationException ex)
-            {
-                _logger.LogWarning(ex, "Error moving image for key {ImageKey} to library storage", imageKey);
-            }
-            catch (UriFormatException ex)
-            {
-                _logger.LogWarning(ex, "Error moving image for key {ImageKey} to library storage", imageKey);
-            }
-
-            return null;
-        }
-
-        private async Task ResolveAuthorAsinsAsync(Audiobook audiobook)
-        {
-            try
-            {
-                if (audiobook.Authors == null || !audiobook.Authors.Any())
-                {
-                    return;
-                }
-
-                audiobook.AuthorAsins = audiobook.AuthorAsins ?? new List<string>();
-                foreach (var authorName in audiobook.Authors)
-                {
-                    try
-                    {
-                        var info = await _audibleService.LookupAuthorAsync(authorName);
-                        if (info == null || string.IsNullOrWhiteSpace(info.Asin))
-                        {
-                            continue;
-                        }
-
-                        if (!audiobook.AuthorAsins.Contains(info.Asin))
-                        {
-                            audiobook.AuthorAsins.Add(info.Asin);
-                        }
-
-                        try
-                        {
-                            var moved = await _imageCacheService.MoveToAuthorLibraryStorageAsync(info.Asin, info.Image);
-                            if (moved != null)
-                            {
-                                _logger.LogInformation(
-                                    "Cached author image for {Author} (ASIN: {Asin})",
-                                    authorName,
-                                    info.Asin);
-                            }
-                        }
-                        catch (Exception ex) when (ex is not OperationCanceledException && ex is not OutOfMemoryException && ex is not StackOverflowException)
-                        {
-                            _logger.LogWarning(ex, "Failed to cache author image for {Author}", authorName);
-                        }
-                    }
-                    catch (Exception ex) when (ex is not OperationCanceledException && ex is not OutOfMemoryException && ex is not StackOverflowException)
-                    {
-                        _logger.LogWarning(ex, "Author lookup failed for {Author}", authorName);
-                    }
-                }
-
-                await _repo.UpdateAsync(audiobook);
-            }
-            catch (Exception ex) when (ex is not OperationCanceledException && ex is not OutOfMemoryException && ex is not StackOverflowException)
-            {
-                _logger.LogWarning(ex, "Error resolving author ASINs for audiobook '{Title}'", audiobook.Title);
-            }
-        }
-
-        private async Task SendAddedNotificationAsync(Audiobook audiobook)
-        {
-            if (_notificationService == null)
-            {
-                return;
-            }
-
-            var settings = await _configurationService.GetApplicationSettingsAsync();
-            var data = new
-            {
-                id = audiobook.Id,
-                title = audiobook.Title ?? "Unknown Title",
-                authors = audiobook.Authors,
-                narrators = audiobook.Narrators,
-                description = audiobook.Description,
-                asin = audiobook.Asin,
-                publisher = audiobook.Publisher,
-                year = audiobook.PublishYear,
-                imageUrl = audiobook.ImageUrl
-            };
-
-            await _notificationService.SendNotificationAsync(
-                "book-added",
-                data,
-                settings.WebhookUrl,
-                settings.EnabledNotificationTriggers);
-        }
-
-        private async Task AddHistoryEntryAsync(
-            Audiobook audiobook,
-            LibraryAddOperationRequest request,
-            CancellationToken cancellationToken)
-        {
-            var historyEntry = new History
-            {
-                AudiobookId = audiobook.Id,
-                AudiobookTitle = audiobook.Title ?? "Unknown Title",
-                EventType = "Added",
-                Message = request.HistoryMessage ??
-                    $"Audiobook '{audiobook.Title}' added to library from {request.HistorySource}",
-                Source = request.HistorySource,
-                Timestamp = DateTime.UtcNow
-            };
-
-            await _historyRepository.AddAsync(historyEntry, cancellationToken);
-        }
+            AlreadyExists = true,
+            Message = "Audiobook already exists in library",
+            Audiobook = audiobook
+        };
 
         private static LibraryAddOperationResult ValidationFailure(
             string code,
@@ -461,28 +284,6 @@ namespace Listenarr.Application.Audiobooks.Catalog
                 ValidationField = "destinationPath",
                 ResolvedDestination = resolvedDestination
             };
-
-        private static string? ToStringOrFirst(object? value)
-        {
-            if (value is List<string> list)
-            {
-                return list.FirstOrDefault();
-            }
-
-            return value as string;
-        }
-
-        private static string ComputeShortHash(string? input)
-        {
-            if (string.IsNullOrEmpty(input))
-            {
-                return Guid.NewGuid().ToString("N").Substring(0, 12);
-            }
-
-            var bytes = Encoding.UTF8.GetBytes(input);
-            var hash = SHA1.HashData(bytes);
-            return BitConverter.ToString(hash).Replace("-", "").Substring(0, 16).ToLowerInvariant();
-        }
 
     }
 }

@@ -453,6 +453,168 @@ public sealed class RootFolderReassignmentTransactionTests : BaseTests
         Assert.Equal(sourceBasePath, (await verification.Audiobooks.FindAsync(audiobookId))!.BasePath);
     }
 
+    [Theory]
+    [InlineData(LibraryDirectoryOwnershipState.Owned, false)]
+    [InlineData(LibraryDirectoryOwnershipState.Retained, false)]
+    [InlineData(LibraryDirectoryOwnershipState.Removing, false)]
+    [InlineData(LibraryDirectoryOwnershipState.Conflict, false)]
+    [InlineData(LibraryDirectoryOwnershipState.Unavailable, false)]
+    [InlineData(LibraryDirectoryOwnershipState.Owned, true)]
+    [InlineData(LibraryDirectoryOwnershipState.Retained, true)]
+    [InlineData(LibraryDirectoryOwnershipState.Removing, true)]
+    [InlineData(LibraryDirectoryOwnershipState.Conflict, true)]
+    [InlineData(LibraryDirectoryOwnershipState.Unavailable, true)]
+    public async Task RootRemoval_NonRemovedDirectoryOwnershipBlocksTransaction(
+        LibraryDirectoryOwnershipState ownershipState,
+        bool reassign)
+    {
+        var identity = Guid.NewGuid().ToString("N");
+        var sourcePath = Path.Join(
+            Path.GetTempPath(),
+            $"root-ownership-source-{identity}");
+        var targetPath = Path.Join(
+            Path.GetTempPath(),
+            $"root-ownership-target-{identity}");
+        int sourceRootId;
+        int targetRootId;
+        await using (var db = await _factory.CreateDbContextAsync())
+        {
+            var sourceRoot = new RootFolder
+            {
+                Name = $"Source-{identity}",
+                Path = sourcePath
+            };
+            var targetRoot = new RootFolder
+            {
+                Name = $"Target-{identity}",
+                Path = targetPath
+            };
+            db.RootFolders.AddRange(sourceRoot, targetRoot);
+            await db.SaveChangesAsync();
+            sourceRootId = sourceRoot.Id;
+            targetRootId = targetRoot.Id;
+            db.LibraryDirectoryOwnerships.Add(
+                CreateDirectoryOwnership(
+                    sourceRootId,
+                    Path.Join(sourcePath, "Author"),
+                    ownershipState,
+                    identity));
+            await db.SaveChangesAsync();
+        }
+
+        var exception = reassign
+            ? await Assert.ThrowsAsync<InvalidOperationException>(() =>
+                _repository.ReassignAudiobooksAndRemoveAsync(
+                    sourceRootId,
+                    targetRootId,
+                    FileSystemPathSemantics.CurrentHostDefault,
+                    FileSystemPathSemantics.CurrentHostDefault))
+            : await Assert.ThrowsAsync<InvalidOperationException>(() =>
+                _repository.RemoveAsync(sourceRootId));
+
+        Assert.Contains(
+            "ownership claims remain active",
+            exception.Message,
+            StringComparison.OrdinalIgnoreCase);
+        await using var verification = await _factory.CreateDbContextAsync();
+        Assert.NotNull(await verification.RootFolders.FindAsync(sourceRootId));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task RootRemoval_RemovedDirectoryOwnershipDoesNotBlock(
+        bool reassign)
+    {
+        var identity = Guid.NewGuid().ToString("N");
+        var sourcePath = Path.Join(
+            Path.GetTempPath(),
+            $"root-retired-ownership-source-{identity}");
+        var targetPath = Path.Join(
+            Path.GetTempPath(),
+            $"root-retired-ownership-target-{identity}");
+        int sourceRootId;
+        int targetRootId;
+        await using (var db = await _factory.CreateDbContextAsync())
+        {
+            var sourceRoot = new RootFolder
+            {
+                Name = $"Source-{identity}",
+                Path = sourcePath
+            };
+            var targetRoot = new RootFolder
+            {
+                Name = $"Target-{identity}",
+                Path = targetPath
+            };
+            db.RootFolders.AddRange(sourceRoot, targetRoot);
+            await db.SaveChangesAsync();
+            sourceRootId = sourceRoot.Id;
+            targetRootId = targetRoot.Id;
+            db.LibraryDirectoryOwnerships.Add(
+                CreateDirectoryOwnership(
+                    sourceRootId,
+                    Path.Join(sourcePath, "Author"),
+                    LibraryDirectoryOwnershipState.Removed,
+                    identity));
+            await db.SaveChangesAsync();
+        }
+
+        if (reassign)
+        {
+            await _repository.ReassignAudiobooksAndRemoveAsync(
+                sourceRootId,
+                targetRootId,
+                FileSystemPathSemantics.CurrentHostDefault,
+                FileSystemPathSemantics.CurrentHostDefault);
+        }
+        else
+        {
+            await _repository.RemoveAsync(sourceRootId);
+        }
+
+        await using var verification = await _factory.CreateDbContextAsync();
+        Assert.Null(await verification.RootFolders.FindAsync(sourceRootId));
+    }
+
+    private static LibraryDirectoryOwnership CreateDirectoryOwnership(
+        int managedRootFolderId,
+        string path,
+        LibraryDirectoryOwnershipState state,
+        string identity)
+    {
+        var semantics = FileSystemPathSemantics.CurrentHostDefault;
+        var canonicalPath = FileSystemPathIdentity.Canonicalize(
+            path,
+            semantics.Syntax);
+        return new LibraryDirectoryOwnership
+        {
+            Path = path,
+            CanonicalPath = canonicalPath,
+            PathSyntax = semantics.Syntax,
+            PathCaseSensitivity = semantics.CaseSensitivity,
+            PathCaseSensitivityMode =
+                semantics.CaseSensitivity == FileSystemCaseSensitivity.Sensitive
+                    ? FileSystemCaseSensitivityMode.Sensitive
+                    : FileSystemCaseSensitivityMode.Insensitive,
+            PathIdentityBoundary = canonicalPath,
+            PathIdentityLookupKey = FileSystemPathIdentity.CreateLookupKey(
+                "library-directory",
+                canonicalPath,
+                semantics.Syntax),
+            PathOwnershipKey = state == LibraryDirectoryOwnershipState.Conflict
+                ? null
+                : FileSystemPathIdentity.CreateKey(
+                    "library-directory",
+                    canonicalPath,
+                    semantics),
+            OwnershipToken = identity,
+            State = state,
+            CreationWorkflow = "root-removal-test",
+            ManagedRootFolderId = managedRootFolderId
+        };
+    }
+
     private sealed class TestDbContextFactory(DbContextOptions<ListenArrDbContext> options)
         : IDbContextFactory<ListenArrDbContext>
     {

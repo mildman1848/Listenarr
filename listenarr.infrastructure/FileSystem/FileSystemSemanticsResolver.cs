@@ -7,6 +7,7 @@ public sealed class FileSystemSemanticsResolver : IFileSystemSemanticsResolver
     private const string ProbePrefix = ".listenarr-case-probe-";
 
     internal Action<string>? BeforeProbeForTest { get; init; }
+    internal Action<string, string>? AfterPrimaryProbeCreatedForTest { get; init; }
 
     public ValueTask<FileSystemSemanticsResolution> ResolveAsync(
         string path,
@@ -48,28 +49,82 @@ public sealed class FileSystemSemanticsResolver : IFileSystemSemanticsResolver
         return ValueTask.FromResult(resolved with { CanonicalPath = fullPath });
     }
 
-    private static FileSystemSemanticsResolution Probe(
+    private FileSystemSemanticsResolution Probe(
         string boundary,
         FileSystemPathSyntax syntax)
     {
         var probeName = ProbePrefix + Guid.NewGuid().ToString("N") + "-a";
-        var probePath = Path.Join(boundary, probeName);
-        var alternatePath = Path.Join(boundary, probeName.ToUpperInvariant());
+        var alternateName = probeName.ToUpperInvariant();
+        PinnedDirectoryCreation.PinnedFileEntry? primary = null;
+        PinnedDirectoryCreation.PinnedFileEntry? alternate = null;
+        var alternateCreated = false;
         try
         {
-            using (new FileStream(probePath, FileMode.CreateNew, FileAccess.Write, FileShare.Read))
-            {
-            }
+            using var pinnedBoundary =
+                PinnedDirectoryCreation.OpenPinnedDirectoryNoFollow(boundary);
+            primary = pinnedBoundary.CreateNewFile(probeName);
+            AfterPrimaryProbeCreatedForTest?.Invoke(
+                primary.FullPath,
+                Path.Join(boundary, alternateName));
 
-            var sensitivity = File.Exists(alternatePath)
-                ? FileSystemCaseSensitivity.Insensitive
-                : FileSystemCaseSensitivity.Sensitive;
-            return new FileSystemSemanticsResolution(
-                new FileSystemPathSemantics(syntax, sensitivity),
-                PathIdentityState.Valid,
-                boundary);
+            try
+            {
+                alternate = pinnedBoundary.CreateNewFile(alternateName);
+                alternateCreated = true;
+                if (!pinnedBoundary.VisiblePathMatches()
+                    || !primary.VisiblePathMatches()
+                    || !alternate.VisiblePathMatches())
+                {
+                    return Unavailable(
+                        syntax,
+                        boundary,
+                        "Filesystem case-sensitivity probe entries changed during classification.");
+                }
+
+                return new FileSystemSemanticsResolution(
+                    new FileSystemPathSemantics(
+                        syntax,
+                        FileSystemCaseSensitivity.Sensitive),
+                    PathIdentityState.Valid,
+                    boundary);
+            }
+            catch (Exception exception) when (
+                exception is InvalidOperationException
+                || exception is System.ComponentModel.Win32Exception
+                {
+                    NativeErrorCode: 17
+                })
+            {
+                alternate = pinnedBoundary.TryOpenExistingFile(
+                    alternateName,
+                    requireDeleteAccess: false);
+                if (alternate == null
+                    || !pinnedBoundary.VisiblePathMatches()
+                    || !primary.VisiblePathMatches()
+                    || !alternate.VisiblePathMatches()
+                    || !primary.IdentifiesSameEntry(alternate)
+                    || primary.GetLinkCount() != 1
+                    || !pinnedBoundary.VisiblePathMatches()
+                    || !primary.VisiblePathMatches()
+                    || !alternate.VisiblePathMatches())
+                {
+                    return Unavailable(
+                        syntax,
+                        boundary,
+                        "Filesystem case-sensitivity probe collision could not be attributed to the created entry.");
+                }
+
+                return new FileSystemSemanticsResolution(
+                    new FileSystemPathSemantics(
+                        syntax,
+                        FileSystemCaseSensitivity.Insensitive),
+                    PathIdentityState.Valid,
+                    boundary);
+            }
         }
-        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        catch (Exception exception) when (exception is
+            IOException or UnauthorizedAccessException or InvalidOperationException
+                or System.ComponentModel.Win32Exception)
         {
             return Unavailable(
                 syntax,
@@ -78,11 +133,16 @@ public sealed class FileSystemSemanticsResolver : IFileSystemSemanticsResolver
         }
         finally
         {
-            TryDeleteProbe(probePath);
-            if (!string.Equals(probePath, alternatePath, StringComparison.Ordinal))
+            if (alternateCreated && alternate != null)
             {
-                TryDeleteProbe(alternatePath);
+                TryDeleteProbe(alternate);
             }
+            alternate?.Dispose();
+            if (primary != null)
+            {
+                TryDeleteProbe(primary);
+            }
+            primary?.Dispose();
         }
     }
 
@@ -115,20 +175,23 @@ public sealed class FileSystemSemanticsResolver : IFileSystemSemanticsResolver
             boundary);
     }
 
-    private static void TryDeleteProbe(string path)
+    private static void TryDeleteProbe(
+        PinnedDirectoryCreation.PinnedFileEntry probe)
     {
         try
         {
-            if (File.Exists(path))
+            if (probe.VisiblePathMatches())
             {
-                File.Delete(path);
+                probe.Delete(immediateWindows: true);
             }
         }
-        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        catch (Exception exception) when (exception is
+            IOException or UnauthorizedAccessException or InvalidOperationException
+                or System.ComponentModel.Win32Exception)
         {
             System.Diagnostics.Trace.TraceWarning(
                 "Failed to remove filesystem case-sensitivity probe {0}: {1}",
-                path,
+                probe.FullPath,
                 exception.Message);
         }
     }

@@ -17,6 +17,14 @@ public partial class FileMover
         out string reason)
     {
         reason = string.Empty;
+        if (!TryRecoverJournaledDirectoryCleanup(sourceRoot, out reason))
+        {
+            return false;
+        }
+        if (!Directory.Exists(sourceRoot))
+        {
+            return true;
+        }
         BeforeDirectoryTreePreflightForTest?.Invoke();
         if (!FileSystemSafety.TryEnumerateTreeWithoutLinks(
                 sourceRoot,
@@ -89,72 +97,9 @@ public partial class FileMover
         }
 
         afterDestinationVerified?.Invoke();
-
-        var sourceChanged = false;
-        foreach (var fileSnapshot in snapshot.Files)
-        {
-            var sourceFile = ResolveSnapshotPath(
-                sourceRoot,
-                fileSnapshot.RelativePath,
-                "source cleanup file");
-            if (!File.Exists(sourceFile))
-            {
-                continue;
-            }
-
-            if (!TryMapCopiedPath(
-                    sourceRoot,
-                    destinationRoot,
-                    sourceFile,
-                    out var destinationFile)
-                || !await TryRemoveVerifiedCopiedFileAsync(
-                    sourceRoot,
-                    destinationRoot,
-                    sourceFile,
-                    destinationFile,
-                    fileSnapshot.Identity))
-            {
-                sourceChanged = true;
-            }
-        }
-
-        foreach (var sourceDirectory in snapshot.RelativeDirectories
-            .Select(path => ResolveSnapshotPath(
-                sourceRoot,
-                path,
-                "source cleanup directory"))
-            .OrderByDescending(path => path.Length))
-        {
-            var relativeDirectory = GetVerifiedRelativePath(
-                sourceRoot,
-                sourceDirectory);
-            if (!snapshot.DirectoryIdentities.TryGetValue(
-                    relativeDirectory,
-                    out var expectedIdentity)
-                || !TryDeletePinnedEmptyDirectory(
-                    sourceDirectory,
-                    expectedIdentity))
-            {
-                sourceChanged = true;
-            }
-        }
-
-        if (!TryDeletePinnedEmptyDirectory(
-                sourceRoot,
-                snapshot.SourceRootIdentity))
-        {
-            sourceChanged = true;
-        }
-
-        var sourceRemoved = !Directory.Exists(sourceRoot);
-        return new DirectoryCopyCleanupResult(
-            true,
-            sourceRemoved,
-            sourceRemoved
-                ? null
-                : sourceChanged
-                    ? "The destination was copied, but new or changed source content was preserved."
-                    : "The verified source root could not be removed.");
+        return await ExecuteJournaledDirectoryCleanupAsync(
+            snapshot,
+            destinationRoot);
     }
 
     private async Task<bool> TryRemoveVerifiedCopiedFileAsync(

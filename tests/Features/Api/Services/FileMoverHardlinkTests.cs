@@ -16,6 +16,7 @@
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
 using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Options;
 
 namespace Listenarr.Tests.Features.Api.Services
 {
@@ -56,6 +57,8 @@ namespace Listenarr.Tests.Features.Api.Services
             var sourceContent = await File.ReadAllTextAsync(sourceFile);
             var destContent = await File.ReadAllTextAsync(destFile);
             Assert.Equal(sourceContent, destContent);
+            await File.WriteAllTextAsync(destFile, "linked mutation");
+            Assert.Equal("linked mutation", await File.ReadAllTextAsync(sourceFile));
         }
 
         [Fact]
@@ -103,16 +106,22 @@ namespace Listenarr.Tests.Features.Api.Services
             var sourceFile = Path.Join(_root, "source.mp3");
             await File.WriteAllTextAsync(sourceFile, "content");
 
-            // Create a path that would cause hardlink to fail (different volume simulation via invalid path)
-            // On some systems, hardlink may fail for various reasons - we want to test fallback behavior
             var destFile = Path.Join(_root, "dest.mp3");
+            var mover = new FileMover(
+                new NullLogger<FileMover>(),
+                options: Options.Create(new FileMoverOptions { MaxRetries = 1 }),
+                semanticsResolver: new FileSystemSemanticsResolver())
+            {
+                BeforePinnedHardlinkCreationForTestAsync = () =>
+                    Task.FromException(new IOException("forced hardlink failure"))
+            };
 
-            // Act - even if hardlink fails internally, the method should fallback to copy
-            var result = await _mover.HardlinkFileAsync(sourceFile, destFile);
+            var result = await mover.HardlinkFileAsync(sourceFile, destFile);
 
-            // Assert - should succeed via fallback
             Assert.True(result, "HardlinkFileAsync should succeed via copy fallback");
             Assert.True(File.Exists(destFile), "Destination file should exist");
+            await File.WriteAllTextAsync(destFile, "destination changed");
+            Assert.Equal("content", await File.ReadAllTextAsync(sourceFile));
         }
 
         [Fact]

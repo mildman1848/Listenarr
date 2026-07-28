@@ -2,6 +2,54 @@ namespace Listenarr.Infrastructure.Library.Moving;
 
 internal static class PinnedLibraryDirectoryOwnershipMarker
 {
+    public static async Task PublishMigrationTargetAsync(
+        LibraryDirectoryOwnership source,
+        LibraryDirectoryOwnership target,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(source);
+        ArgumentNullException.ThrowIfNull(target);
+        var parentPath = Path.GetDirectoryName(target.CanonicalPath)
+            ?? throw new InvalidOperationException(
+                "The migrated ownership path has no parent directory.");
+        using var parent =
+            PinnedDirectoryCreation.OpenPinnedDirectoryNoFollow(parentPath);
+        using var publication = parent.OpenExistingChildForPublication(
+            Path.GetFileName(target.CanonicalPath));
+        using var directory = publication.OpenCreatedDirectoryAnchor();
+        if (target.DirectoryObjectIdentityVersion != 1
+            || !string.Equals(
+                target.DirectoryObjectIdentity,
+                directory.GetDirectoryObjectIdentity(),
+                StringComparison.Ordinal)
+            || !parent.VisiblePathMatches()
+            || !directory.VisiblePathMatches())
+        {
+            throw new InvalidOperationException(
+                "The migrated ownership target does not match the persisted physical directory generation.");
+        }
+
+        await PublishMigratedMarkerAsync(
+            source,
+            target,
+            directory,
+            LibraryDirectoryOwnershipMarker.FileName,
+            cancellationToken);
+        await PublishMigratedMarkerAsync(
+            source,
+            target,
+            parent,
+            $".listenarr-directory-owner-{target.OwnershipToken}.json",
+            cancellationToken);
+        directory.FlushDirectoryEntry();
+        parent.FlushDirectoryEntry();
+        if (!parent.VisiblePathMatches() || !directory.VisiblePathMatches())
+        {
+            throw new InvalidOperationException(
+                "The migrated ownership target changed during marker publication.");
+        }
+    }
+
     public static async Task EnsureAsync(
         LibraryDirectoryOwnership ownership,
         PinnedDirectoryCreation creation,
@@ -118,6 +166,85 @@ internal static class PinnedLibraryDirectoryOwnershipMarker
         }
 
         ValidateExistingMarker(ownership, parent, fileName);
+    }
+
+    private static async Task PublishMigratedMarkerAsync(
+        LibraryDirectoryOwnership source,
+        LibraryDirectoryOwnership target,
+        PinnedDirectoryCreation.PinnedDirectoryAnchor parent,
+        string fileName,
+        CancellationToken cancellationToken)
+    {
+        using var existing = parent.TryOpenExistingFile(
+            fileName,
+            requireDeleteAccess: false);
+        if (existing != null)
+        {
+            var payload = LibraryDirectoryOwnershipMarker.ReadPayload(existing);
+            if (LibraryDirectoryOwnershipMarker.MatchesCurrentPayload(
+                    target,
+                    payload))
+            {
+                return;
+            }
+            if (!LibraryDirectoryOwnershipMarker.MatchesCurrentPayload(
+                    source,
+                    payload))
+            {
+                throw new InvalidOperationException(
+                    "The ownership migration target contains an unrelated marker.");
+            }
+        }
+
+        var temporaryName = fileName + ".migration.tmp";
+        using var interrupted = parent.TryOpenExistingFile(
+            temporaryName,
+            requireDeleteAccess: true);
+        if (interrupted != null)
+        {
+            var interruptedPayload =
+                LibraryDirectoryOwnershipMarker.ReadPayload(interrupted);
+            if (!LibraryDirectoryOwnershipMarker.MatchesCurrentPayload(
+                    target,
+                    interruptedPayload))
+            {
+                throw new InvalidOperationException(
+                    "The ownership migration temporary marker is unrelated.");
+            }
+
+            if (existing != null)
+            {
+                interrupted.ReplaceWithinParent(fileName, existing);
+            }
+            else
+            {
+                interrupted.MoveWithinParent(fileName);
+            }
+            return;
+        }
+
+        using var temporary = parent.CreateNewFile(
+            temporaryName,
+            hiddenFile: true);
+        await using (var stream = temporary.OpenWriteStream(
+            bufferSize: 4096,
+            asynchronous: false))
+        {
+            var bytes = System.Text.Encoding.UTF8.GetBytes(
+                LibraryDirectoryOwnershipMarker.SerializePayload(target));
+            await stream.WriteAsync(bytes, cancellationToken);
+            await stream.FlushAsync(cancellationToken);
+            stream.Flush(flushToDisk: true);
+        }
+
+        if (existing != null)
+        {
+            temporary.ReplaceWithinParent(fileName, existing);
+        }
+        else
+        {
+            temporary.MoveWithinParent(fileName);
+        }
     }
 
     internal static async Task UpgradeLegacyAsync(

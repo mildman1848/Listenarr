@@ -77,11 +77,14 @@ namespace Listenarr.Api.Features.Library
         /// Add a new audiobook to the library from search metadata.
         /// </summary>
         /// <param name="request">Audiobook metadata, monitoring preference, quality profile, and optional auto-search flag.</param>
+        /// <param name="cancellationToken">Request cancellation token.</param>
         /// <returns>The newly created audiobook record.</returns>
         [HttpPost("add")]
-        public async Task<IActionResult> AddToLibrary([FromBody] AddToLibraryRequest request)
+        public async Task<IActionResult> AddToLibrary(
+            [FromBody] AddToLibraryRequest request,
+            CancellationToken cancellationToken = default)
         {
-            return await _addWorkflow.AddAsync(request);
+            return await _addWorkflow.AddAsync(request, cancellationToken);
         }
 
         /// <summary>

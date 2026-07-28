@@ -30,6 +30,8 @@ namespace Listenarr.Infrastructure.Persistence
         public DbSet<MoveJobEntry> MoveJobEntries { get; set; } = null!;
         public DbSet<MoveJobCreatedDirectory> MoveJobCreatedDirectories { get; set; } = null!;
         public DbSet<LibraryDirectoryOwnership> LibraryDirectoryOwnerships { get; set; } = null!;
+        public DbSet<LibraryDirectoryOwnershipPathMigration> LibraryDirectoryOwnershipPathMigrations { get; set; } = null!;
+        public DbSet<LibraryDirectoryOwnershipRetiredMarker> LibraryDirectoryOwnershipRetiredMarkers { get; set; } = null!;
         public DbSet<MoveScanHandoff> MoveScanHandoffs { get; set; } = null!;
         public DbSet<ApplicationSettings> ApplicationSettings { get; set; } = null!;
         public DbSet<History> History { get; set; } = null!;
@@ -46,6 +48,7 @@ namespace Listenarr.Infrastructure.Persistence
         public DbSet<RootFolder> RootFolders { get; set; } = null!;
         public DbSet<RootFolderRelocation> RootFolderRelocations { get; set; } = null!;
         public DbSet<RootFolderRelocationSkippedItem> RootFolderRelocationSkippedItems { get; set; } = null!;
+        public DbSet<RootFolderRelocationCreatedDirectory> RootFolderRelocationCreatedDirectories { get; set; } = null!;
         public DbSet<MonitoredAuthor> MonitoredAuthors { get; set; } = null!;
         public DbSet<MonitoredSeries> MonitoredSeries { get; set; } = null!;
         public DbSet<AuthorCacheEntry> AuthorCacheEntries { get; set; } = null!;

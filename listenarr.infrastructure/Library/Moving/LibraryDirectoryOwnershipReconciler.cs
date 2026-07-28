@@ -19,8 +19,49 @@ public sealed class LibraryDirectoryOwnershipReconciler(
     private async Task ReconcileCoreAsync(CancellationToken cancellationToken)
     {
         await using var db = await dbContextFactory.CreateDbContextAsync(cancellationToken);
+        var retiredMarkers = await db.LibraryDirectoryOwnershipRetiredMarkers
+            .Where(marker =>
+                marker.State
+                    == LibraryDirectoryOwnershipRetiredMarkerState.Pending)
+            .ToListAsync(cancellationToken);
+        foreach (var evidence in retiredMarkers)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            try
+            {
+                if (string.IsNullOrWhiteSpace(evidence.CanonicalPayload)
+                    || string.IsNullOrWhiteSpace(evidence.PayloadSha256)
+                    || string.IsNullOrWhiteSpace(
+                        evidence.CanonicalMarkerPath))
+                {
+                    LibraryDirectoryOwnershipRetiredMarkerEvidence
+                        .MaterializeCanonicalPayload(evidence);
+                    evidence.UpdatedAt = DateTime.UtcNow;
+                    await db.SaveChangesAsync(cancellationToken);
+                }
+
+                ReconcileRetiredMarker(evidence);
+                evidence.State =
+                    LibraryDirectoryOwnershipRetiredMarkerState.Removed;
+                evidence.UpdatedAt = DateTime.UtcNow;
+                await db.SaveChangesAsync(cancellationToken);
+            }
+            catch (Exception exception) when (exception is not (
+                OperationCanceledException or OutOfMemoryException
+                    or StackOverflowException))
+            {
+                logger.LogWarning(
+                    exception,
+                    "Retired directory ownership marker evidence {EvidenceId} could not be reconciled safely.",
+                    evidence.Id);
+            }
+        }
+
         var ownerships = await db.LibraryDirectoryOwnerships
-            .Where(ownership => ownership.State != LibraryDirectoryOwnershipState.Removed)
+            .Where(ownership =>
+                ownership.State != LibraryDirectoryOwnershipState.Removed
+                && !db.LibraryDirectoryOwnershipPathMigrations.Any(
+                    migration => migration.OwnershipId == ownership.Id))
             .ToListAsync(cancellationToken);
         foreach (var ownership in ownerships)
         {
@@ -37,6 +78,29 @@ public sealed class LibraryDirectoryOwnershipReconciler(
                     && !Directory.Exists(
                         LibraryDirectoryOwnershipRemoval.GetQuarantinePath(ownership)))
                 {
+                    if (LibraryDirectoryOwnershipRemoval
+                        .TryValidateLegacyMissingBothRecovery(
+                            ownership,
+                            out var legacyPayload))
+                    {
+                        var now = DateTime.UtcNow;
+                        db.LibraryDirectoryOwnershipRetiredMarkers.Add(
+                            LibraryDirectoryOwnershipRetiredMarkerEvidence.Create(
+                                ownership,
+                                legacyPayload
+                                    ?? throw new InvalidOperationException(
+                                        "The validated legacy marker payload is unavailable."),
+                                now));
+                        ownership.State =
+                            LibraryDirectoryOwnershipState.Removed;
+                        ownership.PathOwnershipKey = null;
+                        ownership.ManagedRootFolderId = null;
+                        ownership.StateReason = null;
+                        ownership.UpdatedAt = now;
+                        await db.SaveChangesAsync(cancellationToken);
+                        continue;
+                    }
+
                     LibraryDirectoryOwnershipRemoval.ValidateRecoverableState(ownership);
                     continue;
                 }
@@ -106,5 +170,45 @@ public sealed class LibraryDirectoryOwnershipReconciler(
                     ownership.Id);
             }
         }
+
+    }
+
+    private static void ReconcileRetiredMarker(
+        LibraryDirectoryOwnershipRetiredMarker evidence)
+    {
+        if (string.IsNullOrWhiteSpace(evidence.CanonicalMarkerPath))
+        {
+            throw new InvalidOperationException(
+                "The retired ownership marker path has not been materialized.");
+        }
+
+        var parentPath = Path.GetDirectoryName(evidence.CanonicalMarkerPath)
+            ?? throw new InvalidOperationException(
+                "The retired ownership marker has no parent directory.");
+        using var parent =
+            PinnedDirectoryCreation.OpenPinnedDirectoryNoFollow(parentPath);
+        using var marker = parent.TryOpenExistingFile(
+            Path.GetFileName(evidence.CanonicalMarkerPath),
+            requireDeleteAccess: true);
+        if (marker == null)
+        {
+            return;
+        }
+
+        var payload = LibraryDirectoryOwnershipMarker.ReadPayload(marker);
+        if (!LibraryDirectoryOwnershipRetiredMarkerEvidence.Matches(
+                evidence,
+                payload)
+            || !parent.VisiblePathMatches()
+            || !marker.VisiblePathMatches()
+            || !LibraryDirectoryOwnershipRetiredMarkerEvidence.Matches(
+                evidence,
+                LibraryDirectoryOwnershipMarker.ReadPayload(marker)))
+        {
+            throw new InvalidOperationException(
+                "The retired ownership marker does not match its immutable cleanup evidence.");
+        }
+
+        marker.Delete();
     }
 }

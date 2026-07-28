@@ -321,6 +321,7 @@ internal sealed partial class AudiobookContentMoveService
                 quarantineRoot,
                 entry,
                 sourceSemantics,
+                targetSemantics,
                 cancellationToken);
             await UpdateCleanupStateAsync(
                 jobId,

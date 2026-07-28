@@ -33,7 +33,12 @@ namespace Listenarr.Application.Downloads.Contracts
         /// <param name="action">What we want to do with the file</param>
         /// <param name="source">File</param>
         /// <param name="destination">Optional destination of the action</param>
+        /// <param name="operationId">Stable identifier for a retryable filesystem operation</param>
         /// <returns>True in case of success, false otherwise</returns>
-        Task<bool> PerformActionOn(FileAction action, string source, string? destination = null);
+        Task<bool> PerformActionOn(
+            FileAction action,
+            string source,
+            string? destination = null,
+            Guid? operationId = null);
     }
 }

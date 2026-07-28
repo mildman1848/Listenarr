@@ -99,6 +99,12 @@ public sealed partial class RootFolderRelocationService
         await db.SaveChangesAsync(cancellationToken);
         cancellationToken.ThrowIfCancellationRequested();
         await transaction.CommitAsync(CancellationToken.None);
+        if (relocation.Status == RootFolderRelocationStatus.Completed)
+        {
+            await RetireRetainedRelocationReservationMarkersAsync(
+                relocation.Id,
+                CancellationToken.None);
+        }
         return Map(relocation, root?.Path ?? ResolveCurrentPathFallback(relocation));
     }
 
@@ -118,8 +124,64 @@ public sealed partial class RootFolderRelocationService
     private async Task<List<RootFolderPathChangeResult>> ReconcileActiveCoreAsync(
         CancellationToken cancellationToken)
     {
+        var results =
+            await ReconcileOwnershipPathMigrationsAsync(cancellationToken);
         await ReconcileRootIdentitiesAsync(cancellationToken);
+        await RetireAllRetainedRelocationReservationMarkersAsync(
+            cancellationToken);
         await using var db = await dbContextFactory.CreateDbContextAsync(cancellationToken);
+        var recoverableReservationIds = await db.RootFolderRelocations
+            .Where(relocation =>
+                relocation.Status ==
+                    RootFolderRelocationStatus.NeedsAttention
+                && relocation.TargetIdentityEnrollmentState ==
+                    TargetIdentityEnrollmentState.Unavailable)
+            .Where(relocation =>
+                relocation.CreatedDirectories.Any(reservation =>
+                    reservation.State ==
+                        RootFolderRelocationCreatedDirectoryState.Planned
+                    || reservation.State ==
+                        RootFolderRelocationCreatedDirectoryState.Created))
+            .Select(relocation => relocation.Id)
+            .ToListAsync(cancellationToken);
+        foreach (var relocationId in recoverableReservationIds)
+        {
+            await TryRecoverRelocationTargetReservationEnrollmentAsync(
+                relocationId,
+                cancellationToken);
+        }
+
+        var abandonedReservationIds = await db.RootFolderRelocations
+            .Where(relocation =>
+                relocation.Status == RootFolderRelocationStatus.Failed)
+            .Where(relocation =>
+                relocation.CreatedDirectories.Any(reservation =>
+                    reservation.State ==
+                        RootFolderRelocationCreatedDirectoryState.Planned
+                    || reservation.State ==
+                        RootFolderRelocationCreatedDirectoryState.Created))
+            .Select(relocation => relocation.Id)
+            .ToListAsync(cancellationToken);
+        foreach (var relocationId in abandonedReservationIds)
+        {
+            try
+            {
+                await ReconcileRelocationTargetReservationsAsync(
+                    relocationId,
+                    cancellationToken);
+            }
+            catch (Exception exception) when (exception is not (
+                OperationCanceledException
+                    or OutOfMemoryException
+                    or StackOverflowException))
+            {
+                await PersistFailedReservationCleanupAttentionAsync(
+                    relocationId,
+                    exception,
+                    CancellationToken.None);
+            }
+        }
+
         var activeRelocationIds = await db.RootFolderRelocations
             .Where(relocation => relocation.ActiveRootFolderId != null)
             .Select(relocation => relocation.Id)
@@ -136,7 +198,6 @@ public sealed partial class RootFolderRelocationService
         var terminalJobIds = terminalJobs
             .GroupBy(job => job.RelocationId)
             .Select(group => group.First().Id);
-        var results = new List<RootFolderPathChangeResult>();
         foreach (var jobId in terminalJobIds)
         {
             var result = await OnMoveJobStateChangedCoreAsync(jobId, cancellationToken);

@@ -215,6 +215,34 @@ public sealed class PinnedDirectoryCreationTests : BaseTests
     }
 
     [Fact]
+    public async Task OpenOrCreateExclusiveLockFileAsync_ContendsAndReleasesAcrossPinnedAnchors()
+    {
+        var directory = FileService.GetTempDirectory(
+            "pinned-exclusive-lock-file");
+        using var firstAnchor =
+            PinnedDirectoryCreation.OpenPinnedDirectoryNoFollow(directory);
+        using var secondAnchor =
+            PinnedDirectoryCreation.OpenPinnedDirectoryNoFollow(directory);
+        using var firstLock =
+            await firstAnchor.OpenOrCreateExclusiveLockFileAsync(
+                "stripe-0001.lock");
+        using var cancellation = new CancellationTokenSource(
+            TimeSpan.FromMilliseconds(250));
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+            secondAnchor.OpenOrCreateExclusiveLockFileAsync(
+                "stripe-0001.lock",
+                cancellation.Token));
+
+        firstLock.Dispose();
+        using var reacquired =
+            await secondAnchor.OpenOrCreateExclusiveLockFileAsync(
+                "stripe-0001.lock");
+        Assert.True(reacquired.CanRead);
+        Assert.True(reacquired.CanWrite);
+    }
+
+    [Fact]
     public async Task PublishNewFileAsync_TemporaryNameReplacedBeforeCleanup_PreservesReplacementBytes()
     {
         var parent = FileService.GetTempDirectory("pinned-file-publication-cleanup-race");

@@ -4,52 +4,14 @@ namespace Listenarr.Infrastructure.FileSystem;
 
 public partial class FileMover
 {
-    private static void MovePublicFileToPrivateClaim(
-        string publicPath,
-        string privateDirectory,
-        string privateName)
-    {
-        var publicParentPath = Path.GetDirectoryName(Path.GetFullPath(publicPath))
-            ?? throw new InvalidOperationException("The public file has no parent directory.");
-        using var publicParent = PinnedDirectoryCreation.OpenPinnedDirectoryNoFollow(
-            publicParentPath);
-        using var publicEntry = publicParent.OpenExistingFile(
-            Path.GetFileName(publicPath),
-            requireDeleteAccess: true);
-        using var privateParent = PinnedDirectoryCreation.OpenPinnedDirectoryNoFollow(
-            privateDirectory);
-        publicEntry.MoveTo(privateParent, privateName);
-    }
-
-    private static void PublishPrivateClaimNoReplace(
-        string privatePath,
-        string publicPath)
-    {
-        var privateParentPath = Path.GetDirectoryName(Path.GetFullPath(privatePath))
-            ?? throw new InvalidOperationException("The private claim has no parent directory.");
-        var publicParentPath = Path.GetDirectoryName(Path.GetFullPath(publicPath))
-            ?? throw new InvalidOperationException("The public file has no parent directory.");
-        using var privateParent = PinnedDirectoryCreation.OpenPinnedDirectoryNoFollow(
-            privateParentPath);
-        using var privateEntry = privateParent.OpenExistingFile(
-            Path.GetFileName(privatePath),
-            requireDeleteAccess: true);
-        using var publicParent = PinnedDirectoryCreation.OpenPinnedDirectoryNoFollow(
-            publicParentPath);
-        privateEntry.MoveTo(publicParent, Path.GetFileName(publicPath));
-    }
-
-    private async Task PublishPreparedFileReplacingCapturedDestinationAsync(
-        string preparedPath,
+    private async Task<string> GetPreparedFilePublicationStateNameAsync(
         string destinationPath)
     {
         var normalizedDestination = Path.GetFullPath(destinationPath);
-        var destinationParent = Path.GetDirectoryName(normalizedDestination)
-            ?? throw new InvalidOperationException(
-                "The destination file has no parent directory.");
         var semantics = await _semanticsResolver.ResolveAsync(normalizedDestination);
         if (semantics.State != PathIdentityState.Valid
-            || semantics.Semantics.CaseSensitivity == FileSystemCaseSensitivity.Unknown)
+            || semantics.Semantics.CaseSensitivity
+                == FileSystemCaseSensitivity.Unknown)
         {
             throw new IOException(
                 "Filesystem identity is unavailable for recoverable file publication.");
@@ -59,154 +21,216 @@ public partial class FileMover
             "file-publication",
             normalizedDestination,
             semantics.Semantics);
-        var stateDirectory = Path.Join(
-            destinationParent,
-            $".listenarr-file-publication-{HashPathIdentity(publicationIdentity)}.state");
-        var preparedClaim = Path.Join(stateDirectory, "prepared.claim");
-        var previousClaim = Path.Join(stateDirectory, "destination.previous");
-        var publicationFence = Path.Join(stateDirectory, "publication.fence");
-        RecoverPreparedFilePublication(
-            stateDirectory,
-            preparedClaim,
-            previousClaim,
-            publicationFence,
-            normalizedDestination);
-        CreatePrivateStateDirectory(stateDirectory);
-        var published = false;
-        try
-        {
-            if (File.Exists(normalizedDestination))
-            {
-                MovePublicFileToPrivateClaim(
-                    normalizedDestination,
-                    stateDirectory,
-                    Path.GetFileName(previousClaim));
-                if (AfterPreparedDestinationCapturedForTestAsync != null)
-                {
-                    await AfterPreparedDestinationCapturedForTestAsync();
-                }
-            }
-
-            MovePublicFileToPrivateClaim(
-                preparedPath,
-                stateDirectory,
-                Path.GetFileName(preparedClaim));
-            WriteGenerationFence(publicationFence);
-            PublishPrivateClaimNoReplace(preparedClaim, normalizedDestination);
-            published = true;
-            TryDeleteFile(previousClaim);
-            TryDeleteFile(publicationFence);
-            TryDeleteEmptyStateDirectory(stateDirectory);
-        }
-        catch (Exception exception) when (exception is not (
-            OperationCanceledException or OutOfMemoryException or StackOverflowException))
-        {
-            if (!published)
-            {
-                TryRestoreStateFile(preparedClaim, preparedPath);
-                TryRestoreStateFile(previousClaim, normalizedDestination);
-                TryDeleteFile(publicationFence);
-                TryDeleteEmptyStateDirectory(stateDirectory);
-            }
-            throw;
-        }
+        return $".listenarr-file-publication-{HashPathIdentity(publicationIdentity)}.state";
     }
 
     private void RecoverPreparedFilePublication(
-        string stateDirectory,
-        string preparedClaim,
-        string previousClaim,
-        string publicationFence,
-        string destinationPath)
+        PinnedDirectoryCreation.PinnedDirectoryAnchor destinationParent,
+        string destinationName,
+        string stateName)
     {
-        if (!Directory.Exists(stateDirectory))
+        using var statePublication =
+            destinationParent.TryOpenExistingChildForPublication(stateName);
+        if (statePublication == null)
         {
             return;
         }
-        if (!TryValidateStateDirectory(stateDirectory)
-            || !StateDirectoryContainsOnly(
-                stateDirectory,
-                preparedClaim,
-                previousClaim,
-                publicationFence))
+
+        using var state = statePublication.OpenCreatedDirectoryAnchor();
+        if (!destinationParent.VisiblePathMatches()
+            || !state.VisiblePathMatches()
+            || !AnchoredStateContainsOnly(
+                state,
+                "prepared.claim",
+                "destination.previous",
+                "publication.fence"))
         {
             throw new IOException(
                 "Recoverable file-publication state contains unsafe entries.");
         }
 
-        var preparedExists = File.Exists(preparedClaim);
-        var previousExists = File.Exists(previousClaim);
-        var publicationFenceExists = File.Exists(publicationFence);
-        var destinationExists = File.Exists(destinationPath);
-        if ((preparedExists && IsLinkedOrUnverifiableEntry(preparedClaim))
-            || (previousExists && IsLinkedOrUnverifiableEntry(previousClaim))
-            || (publicationFenceExists
-                && IsLinkedOrUnverifiableEntry(publicationFence))
-            || (destinationExists && IsLinkedOrUnverifiableEntry(destinationPath)))
+        var prepared = state.TryOpenExistingFile(
+            "prepared.claim",
+            requireDeleteAccess: true);
+        var previous = state.TryOpenExistingFile(
+            "destination.previous",
+            requireDeleteAccess: true);
+        var fence = state.TryOpenExistingFile(
+            "publication.fence",
+            requireDeleteAccess: true);
+        try
         {
-            throw new IOException(
-                "Recoverable file-publication state contains an unverifiable entry.");
-        }
-
-        if (!publicationFenceExists)
-        {
-            if (preparedExists
-                || (destinationExists && previousExists))
+            using var destination = destinationParent.TryOpenExistingFile(
+                destinationName,
+                requireDeleteAccess: false);
+            if (fence == null)
             {
-                throw new IOException(
-                    "Interrupted file publication has ambiguous pre-commit state.");
-            }
-
-            if (previousExists)
-            {
-                TryRestoreStateFile(previousClaim, destinationPath);
-                if (File.Exists(previousClaim))
+                if (prepared != null
+                    || (destination != null && previous != null))
                 {
                     throw new IOException(
-                        "The captured destination generation could not be restored.");
+                        "Interrupted file publication has ambiguous pre-commit state.");
+                }
+
+                if (previous != null)
+                {
+                    previous.MoveTo(destinationParent, destinationName);
+                    previous.Dispose();
+                    previous = null;
+                    FlushFileMoveDirectory(
+                        destinationParent,
+                        "interrupted destination restoration");
+                    FlushFileMoveDirectory(
+                        state,
+                        "interrupted previous-generation retirement");
                 }
             }
-
-            TryDeleteEmptyStateDirectory(stateDirectory);
-            return;
-        }
-
-        if (destinationExists)
-        {
-            if (preparedExists)
+            else if (destination != null)
             {
-                throw new IOException(
-                    "The destination was recreated before interrupted publication could recover.");
+                if (prepared != null)
+                {
+                    throw new IOException(
+                        "The destination was recreated before interrupted publication could recover.");
+                }
+
+                previous?.Delete(immediateWindows: true);
+                previous?.Dispose();
+                previous = null;
+                fence.Delete(immediateWindows: true);
+                fence.Dispose();
+                fence = null;
+                FlushFileMoveDirectory(
+                    state,
+                    "completed publication-journal retirement");
             }
-
-            // The prepared claim was atomically renamed to the destination before
-            // the process stopped. Retire only the captured previous generation.
-            TryDeleteFile(previousClaim);
-            TryDeleteFile(publicationFence);
-            TryDeleteEmptyStateDirectory(stateDirectory);
-            return;
-        }
-
-        if (preparedExists)
-        {
-            PublishPrivateClaimNoReplace(preparedClaim, destinationPath);
-            TryDeleteFile(previousClaim);
-            TryDeleteFile(publicationFence);
-            TryDeleteEmptyStateDirectory(stateDirectory);
-            return;
-        }
-
-        if (previousExists)
-        {
-            TryRestoreStateFile(previousClaim, destinationPath);
-            if (File.Exists(previousClaim))
+            else if (prepared != null)
             {
-                throw new IOException(
-                    "The captured destination generation could not be restored.");
+                prepared.MoveTo(destinationParent, destinationName);
+                prepared.Dispose();
+                prepared = null;
+                FlushFileMoveDirectory(
+                    destinationParent,
+                    "interrupted prepared-generation publication");
+                FlushFileMoveDirectory(
+                    state,
+                    "interrupted prepared-claim retirement");
+                previous?.Delete(immediateWindows: true);
+                previous?.Dispose();
+                previous = null;
+                fence.Delete(immediateWindows: true);
+                fence.Dispose();
+                fence = null;
+                FlushFileMoveDirectory(
+                    state,
+                    "recovered publication-journal retirement");
+            }
+            else
+            {
+                if (previous != null)
+                {
+                    previous.MoveTo(destinationParent, destinationName);
+                    previous.Dispose();
+                    previous = null;
+                    FlushFileMoveDirectory(
+                        destinationParent,
+                        "interrupted previous-generation restoration");
+                    FlushFileMoveDirectory(
+                        state,
+                        "interrupted previous-generation retirement");
+                }
+
+                fence.Delete(immediateWindows: true);
+                fence.Dispose();
+                fence = null;
+                FlushFileMoveDirectory(
+                    state,
+                    "abandoned publication-journal retirement");
             }
         }
+        finally
+        {
+            fence?.Dispose();
+            previous?.Dispose();
+            prepared?.Dispose();
+        }
 
-        TryDeleteFile(publicationFence);
-        TryDeleteEmptyStateDirectory(stateDirectory);
+        state.Dispose();
+        statePublication.DeletePinnedEmptyDirectory(
+            stateName,
+            immediateWindows: true);
+        FlushFileMoveDirectory(
+            destinationParent,
+            "file-publication state retirement");
+    }
+
+    private async Task PublishPreparedFileReplacingCapturedDestinationAsync(
+        PinnedDirectoryCreation.PinnedFileEntry prepared,
+        PinnedDirectoryCreation.PinnedDirectoryAnchor destinationParent,
+        string destinationName,
+        PinnedDirectoryCreation.PinnedFileEntry capturedDestination,
+        string stateName)
+    {
+        using var statePublication = CreateAnchoredFileMoveStateDirectory(
+            destinationParent,
+            stateName);
+        using var state = statePublication.OpenCreatedDirectoryAnchor();
+        FlushFileMoveDirectory(
+            destinationParent,
+            "file-publication state creation");
+
+        capturedDestination.MoveTo(state, "destination.previous");
+        FlushFileMoveDirectory(
+            destinationParent,
+            "captured destination retirement");
+        FlushFileMoveDirectory(
+            state,
+            "captured destination publication");
+        if (AfterPreparedDestinationCapturedForTestAsync != null)
+        {
+            await AfterPreparedDestinationCapturedForTestAsync();
+        }
+
+        prepared.MoveTo(state, "prepared.claim");
+        FlushFileMoveDirectory(
+            destinationParent,
+            "prepared generation retirement");
+        FlushFileMoveDirectory(
+            state,
+            "prepared generation claim");
+
+        using var fence = state.CreateNewFile("publication.fence");
+        fence.FlushToDisk();
+        FlushFileMoveDirectory(state, "file-publication commit fence");
+
+        using var appearedDestination = destinationParent.TryOpenExistingFile(
+            destinationName,
+            requireDeleteAccess: false);
+        if (appearedDestination != null)
+        {
+            throw new IOException(
+                "The destination was recreated after its captured generation was quarantined.");
+        }
+
+        prepared.MoveTo(destinationParent, destinationName);
+        FlushFileMoveDirectory(
+            destinationParent,
+            "prepared generation publication");
+        FlushFileMoveDirectory(
+            state,
+            "prepared generation claim retirement");
+
+        capturedDestination.Delete(immediateWindows: true);
+        capturedDestination.Dispose();
+        fence.Delete(immediateWindows: true);
+        fence.Dispose();
+        FlushFileMoveDirectory(state, "file-publication journal retirement");
+
+        state.Dispose();
+        statePublication.DeletePinnedEmptyDirectory(
+            stateName,
+            immediateWindows: true);
+        FlushFileMoveDirectory(
+            destinationParent,
+            "file-publication state retirement");
     }
 }
