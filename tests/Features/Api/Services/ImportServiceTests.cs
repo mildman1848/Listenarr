@@ -354,12 +354,16 @@ namespace Listenarr.Tests.Features.Api.Services
             var sourceFile = await FileService.GetFileAsync(sourceDir, "source-track.m4b");
 
             var shortBasePath = TryGetShortPathName(longBasePath);
-            if (string.IsNullOrWhiteSpace(shortBasePath)
-                || string.Equals(shortBasePath, longBasePath, StringComparison.OrdinalIgnoreCase)
-                || !shortBasePath.Contains('~'))
-            {
-                return;
-            }
+            Assert.False(
+                string.IsNullOrWhiteSpace(shortBasePath),
+                "The native Windows runner must expose a short-path spelling for this regression.");
+            Assert.False(
+                string.Equals(
+                    longBasePath,
+                    shortBasePath,
+                    StringComparison.OrdinalIgnoreCase),
+                "The short-path spelling must differ from the long path.");
+            Assert.Contains('~', shortBasePath!);
 
             var settings = await _applicationSettingsRepository.SaveAsync(new ApplicationSettings
             {

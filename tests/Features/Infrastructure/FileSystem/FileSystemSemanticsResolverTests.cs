@@ -147,7 +147,7 @@ public sealed class FileSystemSemanticsResolverTests : BaseTests
         }
     }
 
-    [Fact]
+    [LinuxFact]
     public async Task AutoProbe_AlternateSpellingIsOccupied_PreservesUnownedEntryAndReturnsUnavailable()
     {
         var root = Path.Join(
@@ -165,10 +165,11 @@ public sealed class FileSystemSemanticsResolverTests : BaseTests
                 FileAccess.Write,
                 FileShare.Read);
         }
-        catch (IOException)
+        catch (IOException exception)
         {
             Directory.Delete(root, true);
-            return;
+            throw new Xunit.Sdk.XunitException(
+                $"This regression requires a case-sensitive native filesystem: {exception.Message}");
         }
 
         File.Delete(capabilityLower);

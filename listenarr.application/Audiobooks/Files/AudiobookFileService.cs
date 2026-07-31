@@ -49,6 +49,8 @@ namespace Listenarr.Application.Audiobooks.Files
                 audiobook,
                 filePath,
                 registrationLease: null,
+                authoritativeBasePath: null,
+                basePathCommitContext: null,
                 source,
                 cancellationToken);
 
@@ -67,14 +69,42 @@ namespace Listenarr.Application.Audiobooks.Files
                 audiobook,
                 registrationLease.PublicPath,
                 registrationLease,
+                authoritativeBasePath: null,
+                basePathCommitContext: null,
                 source,
                 cancellationToken);
+        }
+
+        private async Task<BasePathRegistrationOutcome>
+            EnsureAudiobookFileWithBasePathAsync(
+                Audiobook audiobook,
+                IAudiobookFileRegistrationLease registrationLease,
+                string authoritativeBasePath,
+                string? source,
+                CancellationToken cancellationToken)
+        {
+            ArgumentNullException.ThrowIfNull(registrationLease);
+            ArgumentException.ThrowIfNullOrWhiteSpace(authoritativeBasePath);
+            var context = new AudiobookBasePathCommitContext();
+            var success = await EnsureAudiobookFileAsync(
+                audiobook,
+                registrationLease.PublicPath,
+                registrationLease,
+                FileUtils.NormalizeStoredPath(authoritativeBasePath),
+                context,
+                source,
+                cancellationToken);
+            return new BasePathRegistrationOutcome(
+                success,
+                success ? context.Mutation : null);
         }
 
         private Task<bool> EnsureAudiobookFileAsync(
             Audiobook audiobook,
             string filePath,
             IAudiobookFileRegistrationLease? registrationLease,
+            string? authoritativeBasePath,
+            AudiobookBasePathCommitContext? basePathCommitContext,
             string? source,
             CancellationToken cancellationToken) =>
             filesystemMutationCoordinator.ExecuteExclusiveAsync(
@@ -91,10 +121,22 @@ namespace Listenarr.Application.Audiobooks.Files
                             return false;
                         }
 
+                        AudiobookBasePathMutation? basePathMutation = null;
+                        if (!string.IsNullOrWhiteSpace(authoritativeBasePath))
+                        {
+                            basePathMutation = new AudiobookBasePathMutation(
+                                currentAudiobook.Id,
+                                currentAudiobook.BasePath,
+                                authoritativeBasePath);
+                            basePathCommitContext!.Mutation = basePathMutation;
+                            currentAudiobook.BasePath = authoritativeBasePath;
+                        }
+
                         return await EnsureAudiobookFileCoreAsync(
                             currentAudiobook,
                             filePath,
                             registrationLease,
+                            basePathMutation,
                             source,
                             token);
                     },
@@ -106,6 +148,7 @@ namespace Listenarr.Application.Audiobooks.Files
             Audiobook audiobook,
             string filePath,
             IAudiobookFileRegistrationLease? registrationLease,
+            AudiobookBasePathMutation? basePathMutation,
             string? source,
             CancellationToken cancellationToken)
         {
@@ -302,10 +345,11 @@ namespace Listenarr.Application.Audiobooks.Files
                             return false;
                         }
 
-                        var claim = await ClaimAudiobookFileAsync(
+                        var claim = await ClaimAudiobookFileCoreAsync(
                             audiobook,
                             fileRecord,
                             filePath,
+                            basePathMutation,
                             cancellationToken);
                         if (!claim.Created)
                         {
@@ -317,7 +361,8 @@ namespace Listenarr.Application.Audiobooks.Files
                             && !registrationLease.MatchesCurrentPublication())
                         {
                             await DeleteCreatedPhysicalGenerationAsync(
-                                fileRecord);
+                                fileRecord,
+                                basePathMutation);
                             logger.LogWarning(
                                 "Removed audiobook file claim because the public file generation changed during persistence for audiobook {AudiobookId}: {Path}",
                                 audiobook.Id,

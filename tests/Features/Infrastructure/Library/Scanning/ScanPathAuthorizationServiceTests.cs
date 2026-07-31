@@ -1,5 +1,4 @@
 using Listenarr.Tests.Common;
-using Listenarr.Tests.Features.Infrastructure.Library.Moving;
 
 namespace Listenarr.Tests.Features.Infrastructure.Library.Scanning;
 

@@ -325,12 +325,11 @@ internal static class LibraryDirectoryOwnershipRemoval
         LibraryDirectoryOwnership ownership,
         PinnedDirectoryCreation.PinnedDirectoryAnchor directory)
     {
-        if (ownership.DirectoryObjectIdentityVersion != 1
-            || string.IsNullOrWhiteSpace(ownership.DirectoryObjectIdentity)
-            || !string.Equals(
-                directory.GetDirectoryObjectIdentity(),
+        if (!ManagedDirectoryIdentity.Matches(
+                ownership.DirectoryObjectIdentityVersion,
                 ownership.DirectoryObjectIdentity,
-                StringComparison.Ordinal)
+                ownership.OwnershipToken,
+                directory.GetDirectoryObjectIdentity())
             || !directory.VisiblePathMatches())
         {
             throw new InvalidOperationException(

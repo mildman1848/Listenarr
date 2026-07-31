@@ -7,7 +7,9 @@ internal sealed class PinnedAudiobookFileRegistrationLease :
 {
     private readonly PinnedDirectoryCreation.PinnedFileEntry _file;
     private readonly Microsoft.Win32.SafeHandles.SafeFileHandle? _stableHandle;
+    private readonly Func<int, bool>? _prepareCleanupRecovery;
     private readonly Func<bool>? _completePublication;
+    private bool _cleanupRecoveryPrepared;
     private bool _publicationCompleted;
     private bool _disposed;
 
@@ -18,10 +20,12 @@ internal sealed class PinnedAudiobookFileRegistrationLease :
         string metadataPath,
         string physicalObjectIdentity,
         string? sourcePhysicalObjectIdentity,
+        Func<int, bool>? prepareCleanupRecovery,
         Func<bool>? completePublication)
     {
         _file = file;
         _stableHandle = stableHandle;
+        _prepareCleanupRecovery = prepareCleanupRecovery;
         _completePublication = completePublication;
         PublicPath = publicPath;
         MetadataPath = metadataPath;
@@ -38,6 +42,7 @@ internal sealed class PinnedAudiobookFileRegistrationLease :
         string publicPath,
         string? expectedPhysicalObjectIdentity = null,
         string? sourcePhysicalObjectIdentity = null,
+        Func<int, bool>? prepareCleanupRecovery = null,
         Func<bool>? completePublication = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(publicPath);
@@ -55,6 +60,7 @@ internal sealed class PinnedAudiobookFileRegistrationLease :
             canonicalPath,
             expectedPhysicalObjectIdentity,
             sourcePhysicalObjectIdentity,
+            prepareCleanupRecovery,
             completePublication);
     }
 
@@ -63,6 +69,7 @@ internal sealed class PinnedAudiobookFileRegistrationLease :
         string publicPath,
         string? expectedPhysicalObjectIdentity = null,
         string? sourcePhysicalObjectIdentity = null,
+        Func<int, bool>? prepareCleanupRecovery = null,
         Func<bool>? completePublication = null)
     {
         ArgumentNullException.ThrowIfNull(file);
@@ -92,6 +99,7 @@ internal sealed class PinnedAudiobookFileRegistrationLease :
                     canonicalPath,
                     physicalObjectIdentity,
                     sourcePhysicalObjectIdentity,
+                    prepareCleanupRecovery,
                     completePublication);
             }
 
@@ -113,6 +121,7 @@ internal sealed class PinnedAudiobookFileRegistrationLease :
                     metadataPath,
                     physicalObjectIdentity,
                     sourcePhysicalObjectIdentity,
+                    prepareCleanupRecovery,
                     completePublication);
                 stableHandle = null;
                 return result;
@@ -206,21 +215,43 @@ internal sealed class PinnedAudiobookFileRegistrationLease :
         }
     }
 
-    public bool CompletePublication()
+    public bool PrepareCleanupRecovery(int audiobookId)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        if (audiobookId <= 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(audiobookId));
+        }
+        if (_cleanupRecoveryPrepared || _prepareCleanupRecovery == null)
+        {
+            _cleanupRecoveryPrepared = true;
+            return true;
+        }
+
+        _cleanupRecoveryPrepared = _prepareCleanupRecovery(audiobookId);
+        return _cleanupRecoveryPrepared;
+    }
+
+    public RegistrationPublicationCompletion CompletePublication()
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         if (_publicationCompleted)
         {
-            return true;
+            return RegistrationPublicationCompletion.Completed;
+        }
+        if (_prepareCleanupRecovery != null && !_cleanupRecoveryPrepared)
+        {
+            throw new InvalidOperationException(
+                "Durable cleanup recovery must be prepared before publication is completed.");
         }
 
         if (_completePublication != null && !_completePublication())
         {
-            return false;
+            return RegistrationPublicationCompletion.CommittedCleanupPending;
         }
 
         _publicationCompleted = true;
-        return true;
+        return RegistrationPublicationCompletion.Completed;
     }
 
     public void Dispose()

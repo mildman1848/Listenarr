@@ -26,7 +26,8 @@ public partial class AudiobookFileService
                     fileId,
                     audiobook.Id,
                     expectedPath,
-                    expectedPhysicalObjectIdentity),
+                    expectedPhysicalObjectIdentity,
+                    basePathMutation: null),
                 globalToken),
             cancellationToken);
     }
@@ -46,7 +47,53 @@ public partial class AudiobookFileService
         ArgumentException.ThrowIfNullOrWhiteSpace(
             registrationLease.PhysicalObjectIdentity);
 
-        return filesystemMutationCoordinator.ExecuteExclusiveAsync(
+        return RefreshPhysicalGenerationAsync(
+            audiobook,
+            fileId,
+            expectedPhysicalObjectIdentity,
+            registrationLease,
+            authoritativeBasePath: null,
+            basePathCommitContext: null,
+            source,
+            cancellationToken);
+    }
+
+    private async Task<BasePathRegistrationOutcome>
+        RefreshPhysicalGenerationWithBasePathAsync(
+            Audiobook audiobook,
+            int fileId,
+            string? expectedPhysicalObjectIdentity,
+            IAudiobookFileRegistrationLease registrationLease,
+            string authoritativeBasePath,
+            string? source,
+            CancellationToken cancellationToken)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(authoritativeBasePath);
+        var context = new AudiobookBasePathCommitContext();
+        var success = await RefreshPhysicalGenerationAsync(
+            audiobook,
+            fileId,
+            expectedPhysicalObjectIdentity,
+            registrationLease,
+            FileUtils.NormalizeStoredPath(authoritativeBasePath),
+            context,
+            source,
+            cancellationToken);
+        return new BasePathRegistrationOutcome(
+            success,
+            success ? context.Mutation : null);
+    }
+
+    private Task<bool> RefreshPhysicalGenerationAsync(
+        Audiobook audiobook,
+        int fileId,
+        string? expectedPhysicalObjectIdentity,
+        IAudiobookFileRegistrationLease registrationLease,
+        string? authoritativeBasePath,
+        AudiobookBasePathCommitContext? basePathCommitContext,
+        string? source,
+        CancellationToken cancellationToken) =>
+        filesystemMutationCoordinator.ExecuteExclusiveAsync(
             globalToken => audiobookOperationCoordinator.ExecuteExclusiveAsync(
                 audiobook.Id,
                 token => RefreshPhysicalGenerationCoreAsync(
@@ -54,17 +101,20 @@ public partial class AudiobookFileService
                     fileId,
                     expectedPhysicalObjectIdentity,
                     registrationLease,
+                    authoritativeBasePath,
+                    basePathCommitContext,
                     source,
                     token),
                 globalToken),
             cancellationToken);
-    }
 
     private async Task<bool> RefreshPhysicalGenerationCoreAsync(
         int audiobookId,
         int fileId,
         string? expectedPhysicalObjectIdentity,
         IAudiobookFileRegistrationLease registrationLease,
+        string? authoritativeBasePath,
+        AudiobookBasePathCommitContext? basePathCommitContext,
         string? source,
         CancellationToken cancellationToken)
     {
@@ -89,6 +139,17 @@ public partial class AudiobookFileService
                 StringComparison.Ordinal))
         {
             return false;
+        }
+
+        AudiobookBasePathMutation? basePathMutation = null;
+        if (!string.IsNullOrWhiteSpace(authoritativeBasePath))
+        {
+            basePathMutation = new AudiobookBasePathMutation(
+                audiobook.Id,
+                audiobook.BasePath,
+                authoritativeBasePath);
+            basePathCommitContext!.Mutation = basePathMutation;
+            audiobook.BasePath = authoritativeBasePath;
         }
 
         var authorization = await ResolveAuthorizedClaimPathAsync(
@@ -146,13 +207,22 @@ public partial class AudiobookFileService
             return false;
         }
 
-        var updated = await audiobookFileRepository.ReplacePhysicalGenerationAsync(
-            currentFile.Id,
-            currentFile.AudiobookId,
-            currentFile.Path,
-            expectedPhysicalObjectIdentity,
-            replacement,
-            cancellationToken);
+        var updated = basePathMutation == null
+            ? await audiobookFileRepository.ReplacePhysicalGenerationAsync(
+                currentFile.Id,
+                currentFile.AudiobookId,
+                currentFile.Path,
+                expectedPhysicalObjectIdentity,
+                replacement,
+                cancellationToken)
+            : await audiobookFileRepository.ReplacePhysicalGenerationWithBasePathAsync(
+                currentFile.Id,
+                currentFile.AudiobookId,
+                currentFile.Path,
+                expectedPhysicalObjectIdentity,
+                replacement,
+                basePathMutation,
+                cancellationToken);
         if (!updated)
         {
             return false;
@@ -163,13 +233,25 @@ public partial class AudiobookFileService
             return true;
         }
 
-        var reverted = await audiobookFileRepository.ReplacePhysicalGenerationAsync(
-            currentFile.Id,
-            currentFile.AudiobookId,
-            currentFile.Path,
-            registrationLease.PhysicalObjectIdentity,
-            predecessor,
-            CancellationToken.None);
+        var reverted = basePathMutation == null
+            ? await audiobookFileRepository.ReplacePhysicalGenerationAsync(
+                currentFile.Id,
+                currentFile.AudiobookId,
+                currentFile.Path,
+                registrationLease.PhysicalObjectIdentity,
+                predecessor,
+                CancellationToken.None)
+            : await audiobookFileRepository.ReplacePhysicalGenerationWithBasePathAsync(
+                currentFile.Id,
+                currentFile.AudiobookId,
+                currentFile.Path,
+                registrationLease.PhysicalObjectIdentity,
+                predecessor,
+                new AudiobookBasePathMutation(
+                    currentFile.AudiobookId,
+                    basePathMutation.ResultingBasePath,
+                    basePathMutation.ExpectedCurrentBasePath),
+                CancellationToken.None);
         if (!reverted)
         {
             throw new InvalidOperationException(
@@ -233,7 +315,8 @@ public partial class AudiobookFileService
     }
 
     private async Task DeleteCreatedPhysicalGenerationAsync(
-        AudiobookFile createdFile)
+        AudiobookFile createdFile,
+        AudiobookBasePathMutation? basePathMutation)
     {
         ArgumentNullException.ThrowIfNull(createdFile);
         if (createdFile.Id <= 0
@@ -248,7 +331,8 @@ public partial class AudiobookFileService
                 createdFile.Id,
                 createdFile.AudiobookId,
                 createdFile.Path,
-                createdFile.PhysicalObjectIdentity))
+                createdFile.PhysicalObjectIdentity,
+                basePathMutation))
         {
             throw new InvalidOperationException(
                 "The stale audiobook file generation claim remained after rollback retries.");
@@ -259,19 +343,32 @@ public partial class AudiobookFileService
         int fileId,
         int audiobookId,
         string? expectedPath,
-        string expectedPhysicalObjectIdentity)
+        string expectedPhysicalObjectIdentity,
+        AudiobookBasePathMutation? basePathMutation)
     {
         const int maxAttempts = 3;
         for (var attempt = 1; attempt <= maxAttempts; attempt++)
         {
             try
             {
-                if (await audiobookFileRepository.DeletePhysicalGenerationAsync(
+                var deleted = basePathMutation == null
+                    ? await audiobookFileRepository.DeletePhysicalGenerationAsync(
                         fileId,
                         audiobookId,
                         expectedPath,
                         expectedPhysicalObjectIdentity,
-                        CancellationToken.None))
+                        CancellationToken.None)
+                    : await audiobookFileRepository.DeletePhysicalGenerationWithBasePathAsync(
+                        fileId,
+                        audiobookId,
+                        expectedPath,
+                        expectedPhysicalObjectIdentity,
+                        new AudiobookBasePathMutation(
+                            audiobookId,
+                            basePathMutation.ResultingBasePath,
+                            basePathMutation.ExpectedCurrentBasePath),
+                        CancellationToken.None);
+                if (deleted)
                 {
                     return true;
                 }

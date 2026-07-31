@@ -19,4 +19,14 @@ public interface IDirectoryObjectIdentityResolver
     Task<DirectoryObjectIdentityResolution> ResolveAsync(
         string path,
         CancellationToken cancellationToken = default);
+
+    Task<DirectoryObjectIdentityResolution> ResolveExistingAsync(
+        string path,
+        CancellationToken cancellationToken = default);
+
+    Task<DirectoryObjectIdentityResolution> UpgradeLegacyAsync(
+        string path,
+        int legacyVersion,
+        string legacyValue,
+        CancellationToken cancellationToken = default);
 }

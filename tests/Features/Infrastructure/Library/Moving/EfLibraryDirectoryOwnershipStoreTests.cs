@@ -32,7 +32,9 @@ public sealed class EfLibraryDirectoryOwnershipStoreTests : BaseTests
         _factory = new TestDbContextFactory(options);
         await using var db = await _factory.CreateDbContextAsync();
         await db.Database.EnsureCreatedAsync();
-        using var rootAnchor = PinnedDirectoryCreation.OpenPinnedBoundary(_root);
+        var rootIdentity = await new DirectoryObjectIdentityResolver()
+            .ResolveAsync(_root);
+        Assert.True(rootIdentity.IsAvailable, rootIdentity.UnavailableReason);
         db.RootFolders.Add(new RootFolder
         {
             Name = "Test library",
@@ -40,8 +42,10 @@ public sealed class EfLibraryDirectoryOwnershipStoreTests : BaseTests
             ResolvedCaseSensitivity =
                 FileSystemPathSemantics.CurrentHostDefault.CaseSensitivity,
             PathIdentityState = PathIdentityState.Valid,
-            DirectoryObjectIdentityVersion = 1,
-            DirectoryObjectIdentity = rootAnchor.GetDirectoryObjectIdentity()
+            DirectoryObjectIdentityVersion = rootIdentity.Version,
+            DirectoryObjectIdentity = rootIdentity.Value,
+            DirectoryObjectIdentityUnavailableReason =
+                rootIdentity.UnavailableReason
         });
         await db.SaveChangesAsync();
         _store = new EfLibraryDirectoryOwnershipStore(_factory, TimeProvider.System);

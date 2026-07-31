@@ -22,7 +22,10 @@ namespace Listenarr.Tests.Features.Infrastructure.Library.Moving
         private async Task ConfigureManagedTestRootAsync()
         {
             var rootPath = Path.GetFullPath(FileService.GetTempPath());
-            using var rootAnchor = PinnedDirectoryCreation.OpenPinnedBoundary(rootPath);
+            var rootIdentity = await _provider
+                .GetRequiredService<IDirectoryObjectIdentityResolver>()
+                .ResolveAsync(rootPath);
+            Assert.True(rootIdentity.IsAvailable, rootIdentity.UnavailableReason);
             var factory = _provider.GetRequiredService<IDbContextFactory<ListenArrDbContext>>();
             await using var db = await factory.CreateDbContextAsync();
             if (await db.RootFolders.AnyAsync())
@@ -37,8 +40,10 @@ namespace Listenarr.Tests.Features.Infrastructure.Library.Moving
                 ResolvedCaseSensitivity =
                     FileSystemPathSemantics.CurrentHostDefault.CaseSensitivity,
                 PathIdentityState = PathIdentityState.Valid,
-                DirectoryObjectIdentityVersion = 1,
-                DirectoryObjectIdentity = rootAnchor.GetDirectoryObjectIdentity()
+                DirectoryObjectIdentityVersion = rootIdentity.Version,
+                DirectoryObjectIdentity = rootIdentity.Value,
+                DirectoryObjectIdentityUnavailableReason =
+                    rootIdentity.UnavailableReason
             });
             await db.SaveChangesAsync();
         }
@@ -65,10 +70,11 @@ namespace Listenarr.Tests.Features.Infrastructure.Library.Moving
                 var exception = Assert.Throws<MoveNeedsAttentionException>(() =>
                     AudiobookContentMoveService.ValidateTargetManifest(target, manifest, targetSemantics));
                 Assert.Contains("cannot represent both", exception.Message);
-                return;
             }
-
-            AudiobookContentMoveService.ValidateTargetManifest(target, manifest, targetSemantics);
+            else
+            {
+                AudiobookContentMoveService.ValidateTargetManifest(target, manifest, targetSemantics);
+            }
         }
 
         [Theory]

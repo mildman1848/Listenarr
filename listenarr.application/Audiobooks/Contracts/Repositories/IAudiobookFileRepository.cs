@@ -19,12 +19,24 @@ using Listenarr.Domain.Common;
 
 namespace Listenarr.Application.Audiobooks.Contracts.Repositories
 {
+    public sealed record AudiobookBasePathMutation(
+        int AudiobookId,
+        string? ExpectedCurrentBasePath,
+        string? ResultingBasePath);
+
     public interface IAudiobookFileRepository
     {
         Task<AudiobookFile?> GetByIdAsync(int id, CancellationToken ct = default);
         Task<List<AudiobookFile>> GetByAudiobookIdAsync(int audiobookId, CancellationToken ct = default);
         Task<List<AudiobookFile>> GetMissingMetadataAsync(int max, CancellationToken ct = default);
         Task<AudiobookFileClaimResult> ClaimAsync(AudiobookFile file, CancellationToken ct = default);
+        Task<AudiobookFileClaimResult> ClaimWithBasePathAsync(
+            AudiobookFile file,
+            AudiobookBasePathMutation basePathMutation,
+            CancellationToken ct = default);
+        Task<bool> ApplyBasePathAsync(
+            AudiobookBasePathMutation basePathMutation,
+            CancellationToken ct = default);
         Task<AudiobookFileOwnershipCheckResult> CheckOwnershipAsync(
             int audiobookId,
             int? fileId,
@@ -38,11 +50,26 @@ namespace Listenarr.Application.Audiobooks.Contracts.Repositories
             string? expectedPhysicalObjectIdentity,
             AudiobookFile replacement,
             CancellationToken ct = default);
+        Task<bool> ReplacePhysicalGenerationWithBasePathAsync(
+            int fileId,
+            int audiobookId,
+            string? expectedPath,
+            string? expectedPhysicalObjectIdentity,
+            AudiobookFile replacement,
+            AudiobookBasePathMutation basePathMutation,
+            CancellationToken ct = default);
         Task<bool> DeletePhysicalGenerationAsync(
             int fileId,
             int audiobookId,
             string? expectedPath,
             string? expectedPhysicalObjectIdentity,
+            CancellationToken ct = default);
+        Task<bool> DeletePhysicalGenerationWithBasePathAsync(
+            int fileId,
+            int audiobookId,
+            string? expectedPath,
+            string? expectedPhysicalObjectIdentity,
+            AudiobookBasePathMutation basePathMutation,
             CancellationToken ct = default);
         Task DeleteByAudiobookIdAsync(int audiobookId, CancellationToken ct = default);
         Task DeleteAsync(int id, CancellationToken ct = default);

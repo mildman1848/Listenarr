@@ -429,13 +429,14 @@ public sealed class PinnedDirectoryCreationTests : BaseTests
                 parent,
                 "*.listenarr-predecessor.tmp",
                 SearchOption.TopDirectoryOnly));
-            return;
         }
-
-        Assert.IsType<InvalidOperationException>(failure);
-        Assert.Equal("external replacement", await File.ReadAllTextAsync(destinationPath));
-        Assert.Equal("new marker", await File.ReadAllTextAsync(displacedPublishedPath));
-        Assert.Equal("expected predecessor", await File.ReadAllTextAsync(temporaryPath));
+        else
+        {
+            Assert.IsType<InvalidOperationException>(failure);
+            Assert.Equal("external replacement", await File.ReadAllTextAsync(destinationPath));
+            Assert.Equal("new marker", await File.ReadAllTextAsync(displacedPublishedPath));
+            Assert.Equal("expected predecessor", await File.ReadAllTextAsync(temporaryPath));
+        }
     }
 
     [Fact]

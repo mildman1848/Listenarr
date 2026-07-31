@@ -11,6 +11,7 @@ public partial class ManualImportController
         string sourceDirectory,
         FileSystemPathSemantics sourceSemantics,
         ManualImportDestinationTracker destinationTracker,
+        IDictionary<int, string> planningBasePaths,
         List<RootFolder> rootFolders,
         ApplicationSettings settings,
         bool hasMultipleFile,
@@ -72,7 +73,7 @@ public partial class ManualImportController
                     audiobook,
                     rootFolders,
                     settings,
-                    out var managedBasePath,
+                    out var resolvedManagedBasePath,
                     out var allowedDestinationRoots,
                     out var managedBaseReason))
             {
@@ -85,15 +86,10 @@ public partial class ManualImportController
                     item.FullPath);
             }
 
-            if (!string.Equals(
-                    audiobook.BasePath,
-                    managedBasePath,
-                    StringComparison.Ordinal))
+            if (!planningBasePaths.TryGetValue(audiobook.Id, out var managedBasePath))
             {
-                audiobook.BasePath = managedBasePath;
-                await PersistAudiobookBasePathAsync(
-                    audiobook,
-                    managedBasePath);
+                managedBasePath = resolvedManagedBasePath;
+                planningBasePaths.Add(audiobook.Id, managedBasePath);
             }
 
             var metadata = await _metadataService.ExtractFileMetadataAsync(
@@ -106,17 +102,19 @@ public partial class ManualImportController
             }
 
             var destinationResolution = await ResolveDestinationResolutionAsync(
-                audiobook.BasePath,
+                managedBasePath,
                 cancellationToken);
             var destinationSemantics = destinationResolution.Semantics;
-            var destinationPath = await _pathPlanner.GeneratePathAsync(
+            var pathPlan = await _pathPlanner.GeneratePathAsync(
                 audiobook,
                 metadata,
                 item,
+                managedBasePath,
                 rootFolders,
                 settings,
                 destinationSemantics,
                 hasMultipleFile);
+            var destinationPath = pathPlan.DestinationPath;
             if (!_fileSystem.TryValidateMutationTarget(
                     destinationPath,
                     allowedDestinationRoots,
@@ -138,12 +136,19 @@ public partial class ManualImportController
                     destinationPath,
                     cancellationToken);
             destinationPath = destinationReservation.Path;
+            var authoritativeBasePath = pathPlan.AudiobookBasePath;
+            if (string.IsNullOrWhiteSpace(authoritativeBasePath))
+            {
+                return ManualImportResultDto.FailureResult(
+                    "The generated destination has no managed parent directory.",
+                    item.FullPath);
+            }
 
             var ownership = await _audiobookFileService
                 .CheckAudiobookFileOwnershipAsync(
                     audiobook,
                     destinationPath,
-                    Path.GetDirectoryName(destinationPath),
+                    authoritativeBasePath,
                     cancellationToken);
             if (ownership.Outcome is not (
                     AudiobookFileOwnershipCheckOutcome.Available or
@@ -198,6 +203,7 @@ public partial class ManualImportController
                         audiobook,
                         ownership,
                         registrationLease,
+                        authoritativeBasePath,
                         cancellationToken))
                 {
                     return new ManualImportResultDto
@@ -231,16 +237,14 @@ public partial class ManualImportController
                     };
                 }
 
-                if (!registrationLease.CompletePublication())
+                var completion = registrationLease.CompletePublication();
+                if (completion
+                    == RegistrationPublicationCompletion.CommittedCleanupPending)
                 {
-                    return new ManualImportResultDto
-                    {
-                        Success = false,
-                        Error = "The file could not be published and registered safely.",
-                        SourcePath = item.FullPath,
-                        DestinationPath = destinationPath,
-                        Audiobook = audiobook
-                    };
+                    _logger.LogWarning(
+                        "Manual import committed for audiobook {AudiobookId}, but registration-publication cleanup remains pending for {Path}",
+                        audiobook.Id,
+                        LogRedaction.SanitizeFilePath(destinationPath));
                 }
             }
 

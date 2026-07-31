@@ -29,18 +29,23 @@ public sealed partial class RootFolderRelocationService
             var now = timeProvider.GetUtcNow().UtcDateTime;
             for (var index = 0; index < plan.Segments.Count; index++)
             {
+                var ownershipToken = Guid.NewGuid().ToString("N");
                 db.RootFolderRelocationCreatedDirectories.Add(new()
                 {
                     RelocationId = relocationId,
                     CanonicalPath = plan.Segments[index],
-                    OwnershipToken = Guid.NewGuid().ToString("N"),
+                    OwnershipToken = ownershipToken,
                     State =
                         RootFolderRelocationCreatedDirectoryState.Planned,
                     DirectoryObjectIdentityVersion =
-                        index == 0 ? 1 : null,
+                        index == 0
+                            ? ManagedDirectoryIdentity.CurrentVersion
+                            : null,
                     DirectoryObjectIdentity =
                         index == 0
-                            ? plan.ExistingAncestorIdentity
+                            ? ManagedDirectoryIdentity.Create(
+                                ownershipToken,
+                                plan.ExistingAncestorIdentity)
                             : null,
                     CreatedAt = now,
                     UpdatedAt = now
@@ -65,6 +70,215 @@ public sealed partial class RootFolderRelocationService
         await db.SaveChangesAsync(cancellationToken);
         cancellationToken.ThrowIfCancellationRequested();
         await transaction.CommitAsync(CancellationToken.None);
+    }
+
+    private async Task EnsureReservationParentMarkerAsync(
+        Guid relocationId,
+        RootFolderRelocationCreatedDirectory reservation,
+        PinnedDirectoryCreation.PinnedDirectoryAnchor parent,
+        bool allowPublication,
+        CancellationToken cancellationToken)
+    {
+        var nativeIdentity = parent.GetDirectoryObjectIdentity();
+        var expectedParentIdentity = ManagedDirectoryIdentity.Create(
+            reservation.OwnershipToken,
+            nativeIdentity);
+        if (reservation.State
+                == RootFolderRelocationCreatedDirectoryState.Planned
+            && (reservation.DirectoryObjectIdentityVersion
+                    != ManagedDirectoryIdentity.CurrentVersion
+                || !string.Equals(
+                    reservation.DirectoryObjectIdentity,
+                    expectedParentIdentity,
+                    StringComparison.Ordinal)))
+        {
+            throw new InvalidOperationException(
+                "The parent of a planned relocation directory changed before creation.");
+        }
+
+        var fileName = GetReservationParentMarkerName(reservation);
+        using var existing = parent.TryOpenExistingFile(
+            fileName,
+            requireDeleteAccess: false);
+        if (existing != null)
+        {
+            ValidateReservationParentMarker(
+                relocationId,
+                reservation,
+                parent,
+                existing);
+            return;
+        }
+
+        var temporaryName = fileName + ".tmp";
+        using var interrupted = parent.TryOpenExistingFile(
+            temporaryName,
+            requireDeleteAccess: true);
+        if (interrupted != null)
+        {
+            ValidateReservationParentMarker(
+                relocationId,
+                reservation,
+                parent,
+                interrupted);
+            interrupted.MoveWithinParent(fileName);
+            parent.FlushDirectoryEntry();
+            ValidateReservationParentMarker(
+                relocationId,
+                reservation,
+                parent);
+            AfterReservationParentMarkerPublishedForTest?.Invoke(
+                reservation.CanonicalPath);
+            return;
+        }
+
+        if (!allowPublication)
+        {
+            throw new InvalidOperationException(
+                "A published relocation child has no durable parent reservation intent.");
+        }
+
+        var payload = new TargetReservationParentMarker(
+            1,
+            relocationId,
+            reservation.OwnershipToken,
+            reservation.CanonicalPath,
+            expectedParentIdentity);
+        await parent.PublishNewFileAsync(
+            temporaryName,
+            fileName,
+            beforeCreateAsync: () =>
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                return Task.CompletedTask;
+            },
+            writeAndFlushAsync: async stream =>
+            {
+                await JsonSerializer.SerializeAsync(
+                    stream,
+                    payload,
+                    ReservationJsonOptions,
+                    cancellationToken);
+                await stream.FlushAsync(cancellationToken);
+                stream.Flush(flushToDisk: true);
+            },
+            beforePublicationAsync: () =>
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                return Task.CompletedTask;
+            },
+            preserveTemporaryFileOnFailure: _ => false);
+        parent.FlushDirectoryEntry();
+        ValidateReservationParentMarker(
+            relocationId,
+            reservation,
+            parent);
+        AfterReservationParentMarkerPublishedForTest?.Invoke(
+            reservation.CanonicalPath);
+    }
+
+    private static void RetireReservationParentMarker(
+        Guid relocationId,
+        RootFolderRelocationCreatedDirectory reservation,
+        PinnedDirectoryCreation.PinnedDirectoryAnchor parent)
+    {
+        var fileName = GetReservationParentMarkerName(reservation);
+        using var marker = parent.TryOpenExistingFile(
+            fileName,
+            requireDeleteAccess: true);
+        if (marker == null)
+        {
+            return;
+        }
+
+        ValidateReservationParentMarker(
+            relocationId,
+            reservation,
+            parent,
+            marker);
+        if (!marker.VisiblePathMatches() || !parent.VisiblePathMatches())
+        {
+            throw new InvalidOperationException(
+                "A relocation parent reservation marker changed before retirement.");
+        }
+
+        marker.Delete();
+        parent.FlushDirectoryEntry();
+    }
+
+    private static void ValidateReservationParentMarker(
+        Guid relocationId,
+        RootFolderRelocationCreatedDirectory reservation,
+        PinnedDirectoryCreation.PinnedDirectoryAnchor parent)
+    {
+        using var marker = parent.OpenExistingFile(
+            GetReservationParentMarkerName(reservation),
+            requireDeleteAccess: false);
+        ValidateReservationParentMarker(
+            relocationId,
+            reservation,
+            parent,
+            marker);
+    }
+
+    private static void ValidateReservationParentMarker(
+        Guid relocationId,
+        RootFolderRelocationCreatedDirectory reservation,
+        PinnedDirectoryCreation.PinnedDirectoryAnchor parent,
+        PinnedDirectoryCreation.PinnedFileEntry marker)
+    {
+        TargetReservationParentMarker? payload;
+        using (var stream = marker.OpenReadStream(
+            bufferSize: 4096,
+            asynchronous: false))
+        {
+            if (stream.Length <= 0 || stream.Length > 16 * 1024)
+            {
+                throw new InvalidOperationException(
+                    "A relocation parent reservation marker has an invalid size.");
+            }
+
+            payload = JsonSerializer.Deserialize<TargetReservationParentMarker>(
+                stream,
+                ReservationJsonOptions);
+        }
+
+        var expectedParentIdentity = ManagedDirectoryIdentity.Create(
+            reservation.OwnershipToken,
+            parent.GetDirectoryObjectIdentity());
+        if (payload == null
+            || payload.Version != 1
+            || payload.RelocationId != relocationId
+            || !string.Equals(
+                payload.OwnershipToken,
+                reservation.OwnershipToken,
+                StringComparison.Ordinal)
+            || !string.Equals(
+                Path.GetFullPath(payload.CanonicalPath),
+                Path.GetFullPath(reservation.CanonicalPath),
+                PathComparison)
+            || !string.Equals(
+                payload.ParentDirectoryIdentity,
+                expectedParentIdentity,
+                StringComparison.Ordinal)
+            || !marker.VisiblePathMatches()
+            || !parent.VisiblePathMatches())
+        {
+            throw new InvalidOperationException(
+                "A relocation parent reservation marker belongs to another directory generation.");
+        }
+    }
+
+    private static string GetReservationParentMarkerName(
+        RootFolderRelocationCreatedDirectory reservation)
+    {
+        if (!Guid.TryParseExact(reservation.OwnershipToken, "N", out _))
+        {
+            throw new InvalidOperationException(
+                "A relocation reservation ownership token is invalid.");
+        }
+
+        return $"{RelocationReservationParentMarkerPrefix}{reservation.OwnershipToken}.json";
     }
 
     private static void WriteReservationMarker(
@@ -118,13 +332,11 @@ public sealed partial class RootFolderRelocationService
         if (reservation.State is not (
                 RootFolderRelocationCreatedDirectoryState.Created
                     or RootFolderRelocationCreatedDirectoryState.Retained)
-            || reservation.DirectoryObjectIdentityVersion != 1
-            || string.IsNullOrWhiteSpace(
-                reservation.DirectoryObjectIdentity)
-            || !string.Equals(
+            || !ManagedDirectoryIdentity.Matches(
+                reservation.DirectoryObjectIdentityVersion,
                 reservation.DirectoryObjectIdentity,
-                directory.GetDirectoryObjectIdentity(),
-                StringComparison.Ordinal)
+                reservation.OwnershipToken,
+                directory.GetDirectoryObjectIdentity())
             || !directory.VisiblePathMatches())
         {
             throw new InvalidOperationException(
@@ -206,12 +418,15 @@ public sealed partial class RootFolderRelocationService
     {
         try
         {
-            if (reservation.DirectoryObjectIdentityVersion != 1
+            if (reservation.DirectoryObjectIdentityVersion
+                    != ManagedDirectoryIdentity.CurrentVersion
                 || string.IsNullOrWhiteSpace(
                     reservation.DirectoryObjectIdentity)
                 || !string.Equals(
                     reservation.DirectoryObjectIdentity,
-                    parent.GetDirectoryObjectIdentity(),
+                    ManagedDirectoryIdentity.Create(
+                        reservation.OwnershipToken,
+                        parent.GetDirectoryObjectIdentity()),
                     StringComparison.Ordinal)
                 || !parent.VisiblePathMatches()
                 || !directory.VisiblePathMatches())
@@ -219,6 +434,10 @@ public sealed partial class RootFolderRelocationService
                 return false;
             }
 
+            ValidateReservationParentMarker(
+                relocationId,
+                reservation,
+                parent);
             ValidateReservationMarker(
                 relocationId,
                 reservation,
@@ -249,4 +468,11 @@ public sealed partial class RootFolderRelocationService
         Guid RelocationId,
         string OwnershipToken,
         string CanonicalPath);
+
+    private sealed record TargetReservationParentMarker(
+        int Version,
+        Guid RelocationId,
+        string OwnershipToken,
+        string CanonicalPath,
+        string ParentDirectoryIdentity);
 }

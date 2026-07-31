@@ -1,6 +1,5 @@
 using Listenarr.Api.Dtos.ManualImport;
 using Listenarr.Application.Common;
-using Listenarr.Domain.Common;
 
 namespace Listenarr.Api.Features.Downloads;
 
@@ -82,10 +81,6 @@ public partial class ManualImportController
                             return;
                         }
 
-                        await PersistAudiobookBasePathAsync(
-                            audiobook,
-                            authorization.Path);
-
                         var scanJobId = await _scanQueueService.EnqueueScanAsync(
                             new ScanEnqueueCommand(
                                 audiobook,
@@ -112,58 +107,6 @@ public partial class ManualImportController
                     "Manual import completed for audiobook {AudiobookId}, but its focused scan could not be queued",
                     group.Key);
             }
-        }
-    }
-
-    private async Task PersistAudiobookBasePathAsync(
-        Audiobook audiobook,
-        string? basePath)
-    {
-        if (string.IsNullOrWhiteSpace(basePath))
-        {
-            return;
-        }
-
-        var previousBasePath = audiobook.BasePath;
-        try
-        {
-            basePath = FileUtils.NormalizeStoredPath(basePath);
-            if (_fileSystem.FileExists(basePath))
-            {
-                basePath = Path.GetDirectoryName(basePath);
-            }
-
-            if (string.IsNullOrWhiteSpace(basePath)
-                || string.Equals(
-                    audiobook.BasePath,
-                    basePath,
-                    StringComparison.Ordinal))
-            {
-                return;
-            }
-
-            audiobook.BasePath = basePath;
-            if (!await _audiobookRepository.UpdateAsync(audiobook))
-            {
-                audiobook.BasePath = previousBasePath;
-                _logger.LogWarning(
-                    "Manual import completed for audiobook {AudiobookId}, but BasePath persistence reported no update",
-                    audiobook.Id);
-                return;
-            }
-
-            _logger.LogInformation(
-                "Updated audiobook {AudiobookId} BasePath to {BasePath}",
-                audiobook.Id,
-                LogRedaction.SanitizeFilePath(basePath));
-        }
-        catch (Exception ex) when (WorkerExceptionClassifier.IsNonFatal(ex))
-        {
-            audiobook.BasePath = previousBasePath;
-            _logger.LogWarning(
-                ex,
-                "Failed to persist manual-import BasePath for audiobook {AudiobookId}",
-                audiobook.Id);
         }
     }
 }

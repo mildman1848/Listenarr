@@ -63,7 +63,10 @@ public partial class FileMover
 
             using var state = statePublication.OpenCreatedDirectoryAnchor();
             if (!state.VisiblePathMatches()
-                || !AnchoredStateContainsOnly(state, "publication.claim"))
+                || !AnchoredStateContainsOnly(
+                    state,
+                    "publication.claim",
+                    RegistrationCleanupIntentName))
             {
                 return null;
             }
@@ -84,6 +87,11 @@ public partial class FileMover
                 FlushFileMoveDirectory(
                     state,
                     "registered publication claim retirement");
+            }
+
+            if (!DeleteRegistrationCleanupIntentIfPresent(state))
+            {
+                return null;
             }
 
             state.Dispose();
@@ -137,7 +145,10 @@ public partial class FileMover
             using var state = statePublication.OpenCreatedDirectoryAnchor();
             if (!parent.VisiblePathMatches()
                 || !state.VisiblePathMatches()
-                || !AnchoredStateContainsOnly(state, "publication.claim"))
+                || !AnchoredStateContainsOnly(
+                    state,
+                    "publication.claim",
+                    RegistrationCleanupIntentName))
             {
                 return false;
             }
@@ -145,28 +156,41 @@ public partial class FileMover
             using var claim = state.TryOpenExistingFile(
                 "publication.claim",
                 requireDeleteAccess: true);
+            using var intent = state.TryOpenExistingFile(
+                RegistrationCleanupIntentName,
+                requireDeleteAccess: false);
             using var published = parent.TryOpenExistingFile(
                 Path.GetFileName(destination),
                 requireDeleteAccess: false);
-            if (claim == null
-                || published == null
-                || !claim.VisiblePathMatches()
+            if (published == null
                 || !published.VisiblePathMatches()
-                || !claim.IdentifiesSameEntry(published)
                 || !string.Equals(
                     published.GetObjectIdentity(),
                     expectedPhysicalObjectIdentity,
-                    StringComparison.Ordinal))
+                    StringComparison.Ordinal)
+                || (claim == null && intent == null)
+                || (claim != null
+                    && (!claim.VisiblePathMatches()
+                        || !claim.IdentifiesSameEntry(published))))
             {
                 return false;
             }
 
-            claim.Delete(immediateWindows: true);
-            claim.Dispose();
-            FlushFileMoveDirectory(
-                state,
-                "completed registration-publication claim retirement");
+            if (claim != null)
+            {
+                claim.Delete(immediateWindows: true);
+                claim.Dispose();
+                FlushFileMoveDirectory(
+                    state,
+                    "completed registration-publication claim retirement");
+            }
             AfterRegistrationPublicationClaimRetiredForTest?.Invoke();
+            intent?.Dispose();
+            if (!DeleteRegistrationCleanupIntentIfPresent(state))
+            {
+                return false;
+            }
+
             state.Dispose();
             statePublication.DeletePinnedEmptyDirectory(
                 stateName,

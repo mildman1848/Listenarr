@@ -370,28 +370,31 @@ public sealed class RootFolderRelocationServiceTests : BaseTests
             rootId = root.Id;
         }
 
+        var finalParent = Path.GetDirectoryName(target)!;
         var service = CreateService();
-        var started = await service.StartAsync(
-            rootId,
-            BuildRelocationCommand(target));
+        service.TargetReservationDirectoryFlushedForTest = path =>
+        {
+            if (Directory.Exists(target)
+                && string.Equals(
+                    path,
+                    finalParent,
+                    OperatingSystem.IsWindows()
+                        ? StringComparison.OrdinalIgnoreCase
+                        : StringComparison.Ordinal))
+            {
+                throw new IOException(
+                    "Injected crash after the final reserved child and parent were flushed.");
+            }
+        };
+        await Assert.ThrowsAsync<IOException>(() =>
+            service.StartAsync(
+                rootId,
+                BuildRelocationCommand(target)));
+        Guid relocationId;
         await using (var db = await _factory.CreateDbContextAsync())
         {
-            var relocation = await db.RootFolderRelocations
-                .SingleAsync(candidate =>
-                    candidate.Id == started.RelocationId);
-            var persistedReservations = await db
-                .RootFolderRelocationCreatedDirectories
-                .Where(candidate =>
-                    candidate.RelocationId == started.RelocationId)
-                .OrderBy(candidate => candidate.CanonicalPath.Length)
-                .ToListAsync();
-            var publishedBeforeStateCommit = persistedReservations[^1];
-            var publishedParent = persistedReservations[^2];
-            publishedBeforeStateCommit.State =
-                RootFolderRelocationCreatedDirectoryState.Planned;
-            publishedBeforeStateCommit.DirectoryObjectIdentityVersion = 1;
-            publishedBeforeStateCommit.DirectoryObjectIdentity =
-                publishedParent.DirectoryObjectIdentity;
+            var relocation = await db.RootFolderRelocations.SingleAsync();
+            relocationId = relocation.Id;
             relocation.Status = RootFolderRelocationStatus.Failed;
             relocation.ActiveRootFolderId = null;
             relocation.TargetIdentityEnrollmentState =
@@ -399,16 +402,36 @@ public sealed class RootFolderRelocationServiceTests : BaseTests
             await db.SaveChangesAsync();
         }
 
-        await service.ReconcileActiveAsync();
+        await CreateService().ReconcileActiveAsync();
 
-        Assert.False(Directory.Exists(targetRoot));
-        Assert.True(Directory.Exists(source));
         await using var verification =
             await _factory.CreateDbContextAsync();
+        var persistedStates = await verification
+            .RootFolderRelocationCreatedDirectories
+            .Where(candidate => candidate.RelocationId == relocationId)
+            .OrderBy(candidate => candidate.CanonicalPath.Length)
+            .Select(candidate => new
+            {
+                candidate.CanonicalPath,
+                candidate.State
+            })
+            .ToListAsync();
+        var remainingEntries = Directory.Exists(targetRoot)
+            ? Directory.EnumerateFileSystemEntries(
+                    targetRoot,
+                    "*",
+                    SearchOption.AllDirectories)
+                .Order(StringComparer.Ordinal)
+                .ToList()
+            : [];
+        Assert.False(
+            Directory.Exists(targetRoot),
+            $"Remaining entries: {string.Join(", ", remainingEntries)}; states: {string.Join(", ", persistedStates.Select(item => $"{item.CanonicalPath}={item.State}"))}");
+        Assert.True(Directory.Exists(source));
         var reservations = await verification
             .RootFolderRelocationCreatedDirectories
             .Where(candidate =>
-                candidate.RelocationId == started.RelocationId)
+                candidate.RelocationId == relocationId)
             .ToListAsync();
         Assert.NotEmpty(reservations);
         Assert.All(reservations, reservation =>
@@ -557,6 +580,200 @@ public sealed class RootFolderRelocationServiceTests : BaseTests
             reservation => Assert.Equal(
                 RootFolderRelocationCreatedDirectoryState.Retained,
                 reservation.State));
+    }
+
+    [Fact]
+    public async Task ReconcileActive_ParentIntentPublishedBeforeChildCreation_ResumesSameReservation()
+    {
+        var source = Path.Join(
+            TempRoot,
+            $"reservation-parent-intent-source-{Guid.NewGuid():N}");
+        var target = Path.Join(
+            TempRoot,
+            $"reservation-parent-intent-target-{Guid.NewGuid():N}",
+            "nested");
+        Directory.CreateDirectory(source);
+        int rootId;
+        await using (var db = await _factory.CreateDbContextAsync())
+        {
+            var root = new RootFolder
+            {
+                Name = "Library",
+                Path = source
+            };
+            db.RootFolders.Add(root);
+            await db.SaveChangesAsync();
+            rootId = root.Id;
+        }
+
+        var injected = false;
+        var interrupted = CreateService();
+        interrupted.AfterReservationParentMarkerPublishedForTest = _ =>
+        {
+            if (!injected)
+            {
+                injected = true;
+                throw new IOException(
+                    "Injected crash after durable parent reservation intent.");
+            }
+        };
+
+        await Assert.ThrowsAsync<IOException>(() =>
+            interrupted.StartAsync(
+                rootId,
+                BuildRelocationCommand(target)));
+
+        Guid relocationId;
+        await using (var verification =
+            await _factory.CreateDbContextAsync())
+        {
+            var relocation = await verification.RootFolderRelocations
+                .SingleAsync();
+            relocationId = relocation.Id;
+            Assert.Equal(
+                RootFolderRelocationStatus.NeedsAttention,
+                relocation.Status);
+            var firstReservation = await verification
+                .RootFolderRelocationCreatedDirectories
+                .OrderBy(candidate => candidate.CanonicalPath.Length)
+                .FirstAsync();
+            Assert.Equal(
+                RootFolderRelocationCreatedDirectoryState.Planned,
+                firstReservation.State);
+            Assert.False(Directory.Exists(firstReservation.CanonicalPath));
+            Assert.True(File.Exists(Path.Join(
+                Path.GetDirectoryName(firstReservation.CanonicalPath)!,
+                $".listenarr-relocation-parent-{firstReservation.OwnershipToken}.json")));
+        }
+
+        var restarted = CreateService();
+        await restarted.ReconcileActiveAsync();
+
+        List<string> expectedParentMarkers;
+        await using (var recovered =
+            await _factory.CreateDbContextAsync())
+        {
+            var relocation = await recovered.RootFolderRelocations
+                .SingleAsync(candidate => candidate.Id == relocationId);
+            Assert.Equal(
+                TargetIdentityEnrollmentState.Authorized,
+                relocation.TargetIdentityEnrollmentState);
+            var recoveredReservations = await recovered
+                .RootFolderRelocationCreatedDirectories
+                .Where(candidate => candidate.RelocationId == relocationId)
+                .ToListAsync();
+            Assert.All(
+                recoveredReservations,
+                reservation => Assert.Equal(
+                    RootFolderRelocationCreatedDirectoryState.Created,
+                    reservation.State));
+            expectedParentMarkers = recoveredReservations
+                .Select(reservation => Path.Join(
+                    Path.GetDirectoryName(reservation.CanonicalPath)!,
+                    $".listenarr-relocation-parent-{reservation.OwnershipToken}.json"))
+                .ToList();
+        }
+        var remainingParentMarkers = expectedParentMarkers
+            .Where(File.Exists)
+            .Order(StringComparer.Ordinal)
+            .ToList();
+        Assert.True(
+            remainingParentMarkers.Count == 0,
+            $"Unretired parent markers: {string.Join(", ", remainingParentMarkers)}");
+
+        var result = await restarted.RetryAsync(relocationId);
+        Assert.Equal(RootFolderRelocationStatus.Completed, result.Status);
+    }
+
+    [Fact]
+    public async Task ReconcileActive_PublishedChildWithoutParentIntent_RemainsUntrusted()
+    {
+        var source = Path.Join(
+            TempRoot,
+            $"reservation-missing-intent-source-{Guid.NewGuid():N}");
+        var target = Path.Join(
+            TempRoot,
+            $"reservation-missing-intent-target-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(source);
+        int rootId;
+        await using (var db = await _factory.CreateDbContextAsync())
+        {
+            var root = new RootFolder
+            {
+                Name = "Library",
+                Path = source
+            };
+            db.RootFolders.Add(root);
+            await db.SaveChangesAsync();
+            rootId = root.Id;
+        }
+
+        var parent = Path.GetDirectoryName(target)!;
+        var interrupted = CreateService();
+        interrupted.TargetReservationDirectoryFlushedForTest = path =>
+        {
+            if (Directory.Exists(target)
+                && string.Equals(
+                    path,
+                    parent,
+                    OperatingSystem.IsWindows()
+                        ? StringComparison.OrdinalIgnoreCase
+                        : StringComparison.Ordinal))
+            {
+                throw new IOException(
+                    "Injected crash after child publication but before enrollment.");
+            }
+        };
+        await Assert.ThrowsAsync<IOException>(() =>
+            interrupted.StartAsync(
+                rootId,
+                BuildRelocationCommand(target)));
+
+        Guid relocationId;
+        RootFolderRelocationCreatedDirectory reservation;
+        await using (var verification =
+            await _factory.CreateDbContextAsync())
+        {
+            var relocation = await verification.RootFolderRelocations
+                .SingleAsync();
+            relocationId = relocation.Id;
+            reservation = await verification
+                .RootFolderRelocationCreatedDirectories
+                .SingleAsync();
+            Assert.Equal(
+                RootFolderRelocationCreatedDirectoryState.Planned,
+                reservation.State);
+        }
+        var parentMarker = Path.Join(
+            parent,
+            $".listenarr-relocation-parent-{reservation.OwnershipToken}.json");
+        Assert.True(File.Exists(parentMarker));
+        File.Delete(parentMarker);
+
+        await CreateService().ReconcileActiveAsync();
+
+        await using var blocked = await _factory.CreateDbContextAsync();
+        var blockedRelocation = await blocked.RootFolderRelocations
+            .SingleAsync(candidate => candidate.Id == relocationId);
+        var blockedReservation = await blocked
+            .RootFolderRelocationCreatedDirectories
+            .SingleAsync(candidate => candidate.RelocationId == relocationId);
+        Assert.Equal(
+            RootFolderRelocationStatus.NeedsAttention,
+            blockedRelocation.Status);
+        Assert.Equal(
+            TargetIdentityEnrollmentState.Unavailable,
+            blockedRelocation.TargetIdentityEnrollmentState);
+        Assert.Equal(
+            RootFolderRelocationCreatedDirectoryState.Planned,
+            blockedReservation.State);
+        Assert.True(Directory.Exists(target));
+        Assert.True(File.Exists(Path.Join(
+            target,
+            ".listenarr-relocation-directory.json")));
+        Assert.False(File.Exists(Path.Join(
+            target,
+            ManagedDirectoryEnrollment.FileName)));
     }
 
     [Fact]
@@ -4076,15 +4293,25 @@ public sealed class RootFolderRelocationServiceTests : BaseTests
         var targetSemantics = new FileSystemPathSemantics(
             sourceResolution.Semantics.Syntax,
             FileSystemCaseSensitivity.Sensitive);
-        var objectIdentity = await new DirectoryObjectIdentityResolver()
-            .ResolveAsync(ownedPath);
-        Assert.True(objectIdentity.IsAvailable);
+        var rootIdentity = await new DirectoryObjectIdentityResolver()
+            .ResolveAsync(rootPath);
+        Assert.True(rootIdentity.IsAvailable, rootIdentity.UnavailableReason);
+        using var ownedAnchor =
+            PinnedDirectoryCreation.OpenPinnedBoundary(ownedPath);
+        var ownershipToken = Guid.NewGuid().ToString("N");
+        var ownershipIdentity = ManagedDirectoryIdentity.Create(
+            ownershipToken,
+            ownedAnchor.GetDirectoryObjectIdentity());
 
         await using var db = await _factory.CreateDbContextAsync();
         var root = new RootFolder
         {
             Name = "Library",
-            Path = rootPath
+            Path = rootPath,
+            DirectoryObjectIdentityVersion = rootIdentity.Version,
+            DirectoryObjectIdentity = rootIdentity.Value,
+            DirectoryObjectIdentityUnavailableReason =
+                rootIdentity.UnavailableReason
         };
         var audiobook = new Audiobook
         {
@@ -4115,13 +4342,14 @@ public sealed class RootFolderRelocationServiceTests : BaseTests
                     ownedPath,
                     sourceResolution.Semantics.Syntax),
             PathOwnershipKey = sourceOwnershipKey,
-            OwnershipToken = Guid.NewGuid().ToString("N"),
+            OwnershipToken = ownershipToken,
             State = LibraryDirectoryOwnershipState.Owned,
             CreationWorkflow = "Test",
             AudiobookId = audiobook.Id,
             ManagedRootFolderId = root.Id,
-            DirectoryObjectIdentityVersion = objectIdentity.Version,
-            DirectoryObjectIdentity = objectIdentity.Value
+            DirectoryObjectIdentityVersion =
+                ManagedDirectoryIdentity.CurrentVersion,
+            DirectoryObjectIdentity = ownershipIdentity
         };
         db.LibraryDirectoryOwnerships.Add(ownership);
         var relocation = new RootFolderRelocation
@@ -4138,8 +4366,8 @@ public sealed class RootFolderRelocationServiceTests : BaseTests
             TargetIdentityEnrollmentState =
                 TargetIdentityEnrollmentState.Authorized,
             TargetDirectoryObjectIdentityVersion =
-                objectIdentity.Version,
-            TargetDirectoryObjectIdentity = objectIdentity.Value
+                rootIdentity.Version,
+            TargetDirectoryObjectIdentity = rootIdentity.Value
         };
         db.RootFolderRelocations.Add(relocation);
         await db.SaveChangesAsync();
@@ -4180,6 +4408,18 @@ public sealed class RootFolderRelocationServiceTests : BaseTests
                         .MarkersPublished
             });
         await db.SaveChangesAsync();
+        var publishedPayload =
+            LibraryDirectoryOwnershipMarker.SerializePayload(ownership);
+        await File.WriteAllTextAsync(
+            Path.Join(
+                ownedPath,
+                LibraryDirectoryOwnershipMarker.FileName),
+            publishedPayload);
+        await File.WriteAllTextAsync(
+            Path.Join(
+                rootPath,
+                $".listenarr-directory-owner-{ownership.OwnershipToken}.json"),
+            publishedPayload);
         return new OwnershipMigrationScenario(
             ownership.Id,
             relocation.Id,

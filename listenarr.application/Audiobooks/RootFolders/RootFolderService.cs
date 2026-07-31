@@ -84,10 +84,14 @@ namespace Listenarr.Application.Audiobooks.RootFolders
 
             if (root.IsDefault)
             {
-                await _repo.ClearDefaultExceptAsync(excludeId: null);
+                var currentDefaultId = (await _repo.GetDefaultAsync())?.Id;
+                await _repo.AddAndSetDefaultAsync(root, currentDefaultId);
+            }
+            else
+            {
+                await _repo.AddAsync(root);
             }
 
-            await _repo.AddAsync(root);
             return root;
         }
 
@@ -186,14 +190,18 @@ namespace Listenarr.Application.Audiobooks.RootFolders
                 throw new InvalidOperationException(BuildRootFolderConflictMessage(conflict));
             }
 
-            if (root.IsDefault)
-            {
-                await _repo.ClearDefaultExceptAsync(excludeId: root.Id);
-            }
-
             ApplyIdentity(existing, resolution);
             existing.UpdatedAt = DateTime.UtcNow;
-            await _repo.UpdateAsync(existing);
+            if (root.IsDefault)
+            {
+                var currentDefaultId = (await _repo.GetDefaultAsync())?.Id;
+                await _repo.UpdateAndSetDefaultAsync(existing, currentDefaultId);
+            }
+            else
+            {
+                await _repo.UpdateAsync(existing);
+            }
+
             return existing;
         }
 
@@ -319,7 +327,8 @@ namespace Listenarr.Application.Audiobooks.RootFolders
                     "Root folder physical identity cannot be validated.");
             }
 
-            var current = await _directoryObjectIdentityResolver.ResolveAsync(root.Path);
+            var current = await _directoryObjectIdentityResolver.ResolveExistingAsync(
+                root.Path);
             if (!current.IsAvailable
                 || current.Version != root.DirectoryObjectIdentityVersion
                 || !string.Equals(

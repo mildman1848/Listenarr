@@ -171,6 +171,90 @@ namespace Listenarr.Tests.Features.Api.Features.Library
         }
 
         [Fact]
+        public async Task AddToLibrary_NullAuthors_UsesUniformEnrichmentPipelineWithoutLookup()
+        {
+            using var httpClient = new HttpClient();
+            var audible = new Mock<AudibleService>(
+                MockBehavior.Strict,
+                httpClient,
+                NullLogger<AudibleService>.Instance);
+            await ReinitializeAsync(builder =>
+                builder.WithSingleton<AudibleService>(audible.Object));
+
+            var result = await _provider
+                .GetRequiredService<LibraryController>()
+                .AddToLibrary(new LibraryController.AddToLibraryRequest
+                {
+                    Metadata = new AudibleBookMetadata
+                    {
+                        Title = "No Author Enrichment",
+                        Authors = null
+                    },
+                    Monitored = true
+                });
+
+            Assert.IsType<OkObjectResult>(result);
+            var audiobook = Assert.Single(
+                await _audiobookRepository.GetAllAsync());
+            Assert.NotNull(audiobook.AuthorAsins);
+            Assert.Empty(audiobook.AuthorAsins);
+            audible.Verify(
+                service => service.LookupAuthorAsync(
+                    It.IsAny<string>(),
+                    It.IsAny<string>()),
+                Times.Never);
+        }
+
+        [Fact]
+        public async Task AddToLibrary_AuthorEnrichment_NormalizesDeduplicatesAndBoundsLookups()
+        {
+            using var httpClient = new HttpClient();
+            var audible = new Mock<AudibleService>(
+                httpClient,
+                NullLogger<AudibleService>.Instance);
+            audible.Setup(service => service.LookupAuthorAsync(
+                    It.IsAny<string>(),
+                    "us"))
+                .ReturnsAsync((AuthorLookupItem?)null);
+            await ReinitializeAsync(builder =>
+                builder.WithSingleton<AudibleService>(audible.Object));
+            var authors = new List<string>
+            {
+                " ",
+                " Alice Author ",
+                "alice author"
+            };
+            authors.AddRange(Enumerable.Range(0, 40)
+                .Select(index => $"Author {index:00}"));
+
+            var result = await _provider
+                .GetRequiredService<LibraryController>()
+                .AddToLibrary(new LibraryController.AddToLibraryRequest
+                {
+                    Metadata = new AudibleBookMetadata
+                    {
+                        Title = "Bounded Author Enrichment",
+                        Authors = authors
+                    },
+                    Monitored = true
+                });
+
+            Assert.IsType<OkObjectResult>(result);
+            audible.Verify(service => service.LookupAuthorAsync(
+                "Alice Author",
+                "us"), Times.Once);
+            audible.Verify(service => service.LookupAuthorAsync(
+                "alice author",
+                "us"), Times.Never);
+            audible.Verify(service => service.LookupAuthorAsync(
+                It.IsAny<string>(),
+                "us"), Times.Exactly(32));
+            audible.Verify(service => service.LookupAuthorAsync(
+                "Author 31",
+                "us"), Times.Never);
+        }
+
+        [Fact]
         public async Task AddToLibrary_CancelledWhileWaitingForCommitGate_DoesNotPersist()
         {
             var coordinator = _provider.GetRequiredService<IFilesystemMutationCoordinator>();

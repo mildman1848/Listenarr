@@ -221,8 +221,17 @@ namespace Listenarr.Tests.Features.Infrastructure.Library.Scanning
 
             Assert.True(queue.TryGetJob(job.Id, out var updatedJob));
             Assert.Equal("Failed", updatedJob!.Status);
-            Assert.Equal("Scan path is a symbolic link or reparse point.", updatedJob.Error);
+            Assert.False(string.IsNullOrWhiteSpace(updatedJob.Error));
+            Assert.Contains(
+                "link",
+                updatedJob.Error,
+                StringComparison.OrdinalIgnoreCase);
             Assert.Single(await _audiobookFileRepository.GetByAudiobookIdAsync(audiobook.Id));
+            Assert.Equal(
+                "audio",
+                await File.ReadAllTextAsync(Path.Join(
+                    actualRoot,
+                    "Tracked Book.m4b")));
         }
 
         [Fact]

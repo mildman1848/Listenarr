@@ -100,9 +100,12 @@ public sealed partial class RootFolderRelocationService
         var plans = new List<OwnershipMigrationPlan>(ownerships.Count);
         foreach (var ownership in ownerships)
         {
-            if (ownership.DirectoryObjectIdentityVersion != 1
+            if (ownership.DirectoryObjectIdentityVersion
+                    != ManagedDirectoryIdentity.CurrentVersion
                 || string.IsNullOrWhiteSpace(
-                    ownership.DirectoryObjectIdentity))
+                    ownership.DirectoryObjectIdentity)
+                || !string.IsNullOrWhiteSpace(
+                    ownership.DirectoryObjectIdentityUnavailableReason))
             {
                 throw new InvalidOperationException(
                     "Metadata-only relocation requires an enrolled physical identity for every owned directory.");
@@ -208,7 +211,8 @@ public sealed partial class RootFolderRelocationService
     private static async Task PublishOwnershipMigrationTargetsAsync(
         IReadOnlyList<OwnershipMigrationPlan> plans,
         string targetBoundary,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool allowPublication = true)
     {
         foreach (var plan in plans)
         {
@@ -226,7 +230,8 @@ public sealed partial class RootFolderRelocationService
                     plan.Source,
                     plan.Target,
                     targetParent,
-                    cancellationToken);
+                    cancellationToken,
+                    allowPublication);
         }
     }
 
@@ -256,6 +261,12 @@ public sealed partial class RootFolderRelocationService
                 target.PathIdentityLookupKey;
             ownership.ManagedRootFolderId =
                 target.ManagedRootFolderId;
+            ownership.DirectoryObjectIdentityVersion =
+                target.DirectoryObjectIdentityVersion;
+            ownership.DirectoryObjectIdentity =
+                target.DirectoryObjectIdentity;
+            ownership.DirectoryObjectIdentityUnavailableReason =
+                target.DirectoryObjectIdentityUnavailableReason;
             ownership.UpdatedAt = now;
         }
     }

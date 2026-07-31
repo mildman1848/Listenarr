@@ -1,4 +1,5 @@
 using System.Text.Json;
+using Listenarr.Tests.Common;
 using Microsoft.EntityFrameworkCore;
 
 namespace Listenarr.Tests.Features.Infrastructure.Library.Moving;
@@ -201,7 +202,7 @@ public partial class AudiobookContentMoveServiceTests
         Assert.True(File.Exists(Path.Join(source, "book.m4b")));
     }
 
-    [Fact]
+    [FileLinkFact]
     public async Task GetRecoverableMoveAsync_LinkedRecoveryMarker_PreservesExternalMarker()
     {
         var source = FileService.GetTempDirectory("content-move-linked-marker-src");
@@ -229,7 +230,8 @@ public partial class AudiobookContentMoveServiceTests
         catch (Exception exception) when (exception is
             IOException or UnauthorizedAccessException or PlatformNotSupportedException)
         {
-            return;
+            throw new Xunit.Sdk.XunitException(
+                $"This native filesystem regression requires symbolic-link support: {exception.Message}");
         }
 
         try

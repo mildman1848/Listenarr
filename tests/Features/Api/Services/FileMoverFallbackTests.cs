@@ -16,7 +16,6 @@
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
 using System.Diagnostics;
-using System.Runtime.InteropServices;
 using Listenarr.Tests.Common;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
@@ -180,7 +179,9 @@ namespace Listenarr.Tests.Features.Api.Services
             Assert.NotNull(recoveredLease);
             Assert.True(recoveredLease.MatchesCurrentPublication());
             Assert.Equal("audio", await File.ReadAllTextAsync(destination));
-            Assert.True(recoveredLease.CompletePublication());
+            Assert.Equal(
+                RegistrationPublicationCompletion.Completed,
+                CompletePreparedPublication(recoveredLease));
             Assert.Empty(
                 Directory.EnumerateDirectories(
                     _root,
@@ -418,7 +419,9 @@ namespace Listenarr.Tests.Features.Api.Services
 
             Assert.NotNull(recoveredLease);
             Assert.True(recoveredLease.MatchesCurrentPublication());
-            Assert.True(recoveredLease.CompletePublication());
+            Assert.Equal(
+                RegistrationPublicationCompletion.Completed,
+                CompletePreparedPublication(recoveredLease));
             Assert.False(Directory.Exists(legacyStatePath));
         }
 
@@ -505,7 +508,9 @@ namespace Listenarr.Tests.Features.Api.Services
 
             Assert.NotNull(recoveredLease);
             Assert.True(recoveredLease.MatchesCurrentPublication());
-            Assert.True(recoveredLease.CompletePublication());
+            Assert.Equal(
+                RegistrationPublicationCompletion.Completed,
+                CompletePreparedPublication(recoveredLease));
         }
 
         [Fact]
@@ -601,7 +606,9 @@ namespace Listenarr.Tests.Features.Api.Services
             Assert.NotNull(recoveredLease);
             Assert.True(recoveredLease.MatchesCurrentPublication());
             Assert.Equal("audio", await File.ReadAllTextAsync(destination));
-            Assert.True(recoveredLease.CompletePublication());
+            Assert.Equal(
+                RegistrationPublicationCompletion.Completed,
+                CompletePreparedPublication(recoveredLease));
             Assert.Empty(
                 Directory.EnumerateDirectories(
                     _root,
@@ -659,8 +666,12 @@ namespace Listenarr.Tests.Features.Api.Services
                 secondLease.PhysicalObjectIdentity);
             Assert.True(firstLease.MatchesCurrentPublication());
             Assert.True(secondLease.MatchesCurrentPublication());
-            Assert.True(firstLease.CompletePublication());
-            Assert.True(secondLease.CompletePublication());
+            Assert.Equal(
+                RegistrationPublicationCompletion.Completed,
+                CompletePreparedPublication(firstLease));
+            Assert.Equal(
+                RegistrationPublicationCompletion.Completed,
+                CompletePreparedPublication(secondLease));
         }
 
         [LinuxFact]
@@ -690,12 +701,18 @@ namespace Listenarr.Tests.Features.Api.Services
                     operationId);
             Assert.NotNull(firstLease);
             Assert.NotNull(secondLease);
-            Assert.True(firstLease.CompletePublication());
+            Assert.True(firstLease.PrepareCleanupRecovery(1));
+            Assert.True(secondLease.PrepareCleanupRecovery(1));
+            Assert.Equal(
+                RegistrationPublicationCompletion.Completed,
+                firstLease.CompletePublication());
 
             File.Delete(destination);
             await File.WriteAllTextAsync(destination, "replacement");
 
-            Assert.False(secondLease.CompletePublication());
+            Assert.Equal(
+                RegistrationPublicationCompletion.CommittedCleanupPending,
+                secondLease.CompletePublication());
             Assert.Equal("replacement", await File.ReadAllTextAsync(destination));
             Assert.Equal("audio", await File.ReadAllTextAsync(source));
         }
@@ -720,7 +737,9 @@ namespace Listenarr.Tests.Features.Api.Services
                     operationId);
             Assert.NotNull(initialLease);
             var registeredIdentity = initialLease.PhysicalObjectIdentity;
-            Assert.True(initialLease.CompletePublication());
+            Assert.Equal(
+                RegistrationPublicationCompletion.Completed,
+                CompletePreparedPublication(initialLease));
 
             using var recoveredLease =
                 await mover.PrepareActionForRegistrationAsync(
@@ -732,7 +751,9 @@ namespace Listenarr.Tests.Features.Api.Services
 
             Assert.NotNull(recoveredLease);
             Assert.True(recoveredLease.MatchesCurrentPublication());
-            Assert.True(recoveredLease.CompletePublication());
+            Assert.Equal(
+                RegistrationPublicationCompletion.Completed,
+                CompletePreparedPublication(recoveredLease));
         }
 
         [Fact]
@@ -760,7 +781,9 @@ namespace Listenarr.Tests.Features.Api.Services
             Assert.NotNull(initialLease);
             var registeredIdentity = initialLease.PhysicalObjectIdentity;
 
-            Assert.False(initialLease.CompletePublication());
+            Assert.Equal(
+                RegistrationPublicationCompletion.CommittedCleanupPending,
+                CompletePreparedPublication(initialLease));
             Assert.Single(
                 Directory.EnumerateDirectories(
                     _root,
@@ -779,7 +802,9 @@ namespace Listenarr.Tests.Features.Api.Services
 
             Assert.NotNull(recoveredLease);
             Assert.True(recoveredLease.MatchesCurrentPublication());
-            Assert.True(recoveredLease.CompletePublication());
+            Assert.Equal(
+                RegistrationPublicationCompletion.Completed,
+                CompletePreparedPublication(recoveredLease));
             Assert.Empty(
                 Directory.EnumerateDirectories(
                     _root,
@@ -856,7 +881,9 @@ namespace Listenarr.Tests.Features.Api.Services
                     destination,
                     operationId);
             Assert.NotNull(recoveredLease);
-            Assert.True(recoveredLease.CompletePublication());
+            Assert.Equal(
+                RegistrationPublicationCompletion.Completed,
+                CompletePreparedPublication(recoveredLease));
         }
 
         [Fact]
@@ -888,7 +915,9 @@ namespace Listenarr.Tests.Features.Api.Services
             Assert.Equal("first-audio", await File.ReadAllTextAsync(destination));
             Assert.Equal("second-audio", await File.ReadAllTextAsync(secondSource));
             Assert.True(firstLease.MatchesCurrentPublication());
-            Assert.True(firstLease.CompletePublication());
+            Assert.Equal(
+                RegistrationPublicationCompletion.Completed,
+                CompletePreparedPublication(firstLease));
         }
 
         [Fact]
@@ -954,14 +983,9 @@ namespace Listenarr.Tests.Features.Api.Services
                 await File.ReadAllTextAsync(destination));
         }
 
-        [Fact]
+        [LinuxFact]
         public async Task CompletePreparedMoveAsync_UnixDestinationReplacedAfterSourceRetirement_RestoresSource()
         {
-            if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
-            {
-                return;
-            }
-
             var source = Path.Join(_root, "prepared-race-source.mp3");
             var destination = Path.Join(_root, "prepared-race-destination.mp3");
             var displaced = Path.Join(_root, "prepared-race-displaced.mp3");
@@ -993,14 +1017,9 @@ namespace Listenarr.Tests.Features.Api.Services
             Assert.Equal("original", await File.ReadAllTextAsync(displaced));
         }
 
-        [Fact]
+        [LinuxFact]
         public async Task CompletePreparedMoveAsync_UnixRecoveredClaimDestinationReplacedAfterRetirement_RestoresSource()
         {
-            if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
-            {
-                return;
-            }
-
             var source = Path.Join(_root, "prepared-recovery-race-source.mp3");
             var destination = Path.Join(
                 _root,
@@ -2420,6 +2439,53 @@ namespace Listenarr.Tests.Features.Api.Services
                 SearchOption.AllDirectories));
         }
 
+        [LinuxFact]
+        public async Task MoveFileAsync_LinkedParentReplacedAfterEndpointResolution_BlocksBothTargets()
+        {
+            var firstDirectory = Path.Join(_root, "linked-race-first");
+            var secondDirectory = Path.Join(_root, "linked-race-second");
+            var aliasDirectory = Path.Join(_root, "linked-race-alias");
+            Directory.CreateDirectory(firstDirectory);
+            Directory.CreateDirectory(secondDirectory);
+            Directory.CreateSymbolicLink(aliasDirectory, firstDirectory);
+            var firstSource = Path.Join(firstDirectory, "source.mp3");
+            var firstDestination = Path.Join(firstDirectory, "destination.mp3");
+            var secondSource = Path.Join(secondDirectory, "source.mp3");
+            var secondDestination = Path.Join(secondDirectory, "destination.mp3");
+            await File.WriteAllTextAsync(firstSource, "first");
+            await File.WriteAllTextAsync(secondSource, "second");
+            var swapped = false;
+            var mover = new FileMover(
+                new NullLogger<FileMover>(),
+                semanticsResolver: new FileSystemSemanticsResolver())
+            {
+                AfterFileMoveEndpointsResolvedForTestAsync = (_, _) =>
+                {
+                    if (!swapped)
+                    {
+                        Directory.Delete(aliasDirectory);
+                        Directory.CreateSymbolicLink(
+                            aliasDirectory,
+                            secondDirectory);
+                        swapped = true;
+                    }
+
+                    return Task.CompletedTask;
+                }
+            };
+
+            var moved = await mover.MoveFileAsync(
+                Path.Join(aliasDirectory, "source.mp3"),
+                Path.Join(aliasDirectory, "destination.mp3"));
+
+            Assert.True(swapped);
+            Assert.False(moved);
+            Assert.Equal("first", await File.ReadAllTextAsync(firstSource));
+            Assert.False(File.Exists(firstDestination));
+            Assert.Equal("second", await File.ReadAllTextAsync(secondSource));
+            Assert.False(File.Exists(secondDestination));
+        }
+
         [Fact]
         public async Task MoveFileAsync_LongSourceName_UsesCompactClaimNames()
         {
@@ -3152,20 +3218,21 @@ namespace Listenarr.Tests.Features.Api.Services
                     destination,
                     ".listenarr-destination-retention-*.bin",
                     SearchOption.AllDirectories));
-                return;
             }
-
-            Assert.False(cleanup.SourceRemoved);
-            Assert.Equal("replacement audio", await File.ReadAllTextAsync(destinationFile));
-            var retention = Assert.Single(Directory.EnumerateFiles(
-                destination,
-                ".listenarr-destination-retention-*.bin",
-                SearchOption.AllDirectories));
-            Assert.Equal("original audio", await File.ReadAllTextAsync(retention));
-            Assert.Single(Directory.EnumerateFiles(
-                _root,
-                ".listenarr-copy-cleanup-*.journal",
-                SearchOption.TopDirectoryOnly));
+            else
+            {
+                Assert.False(cleanup.SourceRemoved);
+                Assert.Equal("replacement audio", await File.ReadAllTextAsync(destinationFile));
+                var retention = Assert.Single(Directory.EnumerateFiles(
+                    destination,
+                    ".listenarr-destination-retention-*.bin",
+                    SearchOption.AllDirectories));
+                Assert.Equal("original audio", await File.ReadAllTextAsync(retention));
+                Assert.Single(Directory.EnumerateFiles(
+                    _root,
+                    ".listenarr-copy-cleanup-*.journal",
+                    SearchOption.TopDirectoryOnly));
+            }
         }
 
         [Fact]
@@ -3225,14 +3292,9 @@ namespace Listenarr.Tests.Features.Api.Services
             Assert.Equal("preserve", await File.ReadAllTextAsync(replacementFile));
         }
 
-        [Fact]
+        [WindowsFact]
         public async Task MoveDirectoryAsync_RobocopyFallback_UsesArgumentList()
         {
-            if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
-            {
-                return;
-            }
-
             var source = Path.Join(_root, "robocopy-source");
             var dest = Path.Join(_root, "robocopy-destination");
             Directory.CreateDirectory(Path.Join(source, "nested"));
@@ -3283,14 +3345,9 @@ namespace Listenarr.Tests.Features.Api.Services
             });
         }
 
-        [Fact]
+        [WindowsFact]
         public async Task MoveDirectoryAsync_ConflictingDestination_DoesNotInvokeRobocopy()
         {
-            if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
-            {
-                return;
-            }
-
             var source = Path.Join(_root, "robocopy-conflict-source");
             var destination = Path.Join(_root, "robocopy-conflict-destination");
             Directory.CreateDirectory(Path.Join(source, "nested"));
@@ -3319,14 +3376,9 @@ namespace Listenarr.Tests.Features.Api.Services
                 Path.Join(destination, "nested")));
         }
 
-        [Fact]
+        [WindowsFact]
         public async Task MoveFileAsync_RobocopyFallback_IsNotInvokedForLockedSource()
         {
-            if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
-            {
-                return;
-            }
-
             var sourceFile = Path.Join(_root, "robocopy-replaced-source.mp3");
             var destinationFile = Path.Join(_root, "robocopy-replaced-destination.mp3");
             await File.WriteAllTextAsync(sourceFile, "source");
@@ -3366,14 +3418,9 @@ namespace Listenarr.Tests.Features.Api.Services
             }
         }
 
-        [Fact]
+        [WindowsFact]
         public async Task MoveFileAsync_RobocopyFallback_IsNotInvokedWhenEnabled()
         {
-            if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
-            {
-                return;
-            }
-
             var sourceFile = Path.Join(_root, "robocopy-source.mp3");
             var destFile = Path.Join(_root, "dest", "renamed-destination.mp3");
             Directory.CreateDirectory(Path.GetDirectoryName(destFile)!);
@@ -3419,14 +3466,9 @@ namespace Listenarr.Tests.Features.Api.Services
             }
         }
 
-        [Fact]
+        [WindowsFact]
         public async Task MoveFileAsync_RobocopyExitCodeWithoutStagedFileReportsFailure()
         {
-            if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
-            {
-                return;
-            }
-
             var sourceFile = Path.Join(_root, "robocopy-unverified-source.mp3");
             var destinationFile = Path.Join(_root, "robocopy-unverified-destination.mp3");
             await File.WriteAllTextAsync(sourceFile, "content");
@@ -3464,6 +3506,15 @@ namespace Listenarr.Tests.Features.Api.Services
             {
                 sourceLock?.Dispose();
             }
+        }
+
+        private static RegistrationPublicationCompletion
+            CompletePreparedPublication(
+                IAudiobookFileRegistrationLease lease,
+                int audiobookId = 1)
+        {
+            Assert.True(lease.PrepareCleanupRecovery(audiobookId));
+            return lease.CompletePublication();
         }
 
         private sealed class RecordingProcessRunner(

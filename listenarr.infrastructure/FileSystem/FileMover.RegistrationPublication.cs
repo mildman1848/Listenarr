@@ -81,7 +81,10 @@ public partial class FileMover
         if (!gate.SourceParent.VisiblePathMatches()
             || !gate.DestinationParent.VisiblePathMatches()
             || !state.VisiblePathMatches()
-            || !AnchoredStateContainsOnly(state, "publication.claim"))
+            || !AnchoredStateContainsOnly(
+                state,
+                "publication.claim",
+                RegistrationCleanupIntentName))
         {
             return new RegistrationPublicationRecovery(true, null);
         }
@@ -146,11 +149,19 @@ public partial class FileMover
             }
 
             var physicalObjectIdentity = destinationEntry.GetObjectIdentity();
+            var sourcePhysicalObjectIdentity = sourceEntry.GetObjectIdentity();
             var registrationLease = PinnedAudiobookFileRegistrationLease.Create(
                 destinationEntry.OpenStableRegistrationCopy(),
                 destination,
                 physicalObjectIdentity,
-                sourceEntry.GetObjectIdentity(),
+                sourcePhysicalObjectIdentity,
+                audiobookId => PrepareHardlinkRegistrationCleanupRecovery(
+                    destination,
+                    stateName,
+                    physicalObjectIdentity,
+                    audiobookId,
+                    source,
+                    sourcePhysicalObjectIdentity),
                 () => CompleteHardlinkRegistrationPublication(
                     destination,
                     stateName,
@@ -267,11 +278,20 @@ public partial class FileMover
             }
 
             var physicalObjectIdentity = published.GetObjectIdentity();
+            var sourcePhysicalObjectIdentity = sourceEntry.GetObjectIdentity();
+            var sourcePath = gate.SourcePath;
             var registrationLease = PinnedAudiobookFileRegistrationLease.Create(
                 published.OpenStableRegistrationCopy(),
                 destination,
                 physicalObjectIdentity,
-                sourceEntry.GetObjectIdentity(),
+                sourcePhysicalObjectIdentity,
+                audiobookId => PrepareHardlinkRegistrationCleanupRecovery(
+                    destination,
+                    stateIdentity.CurrentStateName,
+                    physicalObjectIdentity,
+                    audiobookId,
+                    sourcePath,
+                    sourcePhysicalObjectIdentity),
                 () => CompleteHardlinkRegistrationPublication(
                     destination,
                     stateIdentity.CurrentStateName,

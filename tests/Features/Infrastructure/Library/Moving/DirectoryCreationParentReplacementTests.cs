@@ -3,74 +3,6 @@ using Xunit.Sdk;
 
 namespace Listenarr.Tests.Features.Infrastructure.Library.Moving;
 
-public sealed class DirectoryLinkFactAttribute : FactAttribute
-{
-    public DirectoryLinkFactAttribute()
-    {
-        if (IsRequired() || CanCreateDirectoryLink(out _))
-        {
-            return;
-        }
-
-        Skip = "Directory symbolic links are unavailable on this test runner.";
-    }
-
-    private static bool IsRequired() =>
-        string.Equals(
-            Environment.GetEnvironmentVariable("LISTENARR_REQUIRE_DIRECTORY_LINK_TESTS"),
-            "true",
-            StringComparison.OrdinalIgnoreCase);
-
-    private static bool CanCreateDirectoryLink(out string? reason)
-    {
-        var root = Path.Join(
-            Path.GetTempPath(),
-            $"listenarr-directory-link-capability-{Guid.NewGuid():N}");
-        var target = Path.Join(root, "target");
-        var link = Path.Join(root, "link");
-        try
-        {
-            Directory.CreateDirectory(target);
-            Directory.CreateSymbolicLink(link, target);
-            reason = null;
-            return (File.GetAttributes(link) & FileAttributes.ReparsePoint) != 0
-                && Directory.ResolveLinkTarget(link, returnFinalTarget: true) != null;
-        }
-        catch (Exception exception) when (exception is
-            IOException or UnauthorizedAccessException or PlatformNotSupportedException)
-        {
-            reason = exception.Message;
-            return false;
-        }
-        finally
-        {
-            try
-            {
-                if (Directory.Exists(link)
-                    && (File.GetAttributes(link) & FileAttributes.ReparsePoint) != 0)
-                {
-                    Directory.Delete(link);
-                }
-
-                if (Directory.Exists(target))
-                {
-                    Directory.Delete(target);
-                }
-
-                if (Directory.Exists(root))
-                {
-                    Directory.Delete(root);
-                }
-            }
-            catch (Exception exception) when (exception is
-                IOException or UnauthorizedAccessException)
-            {
-                // Best effort discovery-time cleanup.
-            }
-        }
-    }
-}
-
 [Trait("Area", "Library")]
 [Trait("Name", "DirectoryCreationParentReplacementTests")]
 [Trait("Category", "Infrastructure")]
@@ -180,16 +112,25 @@ public sealed class DirectoryCreationParentReplacementTests : BaseTests
         {
             using var boundary =
                 PinnedDirectoryCreation.OpenPinnedBoundary(linkedBoundary);
-            using var file = boundary.CreateNewFile(fileName, hiddenFile: true);
-            using (var stream = file.OpenWriteStream(
-                bufferSize: 4096,
-                asynchronous: false))
+            var file = boundary.CreateNewFile(fileName, hiddenFile: true);
+            try
             {
-                stream.WriteByte(1);
-                stream.Flush(flushToDisk: true);
-            }
+                using (var stream = file.OpenWriteStream(
+                    bufferSize: 4096,
+                    asynchronous: false))
+                {
+                    stream.WriteByte(1);
+                    stream.Flush(flushToDisk: true);
+                }
 
-            file.Delete();
+                file.Delete();
+            }
+            finally
+            {
+                // Windows FileDispositionInfo marks the pinned handle for deletion;
+                // pathname retirement becomes observable when that handle closes.
+                file.Dispose();
+            }
 
             Assert.False(File.Exists(Path.Join(physicalBoundary, fileName)));
             Assert.Empty(Directory.EnumerateDirectories(

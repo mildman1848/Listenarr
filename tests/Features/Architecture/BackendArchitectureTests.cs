@@ -212,33 +212,20 @@ public sealed class BackendArchitectureTests : BaseTests
     public void PlatformAndCapabilitySpecificTests_DoNotSilentlyPass()
     {
         var testsRoot = Path.Join(RepositoryRoot, "tests");
-        var silentPreconditionReturnPatterns = new[]
-        {
-            new Regex(
-                @"if\s*\(\s*!?OperatingSystem\.Is(?:Windows|Linux)\(\)\s*\)\s*(?:\{\s*)?return\s*;",
-                RegexOptions.CultureInvariant),
-            new Regex(
-                @"if\s*\(\s*!TryCreate[A-Za-z]+\([^)]*\)\s*\)\s*\{[^}]*\breturn\s*;",
-                RegexOptions.CultureInvariant | RegexOptions.Singleline),
-            new Regex(
-                @"if\s*\(\s*![A-Za-z_][A-Za-z0-9_]*\s*\)\s*\{\s*return\s*;",
-                RegexOptions.CultureInvariant | RegexOptions.Singleline),
-        };
         var violations = Directory
             .EnumerateFiles(testsRoot, "*.cs", SearchOption.AllDirectories)
-            .Where(file =>
-            {
-                var source = File.ReadAllText(file);
-                return silentPreconditionReturnPatterns.Any(pattern =>
-                    pattern.IsMatch(source));
-            })
-            .Select(file => Path.GetRelativePath(RepositoryRoot, file))
+            .SelectMany(file => TestEvidenceSourceAnalyzer
+                .Analyze(File.ReadAllText(file))
+                .Select(violation =>
+                    $"{Path.GetRelativePath(RepositoryRoot, file)}:{violation.Line} "
+                    + $"{violation.MethodName}: {violation.Reason}"))
             .Order(StringComparer.Ordinal)
             .ToArray();
 
         Assert.True(
             violations.Length == 0,
-            "Platform or capability-specific tests must report a real skip or fail when their required precondition is unavailable:"
+            "Tests may not silently return before proving their assertions. "
+            + "Use a platform fact/theory for OS selection and fail explicitly when a required native capability is unavailable:"
             + Environment.NewLine
             + string.Join(Environment.NewLine, violations));
     }

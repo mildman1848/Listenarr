@@ -122,10 +122,11 @@ internal sealed partial class EfLibraryDirectoryOwnershipStore
             {
                 using var live = PinnedDirectoryCreation.OpenPinnedVisibleDirectory(
                     resolved.CanonicalPath);
-                if (!string.Equals(
-                        live.GetDirectoryObjectIdentity(),
+                if (!ManagedDirectoryIdentity.Matches(
+                        resolved.DirectoryObjectIdentityVersion,
                         resolved.DirectoryObjectIdentity,
-                        StringComparison.Ordinal)
+                        resolved.OwnershipToken,
+                        live.GetDirectoryObjectIdentity())
                     || !live.VisiblePathMatches())
                 {
                     throw new InvalidOperationException(
@@ -224,7 +225,8 @@ internal sealed partial class EfLibraryDirectoryOwnershipStore
     private static bool HasDestructiveIdentity(
         LibraryDirectoryOwnership ownership) =>
         ownership.ManagedRootFolderId.HasValue
-        && ownership.DirectoryObjectIdentityVersion == 1
+        && ownership.DirectoryObjectIdentityVersion
+            == ManagedDirectoryIdentity.CurrentVersion
         && !string.IsNullOrWhiteSpace(ownership.DirectoryObjectIdentity)
         && string.IsNullOrWhiteSpace(
             ownership.DirectoryObjectIdentityUnavailableReason);

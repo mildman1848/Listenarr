@@ -1,6 +1,12 @@
 
 namespace Listenarr.Application.Audiobooks.Contracts
 {
+    public enum RegistrationPublicationCompletion
+    {
+        Completed,
+        CommittedCleanupPending
+    }
+
     public interface IAudiobookFileRegistrationLease : IDisposable
     {
         string PublicPath { get; }
@@ -8,7 +14,8 @@ namespace Listenarr.Application.Audiobooks.Contracts
         string PhysicalObjectIdentity { get; }
         string? SourcePhysicalObjectIdentity { get; }
         bool MatchesCurrentPublication();
-        bool CompletePublication();
+        bool PrepareCleanupRecovery(int audiobookId);
+        RegistrationPublicationCompletion CompletePublication();
         Task<bool> MatchesContentAsync(
             Stream candidateStream,
             CancellationToken cancellationToken = default);
@@ -58,6 +65,14 @@ namespace Listenarr.Application.Audiobooks.Contracts
             Audiobook audiobook,
             AudiobookFileOwnershipCheckResult initialOwnership,
             IAudiobookFileRegistrationLease registrationLease,
+            string? source = "scan",
+            CancellationToken cancellationToken = default);
+
+        Task<bool> RegisterPublishedGenerationWithBasePathAsync(
+            Audiobook audiobook,
+            AudiobookFileOwnershipCheckResult initialOwnership,
+            IAudiobookFileRegistrationLease registrationLease,
+            string authoritativeBasePath,
             string? source = "scan",
             CancellationToken cancellationToken = default);
 

@@ -13,6 +13,10 @@ using Listenarr.Domain.Common;
 
 namespace Listenarr.Api.Features.Downloads;
 
+public sealed record ManualImportPathPlan(
+    string DestinationPath,
+    string AudiobookBasePath);
+
 public sealed class ManualImportPathPlanner
 {
     private readonly IFileNamingService _fileNamingService;
@@ -27,10 +31,11 @@ public sealed class ManualImportPathPlanner
         return FileUtils.GetCommonDirectory(destinationPaths);
     }
 
-    public async Task<string> GeneratePathAsync(
+    public async Task<ManualImportPathPlan> GeneratePathAsync(
         Audiobook audiobook,
         AudioMetadata metadata,
         ManualImportItemDto item,
+        string destinationBasePath,
         List<RootFolder> rootFolders,
         ApplicationSettings settings,
         FileSystemPathSemantics destinationSemantics,
@@ -42,9 +47,9 @@ public sealed class ManualImportPathPlanner
         var folderPattern = settings.FolderNamingPattern;
         var filePattern = isMultiFile ? settings.MultiFileNamingPattern : settings.FileNamingPattern;
 
-        var basePath = string.IsNullOrWhiteSpace(audiobook.BasePath)
+        var basePath = string.IsNullOrWhiteSpace(destinationBasePath)
             ? string.Empty
-            : FileUtils.NormalizeStoredPath(audiobook.BasePath);
+            : FileUtils.NormalizeStoredPath(destinationBasePath);
         var configuredOutput = settings.OutputPath ?? string.Empty;
         var isCustomBasePath = IsCustomBasePath(basePath, configuredOutput, rootFolders, destinationSemantics);
 
@@ -57,6 +62,7 @@ public sealed class ManualImportPathPlanner
         var variables = BuildNamingVariables(audiobook, metadata, item, folderPattern, filePattern, isMultiFile, out var stableSuffixNumber);
 
         string relativePath;
+        string? plannedFolderRelative = null;
         var patternHasNumberTokens = !string.IsNullOrWhiteSpace(filePattern)
             && (filePattern.IndexOf("DiskNumber", StringComparison.OrdinalIgnoreCase) >= 0
                 || filePattern.IndexOf("ChapterNumber", StringComparison.OrdinalIgnoreCase) >= 0);
@@ -80,6 +86,7 @@ public sealed class ManualImportPathPlanner
         {
             var effectiveFilePattern = string.IsNullOrWhiteSpace(filePattern) ? "{Title}" : filePattern;
             var folderRelative = _fileNamingService.ApplyNamingPattern(folderPattern, variables, treatAsFilename: false);
+            plannedFolderRelative = folderRelative;
             var patternAllowsSubfolders = PatternAllowsSubfolders(effectiveFilePattern);
             var fileRelative = _fileNamingService.ApplyNamingPattern(effectiveFilePattern, variables, treatAsFilename: !patternAllowsSubfolders);
 
@@ -104,9 +111,36 @@ public sealed class ManualImportPathPlanner
             relativePath += extension;
         }
 
-        return string.IsNullOrWhiteSpace(basePath)
+        var destinationPath = string.IsNullOrWhiteSpace(basePath)
             ? relativePath
             : CombineWithOptionalBase(basePath, relativePath);
+        var audiobookBasePath = ResolveAudiobookBasePath(
+            basePath,
+            relativePath,
+            plannedFolderRelative,
+            string.IsNullOrWhiteSpace(folderPattern),
+            isCustomBasePath);
+        return new ManualImportPathPlan(destinationPath, audiobookBasePath);
+    }
+
+    private static string ResolveAudiobookBasePath(
+        string basePath,
+        string relativePath,
+        string? plannedFolderRelative,
+        bool usesLegacyPattern,
+        bool isCustomBasePath)
+    {
+        if (isCustomBasePath || string.IsNullOrWhiteSpace(basePath))
+        {
+            return basePath;
+        }
+
+        var relativeDirectory = usesLegacyPattern
+            ? Path.GetDirectoryName(relativePath)
+            : plannedFolderRelative;
+        return string.IsNullOrWhiteSpace(relativeDirectory)
+            ? basePath
+            : CombineWithOptionalBase(basePath, relativeDirectory);
     }
 
     public static string CombineWithOptionalBase(string? basePath, string candidatePath)

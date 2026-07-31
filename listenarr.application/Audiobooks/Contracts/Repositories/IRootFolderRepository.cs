@@ -26,7 +26,15 @@ namespace Listenarr.Application.Audiobooks.Contracts.Repositories
         Task<RootFolder?> GetByIdAsync(int id);
         Task<RootFolder?> GetByPathAsync(string path);
         Task AddAsync(RootFolder root);
+        Task AddAndSetDefaultAsync(
+            RootFolder root,
+            int? expectedCurrentDefaultId,
+            CancellationToken ct = default);
         Task UpdateAsync(RootFolder root);
+        Task UpdateAndSetDefaultAsync(
+            RootFolder root,
+            int? expectedCurrentDefaultId,
+            CancellationToken ct = default);
         Task RemoveAsync(int id);
         Task<RootFolder?> GetDefaultAsync();
         Task ClearDefaultExceptAsync(int? excludeId, CancellationToken ct = default);

@@ -650,7 +650,10 @@ namespace Listenarr.Tests.Features.Application.Audiobooks.Files
                     : _publicationMatches.Dequeue();
             }
 
-            public bool CompletePublication() => true;
+            public bool PrepareCleanupRecovery(int audiobookId) => true;
+
+            public RegistrationPublicationCompletion CompletePublication() =>
+                RegistrationPublicationCompletion.Completed;
 
             public async Task<bool> MatchesContentAsync(
                 Stream candidateStream,

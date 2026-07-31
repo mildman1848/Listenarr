@@ -29,12 +29,17 @@ namespace Listenarr.Tests.Features.Api.Features.Library
     {
         private async Task AddAuthorizedRootAsync(RootFolder root)
         {
-            using var rootAnchor = PinnedDirectoryCreation.OpenPinnedBoundary(root.Path);
+            var identity = await _provider
+                .GetRequiredService<IDirectoryObjectIdentityResolver>()
+                .ResolveAsync(root.Path);
+            Assert.True(identity.IsAvailable, identity.UnavailableReason);
             root.ResolvedCaseSensitivity =
                 FileSystemPathSemantics.CurrentHostDefault.CaseSensitivity;
             root.PathIdentityState = PathIdentityState.Valid;
-            root.DirectoryObjectIdentityVersion = 1;
-            root.DirectoryObjectIdentity = rootAnchor.GetDirectoryObjectIdentity();
+            root.DirectoryObjectIdentityVersion = identity.Version;
+            root.DirectoryObjectIdentity = identity.Value;
+            root.DirectoryObjectIdentityUnavailableReason =
+                identity.UnavailableReason;
             await _rootFolderRepository.AddAsync(root);
         }
 
@@ -569,27 +574,20 @@ namespace Listenarr.Tests.Features.Api.Features.Library
                     markerPath => Assert.False(File.Exists(markerPath))));
         }
 
-        [Theory]
-        [InlineData(FileSystemCaseSensitivityMode.Sensitive, true)]
-        [InlineData(FileSystemCaseSensitivityMode.Insensitive, false)]
-        public async Task FilesystemDelete_UsesResolvedSemanticsForOtherAudiobookOverlap(
-            FileSystemCaseSensitivityMode caseSensitivityMode,
-            bool expectFolderDeleted)
+        [LinuxFact]
+        public async Task FilesystemDelete_NativeCaseSensitiveCaseDistinctPath_DoesNotBlockDelete()
         {
-            if (caseSensitivityMode == FileSystemCaseSensitivityMode.Sensitive && OperatingSystem.IsWindows())
-            {
-                return;
-            }
-
-            var tempRoot = FileService.GetTempDirectory("listenarr-delete-semantics");
+            var tempRoot = FileService.GetTempDirectory(
+                "listenarr-delete-native-sensitive");
             var bookFolder = Path.Join(tempRoot, "CaseBook");
+            var alternateCasePath = Path.Join(tempRoot, "casebook");
             var audioPath = Path.Join(bookFolder, "book.mp3");
             Directory.CreateDirectory(bookFolder);
             await File.WriteAllTextAsync(audioPath, "audio");
             await AddAuthorizedRootAsync(new RootFolderBuilder()
                 .WithName("Library")
                 .WithPath(tempRoot)
-                .WithCaseSensitivityMode(caseSensitivityMode)
+                .WithCaseSensitivityMode(FileSystemCaseSensitivityMode.Auto)
                 .WithIsDefault()
                 .Build());
             var audiobook = await _audiobookRepository.AddAsync(new AudiobookBuilder()
@@ -601,16 +599,62 @@ namespace Listenarr.Tests.Features.Api.Features.Library
             await _audiobookRepository.AddAsync(new AudiobookBuilder()
                 .WithId(902)
                 .WithTitle("Other Case Book")
-                .WithBasePath(Path.Join(tempRoot, "casebook"))
+                .WithBasePath(alternateCasePath)
                 .Build());
 
             var service = _provider.GetRequiredService<IAudiobookFilesystemDeleteService>();
             var result = await service.DeleteAsync(audiobook, deleteFolder: true);
 
-            Assert.True(
-                result.DeletedFolder == expectFolderDeleted,
-                string.Join("; ", result.Warnings));
-            Assert.Equal(!expectFolderDeleted, Directory.Exists(bookFolder));
+            Assert.True(result.DeletedFolder, string.Join("; ", result.Warnings));
+            Assert.False(Directory.Exists(bookFolder));
+            Assert.False(File.Exists(audioPath));
+        }
+
+        [WindowsFact]
+        public async Task FilesystemDelete_NativeCaseInsensitivePhysicalAlias_BlocksDelete()
+        {
+            var tempRoot = FileService.GetTempDirectory(
+                "listenarr-delete-native-insensitive");
+            var bookFolder = Path.Join(tempRoot, "CaseBook");
+            var alternateCasePath = Path.Join(tempRoot, "casebook");
+            var audioPath = Path.Join(bookFolder, "book.mp3");
+            Directory.CreateDirectory(bookFolder);
+            await File.WriteAllTextAsync(audioPath, "audio");
+            await AddAuthorizedRootAsync(new RootFolderBuilder()
+                .WithName("Library")
+                .WithPath(tempRoot)
+                .WithCaseSensitivityMode(FileSystemCaseSensitivityMode.Auto)
+                .WithIsDefault()
+                .Build());
+            var audiobook = await _audiobookRepository.AddAsync(new AudiobookBuilder()
+                .WithId(901)
+                .WithTitle("Case Book")
+                .WithBasePath(bookFolder)
+                .WithFilePath(audioPath)
+                .Build());
+            await _audiobookRepository.AddAsync(new AudiobookBuilder()
+                .WithId(902)
+                .WithTitle("Other Case Book")
+                .WithBasePath(alternateCasePath)
+                .Build());
+            var identityResolver = _provider
+                .GetRequiredService<IDirectoryObjectIdentityResolver>();
+            var originalIdentity = await identityResolver.ResolveAsync(bookFolder);
+            var aliasIdentity = await identityResolver.ResolveAsync(alternateCasePath);
+            Assert.True(originalIdentity.IsAvailable, originalIdentity.UnavailableReason);
+            Assert.True(aliasIdentity.IsAvailable, aliasIdentity.UnavailableReason);
+            Assert.Equal(originalIdentity.Value, aliasIdentity.Value);
+
+            var service = _provider.GetRequiredService<IAudiobookFilesystemDeleteService>();
+            var result = await service.DeleteAsync(audiobook, deleteFolder: true);
+
+            Assert.False(result.DeletedFolder);
+            Assert.Contains(
+                result.Warnings,
+                warning => warning.Contains(
+                    "another audiobook references that location",
+                    StringComparison.OrdinalIgnoreCase));
+            Assert.True(Directory.Exists(bookFolder));
             Assert.False(File.Exists(audioPath));
         }
 

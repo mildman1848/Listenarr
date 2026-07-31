@@ -99,7 +99,7 @@ public partial class AudiobookContentMoveServiceTests
         }
     }
 
-    [Fact]
+    [FileLinkFact]
     public async Task MoveContentsAsync_NestedFileSymlink_BlocksAtomicRename()
     {
         var source = FileService.GetTempDirectory("content-move-file-link-src");
@@ -113,7 +113,8 @@ public partial class AudiobookContentMoveServiceTests
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or PlatformNotSupportedException)
         {
-            return;
+            throw new Xunit.Sdk.XunitException(
+                $"This native filesystem regression requires symbolic-link support: {exception.Message}");
         }
 
         try

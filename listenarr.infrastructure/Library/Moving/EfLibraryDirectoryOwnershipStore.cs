@@ -389,8 +389,11 @@ internal sealed partial class EfLibraryDirectoryOwnershipStore(
         LibraryDirectoryOwnershipState state,
         string? reason,
         int? managedRootFolderId,
-        string directoryObjectIdentity,
-        DateTime now) => new()
+        string nativeDirectoryIdentity,
+        DateTime now)
+    {
+        var ownershipToken = Guid.NewGuid().ToString("N");
+        return new LibraryDirectoryOwnership
         {
             Path = claim.Path,
             CanonicalPath = canonicalPath,
@@ -402,14 +405,16 @@ internal sealed partial class EfLibraryDirectoryOwnershipStore(
             PathIdentityBoundary = canonicalPath,
             PathIdentityLookupKey = lookupKey,
             PathOwnershipKey = ownershipKey,
-            OwnershipToken = Guid.NewGuid().ToString("N"),
+            OwnershipToken = ownershipToken,
             State = state,
             CreationWorkflow = claim.CreationWorkflow,
             CreationOperationId = claim.CreationOperationId,
             AudiobookId = claim.AudiobookId,
             ManagedRootFolderId = managedRootFolderId,
-            DirectoryObjectIdentityVersion = 1,
-            DirectoryObjectIdentity = directoryObjectIdentity,
+            DirectoryObjectIdentityVersion = ManagedDirectoryIdentity.CurrentVersion,
+            DirectoryObjectIdentity = ManagedDirectoryIdentity.Create(
+                ownershipToken,
+                nativeDirectoryIdentity),
             DirectoryObjectIdentityUnavailableReason = managedRootFolderId.HasValue
                 ? null
                 : "The claim was not created through an authorized managed root.",
@@ -417,6 +422,7 @@ internal sealed partial class EfLibraryDirectoryOwnershipStore(
             CreatedAt = now,
             UpdatedAt = now
         };
+    }
 
     private static void EnsureAuthorizedPhysicalIdentity(
         LibraryDirectoryOwnership ownership,
@@ -425,11 +431,11 @@ internal sealed partial class EfLibraryDirectoryOwnershipStore(
     {
         if (!managedRootFolderId.HasValue
             || ownership.ManagedRootFolderId != managedRootFolderId
-            || ownership.DirectoryObjectIdentityVersion != 1
-            || !string.Equals(
+            || !ManagedDirectoryIdentity.Matches(
+                ownership.DirectoryObjectIdentityVersion,
                 ownership.DirectoryObjectIdentity,
-                directoryObjectIdentity,
-                StringComparison.Ordinal)
+                ownership.OwnershipToken,
+                directoryObjectIdentity)
             || (ownership.State !=
                     LibraryDirectoryOwnershipState.Unavailable
                 && !string.IsNullOrWhiteSpace(

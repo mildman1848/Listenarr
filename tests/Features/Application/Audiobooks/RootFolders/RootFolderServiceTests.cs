@@ -307,15 +307,16 @@ namespace Listenarr.Tests.Features.Application.Audiobooks.RootFolders
                 var exception = await Assert.ThrowsAsync<ArgumentException>(() =>
                     svc.CreateAsync(new RootFolder { Name = "Whitespace Root", Path = pathWithTrailingWhitespace }));
                 Assert.Contains("space or period", exception.Message, StringComparison.OrdinalIgnoreCase);
-                return;
             }
-
-            var created = await svc.CreateAsync(new RootFolder
+            else
             {
-                Name = "Whitespace Root",
-                Path = pathWithTrailingWhitespace
-            });
-            Assert.Equal(pathWithTrailingWhitespace, created.Path);
+                var created = await svc.CreateAsync(new RootFolder
+                {
+                    Name = "Whitespace Root",
+                    Path = pathWithTrailingWhitespace
+                });
+                Assert.Equal(pathWithTrailingWhitespace, created.Path);
+            }
         }
 
         [Fact]

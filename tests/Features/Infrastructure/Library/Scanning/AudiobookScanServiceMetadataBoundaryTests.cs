@@ -7,18 +7,16 @@ namespace Listenarr.Tests.Features.Infrastructure.Library.Scanning;
 [Trait("Category", "Infrastructure")]
 public sealed class AudiobookScanServiceMetadataBoundaryTests : BaseTests
 {
-    [Fact]
+    [LinuxFact]
     public async Task ScanAsync_CaseDistinctMetadataFolders_RemainConflicting()
     {
         var root = FileService.GetTempDirectory("scan-service-case-distinct-metadata");
         var initialResolution = await _provider
             .GetRequiredService<IFileSystemSemanticsResolver>()
             .ResolveAsync(root);
-        if (initialResolution.Semantics.CaseSensitivity
-            != FileSystemCaseSensitivity.Sensitive)
-        {
-            return;
-        }
+        Assert.Equal(
+            FileSystemCaseSensitivity.Sensitive,
+            initialResolution.Semantics.CaseSensitivity);
 
         var upperDirectory = Path.Join(root, "Metadata Book");
         var lowerDirectory = Path.Join(root, "metadata book");

@@ -60,7 +60,7 @@ public class LibraryController_DeleteLinkSafetyTests : BaseTests
         Directory.Delete(linkedDirectory, recursive: false);
     }
 
-    [Fact]
+    [FileLinkFact]
     public async Task FilesystemDelete_LinkedFileDoesNotDeleteExternalFile()
     {
         var tempRoot = FileService.GetTempDirectory("listenarr-delete-file-link-root");
@@ -80,7 +80,8 @@ public class LibraryController_DeleteLinkSafetyTests : BaseTests
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or PlatformNotSupportedException)
         {
-            return;
+            throw new Xunit.Sdk.XunitException(
+                $"This native filesystem test requires symbolic-link support: {exception.Message}");
         }
 
         var audiobook = await _audiobookRepository.AddAsync(new AudiobookBuilder()

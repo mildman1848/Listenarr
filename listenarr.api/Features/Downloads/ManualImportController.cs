@@ -207,6 +207,7 @@ public partial class ManualImportController : ControllerBase
                 async operationToken =>
                 {
                     OperationCanceledException? postMutationCancellation = null;
+                    var planningBasePaths = new Dictionary<int, string>();
                     try
                     {
                         foreach (var item in orderedItems)
@@ -226,6 +227,7 @@ public partial class ManualImportController : ControllerBase
                                 sourceDirectory,
                                 sourceSemantics,
                                 destinationTracker,
+                                planningBasePaths,
                                 rootFolders,
                                 appSettings,
                                 fileCount > 1,

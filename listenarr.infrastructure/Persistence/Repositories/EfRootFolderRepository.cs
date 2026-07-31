@@ -15,8 +15,12 @@
  * You should have received a copy of the GNU Affero General Public License
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
+using System.Data;
+using Listenarr.Application.Common.Exceptions;
 using Listenarr.Domain.Common;
+using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Storage;
 using Microsoft.Extensions.Logging;
 
 namespace Listenarr.Infrastructure.Persistence.Repositories
@@ -38,6 +42,19 @@ namespace Listenarr.Infrastructure.Persistence.Repositories
             ctx.RootFolders.Add(root);
             await ctx.SaveChangesAsync();
         }
+
+        public Task AddAndSetDefaultAsync(
+            RootFolder root,
+            int? expectedCurrentDefaultId,
+            CancellationToken ct = default) =>
+            MutateDefaultAsync(
+                expectedCurrentDefaultId,
+                async (ctx, token) =>
+                {
+                    ctx.RootFolders.Add(root);
+                    await Task.CompletedTask;
+                },
+                ct);
 
         public async Task<List<RootFolder>> GetAllAsync()
         {
@@ -81,6 +98,21 @@ namespace Listenarr.Infrastructure.Persistence.Repositories
             await ctx.SaveChangesAsync();
         }
 
+        public Task UpdateAndSetDefaultAsync(
+            RootFolder root,
+            int? expectedCurrentDefaultId,
+            CancellationToken ct = default) =>
+            MutateDefaultAsync(
+                expectedCurrentDefaultId,
+                async (ctx, token) =>
+                {
+                    var existing = await ctx.RootFolders
+                        .FirstOrDefaultAsync(candidate => candidate.Id == root.Id, token)
+                        ?? throw new KeyNotFoundException("Root folder not found");
+                    ctx.Entry(existing).CurrentValues.SetValues(root);
+                },
+                ct);
+
         public async Task<RootFolder?> GetDefaultAsync()
         {
             await using var ctx = await _dbFactory.CreateDbContextAsync();
@@ -95,6 +127,124 @@ namespace Listenarr.Infrastructure.Persistence.Repositories
                 .ToListAsync(ct);
             foreach (var o in others) o.IsDefault = false;
             if (others.Count > 0) await ctx.SaveChangesAsync(ct);
+        }
+
+        private async Task MutateDefaultAsync(
+            int? expectedCurrentDefaultId,
+            Func<ListenArrDbContext, CancellationToken, Task> mutation,
+            CancellationToken ct)
+        {
+            ArgumentNullException.ThrowIfNull(mutation);
+            await using var ctx = await _dbFactory.CreateDbContextAsync(ct);
+            await using var transaction =
+                await BeginDefaultMutationTransactionAsync(ctx, ct);
+
+            var currentDefaultId = await ctx.RootFolders
+                .Where(root => root.IsDefault)
+                .Select(root => (int?)root.Id)
+                .SingleOrDefaultAsync(ct);
+            if (currentDefaultId != expectedCurrentDefaultId)
+            {
+                throw new ApplicationConflictException(
+                    "root-folder-default-stale",
+                    "The default root folder changed before this update could be committed.");
+            }
+
+            if (ctx.Database.IsRelational())
+            {
+                var cleared = await ctx.RootFolders
+                    .Where(root => root.IsDefault)
+                    .ExecuteUpdateAsync(
+                        setters => setters.SetProperty(
+                            root => root.IsDefault,
+                            false),
+                        ct);
+                if ((expectedCurrentDefaultId.HasValue && cleared != 1)
+                    || (!expectedCurrentDefaultId.HasValue && cleared != 0))
+                {
+                    throw new ApplicationConflictException(
+                        "root-folder-default-stale",
+                        "The default root folder changed before this update could be committed.");
+                }
+            }
+            else
+            {
+                var currentDefaults = await ctx.RootFolders
+                    .Where(root => root.IsDefault)
+                    .ToListAsync(ct);
+                foreach (var currentDefault in currentDefaults)
+                {
+                    currentDefault.IsDefault = false;
+                }
+            }
+
+            await mutation(ctx, ct);
+            await ctx.SaveChangesAsync(ct);
+            if (transaction != null)
+            {
+                await transaction.CommitAsync(ct);
+            }
+        }
+
+        private static async Task<DefaultMutationTransactionLease?>
+            BeginDefaultMutationTransactionAsync(
+                ListenArrDbContext context,
+                CancellationToken cancellationToken)
+        {
+            if (!context.Database.IsRelational())
+            {
+                return null;
+            }
+
+            if (!context.Database.IsSqlite())
+            {
+                return new DefaultMutationTransactionLease(
+                    await context.Database.BeginTransactionAsync(
+                        IsolationLevel.Serializable,
+                        cancellationToken));
+            }
+
+            await context.Database.OpenConnectionAsync(cancellationToken);
+            var connection = context.Database.GetDbConnection()
+                as SqliteConnection
+                ?? throw new InvalidOperationException(
+                    "The SQLite provider did not expose a SQLite connection.");
+            var sqliteTransaction = connection.BeginTransaction(
+                IsolationLevel.Serializable,
+                deferred: false);
+            try
+            {
+                var enlisted = await context.Database.UseTransactionAsync(
+                    sqliteTransaction,
+                    cancellationToken)
+                    ?? throw new InvalidOperationException(
+                        "The immediate SQLite transaction could not be enlisted.");
+                return new DefaultMutationTransactionLease(
+                    enlisted,
+                    sqliteTransaction);
+            }
+            catch
+            {
+                await sqliteTransaction.DisposeAsync();
+                throw;
+            }
+        }
+
+        private sealed class DefaultMutationTransactionLease(
+            IDbContextTransaction transaction,
+            SqliteTransaction? sqliteTransaction = null) : IAsyncDisposable
+        {
+            public Task CommitAsync(CancellationToken cancellationToken) =>
+                transaction.CommitAsync(cancellationToken);
+
+            public async ValueTask DisposeAsync()
+            {
+                await transaction.DisposeAsync();
+                if (sqliteTransaction != null)
+                {
+                    await sqliteTransaction.DisposeAsync();
+                }
+            }
         }
 
         public async Task<bool> HasAudiobooksUnderPathAsync(

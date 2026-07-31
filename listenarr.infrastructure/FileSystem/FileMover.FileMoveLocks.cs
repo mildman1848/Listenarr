@@ -124,6 +124,12 @@ public partial class FileMover
                 LogRedaction.SanitizeFilePath(destinationFile));
             return null;
         }
+        if (AfterFileMoveEndpointsResolvedForTestAsync != null)
+        {
+            await AfterFileMoveEndpointsResolvedForTestAsync(
+                sourceFile,
+                destinationFile);
+        }
 
         if (!allowExistingAliasForRecovery
             && await IsFilesystemAliasAsync(sourceFile, destinationFile))
@@ -194,6 +200,25 @@ public partial class FileMover
             destinationParent = PinnedDirectoryCreation.OpenPinnedHierarchyNoFollow(
                 destinationParentPath,
                 createDestinationParent);
+            var pinnedSource = await ResolveFileMoveEndpointAsync(sourceFile);
+            var pinnedDestination = await ResolveFileMoveEndpointAsync(
+                destinationFile);
+            if (pinnedSource == null
+                || pinnedDestination == null
+                || !string.Equals(
+                    pinnedSource.LockIdentity,
+                    currentSource.LockIdentity,
+                    StringComparison.Ordinal)
+                || !string.Equals(
+                    pinnedDestination.LockIdentity,
+                    currentDestination.LockIdentity,
+                    StringComparison.Ordinal)
+                || !sourceParent.VisiblePathMatches()
+                || !destinationParent.VisiblePathMatches())
+            {
+                throw new IOException(
+                    "A file-move endpoint changed while its physical parents were pinned.");
+            }
 
             lease = new FileMoveGateLease(
                 key,
@@ -279,10 +304,6 @@ public partial class FileMover
             fullPath,
             resolution.Semantics.Syntax);
         if (!TryResolvePhysicalPath(canonicalPath, out var physical))
-        {
-            return null;
-        }
-        if (physical.EncounteredLink)
         {
             return null;
         }

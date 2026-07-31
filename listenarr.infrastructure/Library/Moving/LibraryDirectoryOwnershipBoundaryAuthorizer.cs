@@ -43,14 +43,15 @@ public sealed class LibraryDirectoryOwnershipBoundaryAuthorizer(
             .FirstOrDefault();
         if (root != null)
         {
-            return AuthorizePathWithinBoundary(
+            return await AuthorizePathWithinBoundaryAsync(
                 canonicalPath,
                 semantics,
                 root.Id,
                 root.Path,
                 root.DirectoryObjectIdentityVersion,
                 root.DirectoryObjectIdentity,
-                root.DirectoryObjectIdentityUnavailableReason);
+                root.DirectoryObjectIdentityUnavailableReason,
+                cancellationToken);
         }
 
         var activeRelocations = await db.RootFolderRelocations
@@ -69,14 +70,15 @@ public sealed class LibraryDirectoryOwnershipBoundaryAuthorizer(
             .FirstOrDefault()
             ?? throw new InvalidOperationException(
                 "No configured or actively relocating root folder authorizes the retained directory.");
-        return AuthorizePathWithinBoundary(
+        return await AuthorizePathWithinBoundaryAsync(
             canonicalPath,
             semantics,
             relocation.ActiveRootFolderId!.Value,
             relocation.TargetPath,
             relocation.TargetDirectoryObjectIdentityVersion,
             relocation.TargetDirectoryObjectIdentity,
-            relocation.TargetDirectoryObjectIdentityUnavailableReason);
+            relocation.TargetDirectoryObjectIdentityUnavailableReason,
+            cancellationToken);
     }
 
     internal async Task<ManagedLibraryBoundaryAuthorization> AuthorizeAsync(
@@ -100,27 +102,16 @@ public sealed class LibraryDirectoryOwnershipBoundaryAuthorizer(
             throw new InvalidOperationException(
                 "The requested directory boundary is not a configured root folder.");
         }
-        if (root.DirectoryObjectIdentityVersion != 1
-            || string.IsNullOrWhiteSpace(root.DirectoryObjectIdentity)
-            || !string.IsNullOrWhiteSpace(root.DirectoryObjectIdentityUnavailableReason))
-        {
-            throw new InvalidOperationException(
-                "The configured root folder has no usable physical identity; destructive ownership operations are disabled.");
-        }
-
         var anchor = PinnedDirectoryCreation.OpenPinnedBoundary(canonicalBoundary);
         try
         {
-            var liveIdentity = anchor.GetDirectoryObjectIdentity();
-            if (!string.Equals(
-                    liveIdentity,
+            var liveIdentity = await ManagedDirectoryEnrollment
+                .RequireMatchingEnrollmentAsync(
+                    anchor,
+                    root.DirectoryObjectIdentityVersion,
                     root.DirectoryObjectIdentity,
-                    StringComparison.Ordinal)
-                || !anchor.VisiblePathMatches())
-            {
-                throw new InvalidOperationException(
-                    "The configured root folder no longer identifies its authorized physical directory.");
-            }
+                    root.DirectoryObjectIdentityUnavailableReason,
+                    cancellationToken);
 
             return new ManagedLibraryBoundaryAuthorization(
                 root.Id,
@@ -160,14 +151,15 @@ public sealed class LibraryDirectoryOwnershipBoundaryAuthorizer(
                 root.Path,
                 semantics))
         {
-            return AuthorizePathWithinBoundary(
+            return await AuthorizePathWithinBoundaryAsync(
                 canonicalPath,
                 semantics,
                 root.Id,
                 root.Path,
                 root.DirectoryObjectIdentityVersion,
                 root.DirectoryObjectIdentity,
-                root.DirectoryObjectIdentityUnavailableReason);
+                root.DirectoryObjectIdentityUnavailableReason,
+                cancellationToken);
         }
 
         var activeRelocations = await db.RootFolderRelocations
@@ -187,35 +179,31 @@ public sealed class LibraryDirectoryOwnershipBoundaryAuthorizer(
             .FirstOrDefault()
             ?? throw new InvalidOperationException(
                 "The authorized directory is outside its managed root and active relocation target.");
-        return AuthorizePathWithinBoundary(
+        return await AuthorizePathWithinBoundaryAsync(
             canonicalPath,
             semantics,
             root.Id,
             relocation.TargetPath,
             relocation.TargetDirectoryObjectIdentityVersion,
             relocation.TargetDirectoryObjectIdentity,
-            relocation.TargetDirectoryObjectIdentityUnavailableReason);
+            relocation.TargetDirectoryObjectIdentityUnavailableReason,
+            cancellationToken);
     }
 
-    private static AuthorizedLibraryDirectoryOwnership AuthorizePathWithinBoundary(
-        string canonicalPath,
-        FileSystemPathSemantics semantics,
-        int rootFolderId,
-        string boundaryPath,
-        int? expectedIdentityVersion,
-        string? expectedIdentity,
-        string? identityUnavailableReason)
+    private static async Task<AuthorizedLibraryDirectoryOwnership>
+        AuthorizePathWithinBoundaryAsync(
+            string canonicalPath,
+            FileSystemPathSemantics semantics,
+            int rootFolderId,
+            string boundaryPath,
+            int? expectedIdentityVersion,
+            string? expectedIdentity,
+            string? identityUnavailableReason,
+            CancellationToken cancellationToken)
     {
         var parentPath = Path.GetDirectoryName(canonicalPath)
             ?? throw new InvalidOperationException(
                 "The authorized directory has no parent.");
-        if (expectedIdentityVersion != 1
-            || string.IsNullOrWhiteSpace(expectedIdentity)
-            || !string.IsNullOrWhiteSpace(identityUnavailableReason))
-        {
-            throw new InvalidOperationException(
-                "The managed root boundary has no usable physical identity.");
-        }
         if (!FileSystemPathIdentity.IsSameOrInside(
                 parentPath,
                 boundaryPath,
@@ -228,15 +216,12 @@ public sealed class LibraryDirectoryOwnershipBoundaryAuthorizer(
         var boundary = PinnedDirectoryCreation.OpenPinnedBoundary(boundaryPath);
         try
         {
-            if (!string.Equals(
-                    boundary.GetDirectoryObjectIdentity(),
-                    expectedIdentity,
-                    StringComparison.Ordinal)
-                || !boundary.VisiblePathMatches())
-            {
-                throw new InvalidOperationException(
-                    "The managed root boundary no longer identifies its authorized physical directory.");
-            }
+            await ManagedDirectoryEnrollment.RequireMatchingEnrollmentAsync(
+                boundary,
+                expectedIdentityVersion,
+                expectedIdentity,
+                identityUnavailableReason,
+                cancellationToken);
 
             var current = boundary.Duplicate();
             try

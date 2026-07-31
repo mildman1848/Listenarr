@@ -93,6 +93,11 @@ namespace Listenarr.Application.Common.Contracts
         Task RunCycleAsync(CancellationToken cancellationToken);
     }
 
+    public interface IRegistrationPublicationCleanupProcessor
+    {
+        Task RunCycleAsync(CancellationToken cancellationToken);
+    }
+
     public interface IImageCacheCleanupProcessor
     {
         Task RunCycleAsync(CancellationToken cancellationToken);

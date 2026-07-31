@@ -354,13 +354,14 @@ namespace Listenarr.Application.Downloads.Import
                                 continue;
                             }
 
-                            if (!registrationLease.CompletePublication())
+                            var completion = registrationLease.CompletePublication();
+                            if (completion
+                                == RegistrationPublicationCompletion.CommittedCleanupPending)
                             {
-                                results.Add(ImportResult.ImportFailure(
-                                    completedFileAction,
-                                    file,
-                                    destination));
-                                continue;
+                                logger.LogWarning(
+                                    "Download import committed for audiobook {AudiobookId}, but registration-publication cleanup remains pending for {Destination}",
+                                    audiobook.Id,
+                                    LogRedaction.SanitizeFilePath(destination));
                             }
 
                             ImportDestinationPlanner.Commit(

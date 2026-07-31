@@ -9,7 +9,7 @@ namespace Listenarr.Tests.Features.Api.Services;
 [Trait("Category", "FileSystem")]
 public sealed class FileMoverDirectoryParentLinkRegressionTests : BaseTests
 {
-    [Fact]
+    [DirectoryLinkFact]
     public async Task MoveDirectoryAsync_LinkedDestinationAncestor_IsRejectedBeforeFallbackWrites()
     {
         var root = FileService.GetTempDirectory("directory-parent-link");
@@ -27,7 +27,8 @@ public sealed class FileMoverDirectoryParentLinkRegressionTests : BaseTests
         catch (Exception exception) when (exception is
             IOException or UnauthorizedAccessException or PlatformNotSupportedException)
         {
-            return;
+            throw new Xunit.Sdk.XunitException(
+                $"This native filesystem regression requires symbolic-link support: {exception.Message}");
         }
 
         var destination = Path.Join(linkedRoot, "parent", "book");
@@ -49,7 +50,7 @@ public sealed class FileMoverDirectoryParentLinkRegressionTests : BaseTests
         Assert.False(Directory.Exists(physicalDestination));
     }
 
-    [Fact]
+    [DirectoryLinkFact]
     public async Task MoveDirectoryAsync_DestinationAncestorReplacedBeforeParentOpen_IsRejected()
     {
         var root = FileService.GetTempDirectory("directory-parent-open-race");
@@ -72,7 +73,8 @@ public sealed class FileMoverDirectoryParentLinkRegressionTests : BaseTests
         catch (Exception exception) when (exception is
             IOException or UnauthorizedAccessException or PlatformNotSupportedException)
         {
-            return;
+            throw new Xunit.Sdk.XunitException(
+                $"This native filesystem regression requires symbolic-link support: {exception.Message}");
         }
 
         var destination = Path.Join(lexicalParent, "book");

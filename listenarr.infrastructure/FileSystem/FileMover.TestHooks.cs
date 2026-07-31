@@ -7,6 +7,11 @@ public partial class FileMover
     internal Action? BeforeDirectoryMoveAttemptForTest { get; init; }
     internal Func<FileAction, string, string, Task>? BeforeFileSameContentShortcutForTestAsync { get; init; }
     internal Func<FileAction, string, string, Task>? AfterFileEndpointsPinnedForTestAsync { get; init; }
+    internal Func<string, string, Task>? AfterFileMoveEndpointsResolvedForTestAsync
+    {
+        get;
+        init;
+    }
     internal Func<FileAction, string, string, Task>? AfterFileEntriesPinnedForTestAsync { get; init; }
     internal Func<FileAction, string, string, Task>? AfterPinnedSourceContentCapturedForTestAsync { get; init; }
     internal Func<Task>? BeforePinnedHardlinkCreationForTestAsync { get; init; }
@@ -14,6 +19,11 @@ public partial class FileMover
     internal Func<Task>? AfterRegistrationPublicationClaimPreparedForTestAsync { get; init; }
     internal Func<Task>? AfterRegistrationDestinationPublishedForTestAsync { get; init; }
     internal Action? AfterRegistrationPublicationClaimRetiredForTest { get; init; }
+    internal Action? AfterUncommittedRegistrationDestinationRetiredForTest
+    {
+        get;
+        init;
+    }
     internal Func<string, Task>? AfterPreparedMoveSourceDeletedForTestAsync { get; init; }
     internal bool DisableNativeFileRenameForTest { get; init; }
     internal Action<string>? BeforeFileMoveDurabilityBarrierForTest { get; init; }

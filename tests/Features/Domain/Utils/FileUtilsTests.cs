@@ -155,10 +155,7 @@ namespace Listenarr.Tests.Features.Domain.Utils
             {
                 // Deny write permission for the current user
                 var currentUser = WindowsIdentity.GetCurrent()?.User;
-                if (currentUser == null)
-                {
-                    return; // can't determine user, skip
-                }
+                Assert.NotNull(currentUser);
 
                 var rule = new FileSystemAccessRule(currentUser, FileSystemRights.CreateFiles | FileSystemRights.Write, InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit, PropagationFlags.None, AccessControlType.Deny);
                 var security = dirInfo.GetAccessControl();
@@ -554,7 +551,7 @@ namespace Listenarr.Tests.Features.Domain.Utils
             }
         }
 
-        [Fact]
+        [DirectoryLinkFact]
         public void TryValidateMutationTarget_BlocksDirectorySymlinkEscape()
         {
             var root = Path.Join(Path.GetTempPath(), "fu-mutation-" + Guid.NewGuid().ToString("N"));
@@ -571,13 +568,13 @@ namespace Listenarr.Tests.Features.Domain.Utils
                 }
                 catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or PlatformNotSupportedException)
                 {
-                    return;
+                    throw new Xunit.Sdk.XunitException(
+                        $"This native filesystem regression requires symbolic-link support: {exception.Message}");
                 }
 
-                if (!Directory.Exists(linkPath))
-                {
-                    return;
-                }
+                Assert.True(
+                    Directory.Exists(linkPath),
+                    "The symbolic-link directory must be visible before mutation validation runs.");
 
                 var target = Path.Join(linkPath, "escape.mp3");
                 var ok = new LocalFileSystem().TryValidateMutationTarget(target, [root], out _, out var reason);
@@ -1067,13 +1064,14 @@ namespace Listenarr.Tests.Features.Domain.Utils
                     @"C:\Books\AuthorA",
                     @"c:\Books\AuthorB"
                 ]));
-                return;
             }
-
-            Assert.Equal("/", FileUtils.GetCommonPathForDirectories([
-                "/books/AuthorA",
-                "/Books/AuthorB"
-            ]));
+            else
+            {
+                Assert.Equal("/", FileUtils.GetCommonPathForDirectories([
+                    "/books/AuthorA",
+                    "/Books/AuthorB"
+                ]));
+            }
         }
 
         [Fact]

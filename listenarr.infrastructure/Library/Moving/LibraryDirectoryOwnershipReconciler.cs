@@ -139,26 +139,70 @@ public sealed class LibraryDirectoryOwnershipReconciler(
                         "The owned directory and its recovery quarantine are missing.");
                 using var directory = publication.OpenCreatedDirectoryAnchor();
                 var liveIdentity = directory.GetDirectoryObjectIdentity();
-                if (ownership.DirectoryObjectIdentityVersion.HasValue
-                    && !string.Equals(
-                        ownership.DirectoryObjectIdentity,
-                        liveIdentity,
-                        StringComparison.Ordinal))
+                var priorIdentity = CloneForIdentityMigration(ownership);
+                var requiresIdentityMigration = false;
+                if (ownership.DirectoryObjectIdentityVersion
+                    == ManagedDirectoryIdentity.CurrentVersion)
+                {
+                    if (!ManagedDirectoryIdentity.Matches(
+                            ownership.DirectoryObjectIdentityVersion,
+                            ownership.DirectoryObjectIdentity,
+                            ownership.OwnershipToken,
+                            liveIdentity))
+                    {
+                        throw new InvalidOperationException(
+                            "The live directory differs from its persisted Listenarr enrollment identity.");
+                    }
+                }
+                else if (ownership.DirectoryObjectIdentityVersion == 1)
+                {
+                    if (!string.Equals(
+                            ownership.DirectoryObjectIdentity,
+                            liveIdentity,
+                            StringComparison.Ordinal))
+                    {
+                        throw new InvalidOperationException(
+                            "The live directory differs from its legacy physical identity.");
+                    }
+
+                    requiresIdentityMigration = true;
+                }
+                else if (ownership.DirectoryObjectIdentityVersion.HasValue)
                 {
                     throw new InvalidOperationException(
-                        "The live directory differs from its persisted physical identity.");
+                        "The persisted directory identity version cannot be reconciled automatically.");
+                }
+                else
+                {
+                    requiresIdentityMigration = true;
                 }
 
                 ownership.ManagedRootFolderId = authorization.RootFolderId;
-                ownership.DirectoryObjectIdentityVersion = 1;
-                ownership.DirectoryObjectIdentity = liveIdentity;
+                ownership.DirectoryObjectIdentityVersion =
+                    ManagedDirectoryIdentity.CurrentVersion;
+                ownership.DirectoryObjectIdentity = ManagedDirectoryIdentity.Create(
+                    ownership.OwnershipToken,
+                    liveIdentity);
                 ownership.DirectoryObjectIdentityUnavailableReason = null;
                 ownership.StateReason = null;
-                await PinnedLibraryDirectoryOwnershipMarker.ReconcileAsync(
-                    ownership,
-                    directory,
-                    authorization.ParentAnchor,
-                    cancellationToken);
+                if (requiresIdentityMigration)
+                {
+                    await PinnedLibraryDirectoryOwnershipMarker
+                        .PublishIdentityMigrationAsync(
+                            priorIdentity,
+                            ownership,
+                            directory,
+                            authorization.ParentAnchor,
+                            cancellationToken);
+                }
+                else
+                {
+                    await PinnedLibraryDirectoryOwnershipMarker.ReconcileAsync(
+                        ownership,
+                        directory,
+                        authorization.ParentAnchor,
+                        cancellationToken);
+                }
                 if (ownership.State == LibraryDirectoryOwnershipState.Unavailable)
                 {
                     ownership.State = LibraryDirectoryOwnershipState.Owned;
@@ -184,6 +228,34 @@ public sealed class LibraryDirectoryOwnershipReconciler(
         }
 
     }
+
+    private static LibraryDirectoryOwnership CloneForIdentityMigration(
+        LibraryDirectoryOwnership ownership) => new()
+        {
+            Id = ownership.Id,
+            Path = ownership.Path,
+            CanonicalPath = ownership.CanonicalPath,
+            PathSyntax = ownership.PathSyntax,
+            PathCaseSensitivity = ownership.PathCaseSensitivity,
+            PathCaseSensitivityMode = ownership.PathCaseSensitivityMode,
+            PathIdentityBoundary = ownership.PathIdentityBoundary,
+            PathIdentityLookupKey = ownership.PathIdentityLookupKey,
+            PathOwnershipKey = ownership.PathOwnershipKey,
+            OwnershipToken = ownership.OwnershipToken,
+            State = ownership.State,
+            CreationWorkflow = ownership.CreationWorkflow,
+            CreationOperationId = ownership.CreationOperationId,
+            AudiobookId = ownership.AudiobookId,
+            ManagedRootFolderId = ownership.ManagedRootFolderId,
+            DirectoryObjectIdentityVersion =
+                ownership.DirectoryObjectIdentityVersion,
+            DirectoryObjectIdentity = ownership.DirectoryObjectIdentity,
+            DirectoryObjectIdentityUnavailableReason =
+                ownership.DirectoryObjectIdentityUnavailableReason,
+            StateReason = ownership.StateReason,
+            CreatedAt = ownership.CreatedAt,
+            UpdatedAt = ownership.UpdatedAt
+        };
 
     private static void ReconcileRetiredMarker(
         LibraryDirectoryOwnershipRetiredMarker evidence)

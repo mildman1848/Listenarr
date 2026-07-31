@@ -530,6 +530,60 @@ namespace Listenarr.Tests.Features.Application.Downloads.Import
         }
 
         [Fact]
+        public async Task Import_WithHardlink_WhenCleanupFailsAfterRegistration_ReportsCommittedSuccess()
+        {
+            var mover = new FileMover(
+                Microsoft.Extensions.Logging.Abstractions.NullLogger<FileMover>.Instance,
+                semanticsResolver: new FileSystemSemanticsResolver())
+            {
+                AfterRegistrationPublicationClaimRetiredForTest = () =>
+                    throw new InvalidOperationException("simulated cleanup crash")
+            };
+            Init(builder => builder.WithSingleton<IFileMover>(mover));
+            await AddAuthorizedRootAsync(FileService.GetTempPath());
+
+            var basePath = FileService.GetTempDirectory("hardlink-cleanup-library");
+            var sourcePath = FileService.GetTempDirectory("hardlink-cleanup-source");
+            var source = await FileService.GetFileAsync(
+                sourcePath,
+                "audio.mp3",
+                "audio");
+            var destination = Path.Join(basePath, "audio.mp3");
+            var audiobook = await _audiobookRepository.AddAsync(
+                new AudiobookBuilder()
+                    .WithBasePath(basePath)
+                    .Build());
+            await _applicationSettingsRepository.SaveAsync(
+                new ApplicationSettingsBuilder()
+                    .WithHardlinkFileOnCompleted()
+                    .WithoutMetadataProcessing()
+                    .Build());
+            var service = _provider.GetRequiredService<IDownloadImportService>();
+
+            var result = Assert.Single(await service.ImportDownloadFilesAsync(
+                audiobook,
+                [source]));
+
+            Assert.True(result.Success, result.Message);
+            Assert.True(result.WasRegisteredToAudiobook);
+            Assert.True(File.Exists(source));
+            Assert.Equal("audio", await File.ReadAllTextAsync(destination));
+            var stateDirectory = Assert.Single(
+                Directory.EnumerateDirectories(
+                    basePath,
+                    ".listenarr-registration-publication-*.state"));
+            Assert.True(File.Exists(Path.Join(
+                stateDirectory,
+                "registration.cleanup.json")));
+            var reloaded = await _audiobookRepository.GetByIdAsync(audiobook.Id);
+            Assert.NotNull(reloaded);
+            var registered = Assert.Single(reloaded.Files!);
+            Assert.Equal(destination, registered.Path);
+            Assert.False(string.IsNullOrWhiteSpace(
+                registered.PhysicalObjectIdentity));
+        }
+
+        [Fact]
         public async Task Import_WitCopy()
         {
             await _applicationSettingsRepository.SaveAsync(new ApplicationSettingsBuilder()
@@ -1140,7 +1194,10 @@ namespace Listenarr.Tests.Features.Application.Downloads.Import
             public bool MatchesCurrentPublication() =>
                 IsCurrent && inner.MatchesCurrentPublication();
 
-            public bool CompletePublication() =>
+            public bool PrepareCleanupRecovery(int audiobookId) =>
+                inner.PrepareCleanupRecovery(audiobookId);
+
+            public RegistrationPublicationCompletion CompletePublication() =>
                 inner.CompletePublication();
 
             public Task<bool> MatchesContentAsync(

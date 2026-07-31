@@ -6,6 +6,7 @@ namespace Listenarr.Application.Audiobooks.Catalog;
 
 public partial class LibraryAddService
 {
+    private const int MaxAuthorEnrichmentCount = 32;
     private async Task<PreparedLibraryImage> PrepareLibraryImageAsync(
         AudibleBookMetadata metadata,
         SearchResult? searchResult,
@@ -99,13 +100,14 @@ public partial class LibraryAddService
         var preparedAuthorImages = new List<string>();
         try
         {
-            if (audiobook.Authors == null || !audiobook.Authors.Any())
-            {
-                return preparedAuthorImages;
-            }
-
+            var authors = (audiobook.Authors ?? [])
+                .Where(author => !string.IsNullOrWhiteSpace(author))
+                .Select(author => author.Trim())
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .Take(MaxAuthorEnrichmentCount)
+                .ToArray();
             audiobook.AuthorAsins ??= new List<string>();
-            foreach (var authorName in audiobook.Authors)
+            foreach (var authorName in authors)
             {
                 cancellationToken.ThrowIfCancellationRequested();
                 try

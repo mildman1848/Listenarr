@@ -1,3 +1,4 @@
+using Listenarr.Tests.Common;
 using Microsoft.EntityFrameworkCore;
 
 namespace Listenarr.Tests.Features.Infrastructure.Library.Moving;
@@ -213,7 +214,7 @@ public partial class AudiobookContentMoveServiceTests
         Assert.True(File.Exists(Path.Join(target, "book.m4b")));
     }
 
-    [Fact]
+    [FileLinkFact]
     public async Task MoveContentsAsync_TargetFileReplacedBeforeQuarantineDelete_PreservesQuarantineAndExternalFile()
     {
         var capabilityRoot = FileService.GetTempDirectory("content-move-target-race-capability");
@@ -229,7 +230,8 @@ public partial class AudiobookContentMoveServiceTests
         catch (Exception exception) when (exception is
             IOException or UnauthorizedAccessException or PlatformNotSupportedException)
         {
-            return;
+            throw new Xunit.Sdk.XunitException(
+                $"This native filesystem regression requires symbolic-link support: {exception.Message}");
         }
 
         File.Delete(capabilityLink);
@@ -340,16 +342,17 @@ public partial class AudiobookContentMoveServiceTests
                 target,
                 ".listenarr-destination-retention-*.bin",
                 SearchOption.AllDirectories));
-            return;
         }
-
-        Assert.IsType<MoveNeedsAttentionException>(failure);
-        Assert.Equal("replacement audio", await File.ReadAllTextAsync(targetFile));
-        var retention = Assert.Single(Directory.EnumerateFiles(
-            target,
-            ".listenarr-destination-retention-*.bin",
-            SearchOption.AllDirectories));
-        Assert.Equal("verified audio", await File.ReadAllTextAsync(retention));
+        else
+        {
+            Assert.IsType<MoveNeedsAttentionException>(failure);
+            Assert.Equal("replacement audio", await File.ReadAllTextAsync(targetFile));
+            var retention = Assert.Single(Directory.EnumerateFiles(
+                target,
+                ".listenarr-destination-retention-*.bin",
+                SearchOption.AllDirectories));
+            Assert.Equal("verified audio", await File.ReadAllTextAsync(retention));
+        }
     }
 
     [Fact]

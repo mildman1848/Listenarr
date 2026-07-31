@@ -6,12 +6,14 @@ public partial class ManualImportController
         Audiobook audiobook,
         AudiobookFileOwnershipCheckResult initialOwnership,
         IAudiobookFileRegistrationLease registrationLease,
+        string authoritativeBasePath,
         CancellationToken cancellationToken)
     {
-        return _audiobookFileService.RegisterPublishedGenerationAsync(
+        return _audiobookFileService.RegisterPublishedGenerationWithBasePathAsync(
             audiobook,
             initialOwnership,
             registrationLease,
+            authoritativeBasePath,
             "manual-import",
             cancellationToken);
     }

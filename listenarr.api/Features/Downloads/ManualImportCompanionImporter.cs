@@ -300,7 +300,17 @@ public sealed class ManualImportCompanionImporter
             return false;
         }
 
-        return registrationLease.CompletePublication();
+        var completion = registrationLease.CompletePublication();
+        if (completion
+            == RegistrationPublicationCompletion.CommittedCleanupPending)
+        {
+            _logger.LogWarning(
+                "Manual import companion committed for audiobook {AudiobookId}, but registration-publication cleanup remains pending for {Path}",
+                audiobook.Id,
+                LogRedaction.SanitizeFilePath(destinationPath));
+        }
+
+        return true;
     }
 
     private static bool TryResolveCompanionDestination(

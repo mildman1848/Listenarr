@@ -83,7 +83,8 @@ public sealed partial class RootFolderRelocationService
                     await PublishOwnershipMigrationTargetsAsync(
                         publishedPlans,
                         relocation.TargetPath,
-                        cancellationToken);
+                        cancellationToken,
+                        allowPublication: false);
                     await CompleteOwnershipMigrationMetadataAsync(
                         db,
                         relocation,
@@ -99,7 +100,8 @@ public sealed partial class RootFolderRelocationService
                     await PublishOwnershipMigrationTargetsAsync(
                         plans,
                         relocation.TargetPath,
-                        CancellationToken.None);
+                        CancellationToken.None,
+                        allowPublication: false);
                     RetireOwnershipMigrationSources(
                         plans,
                         relocation.SourcePath,

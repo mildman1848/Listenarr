@@ -91,6 +91,7 @@ public partial class AudiobookFileService
                         currentAudiobook,
                         file,
                         physicalPath,
+                        basePathMutation: null,
                         token);
                 },
                 globalToken),
@@ -101,6 +102,7 @@ public partial class AudiobookFileService
         Audiobook audiobook,
         AudiobookFile file,
         string physicalPath,
+        AudiobookBasePathMutation? basePathMutation,
         CancellationToken cancellationToken)
     {
         var authorization = await ResolveAuthorizedClaimPathAsync(
@@ -127,6 +129,11 @@ public partial class AudiobookFileService
 
         file.AudiobookId = audiobook.Id;
         file.ApplyPathIdentity(file.Path!, identity);
-        return await audiobookFileRepository.ClaimAsync(file, cancellationToken);
+        return basePathMutation == null
+            ? await audiobookFileRepository.ClaimAsync(file, cancellationToken)
+            : await audiobookFileRepository.ClaimWithBasePathAsync(
+                file,
+                basePathMutation,
+                cancellationToken);
     }
 }

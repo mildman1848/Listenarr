@@ -103,16 +103,25 @@ public sealed partial class RootFolderRelocationService
             relocation,
             sourceResolution.Semantics,
             targetResolution.Semantics);
-        var targetObjectIdentity = target.GetDirectoryObjectIdentity();
-        if (!target.VisiblePathMatches())
+        var targetNativeIdentity = target.GetDirectoryObjectIdentity();
+        var targetObjectIdentity = await ManagedDirectoryEnrollment.ResolveAsync(
+            target,
+            targetNativeIdentity,
+            enrollIfMissing: true,
+            cancellationToken);
+        if (!targetObjectIdentity.IsAvailable
+            || !target.VisiblePathMatches())
         {
             throw new InvalidOperationException(
-                "The relocation target changed while its physical identity was captured.");
+                targetObjectIdentity.UnavailableReason
+                    ?? "The relocation target changed while its enrollment identity was captured.");
         }
 
-        relocation.TargetDirectoryObjectIdentityVersion = 1;
-        relocation.TargetDirectoryObjectIdentity = targetObjectIdentity;
-        relocation.TargetDirectoryObjectIdentityUnavailableReason = null;
+        relocation.TargetDirectoryObjectIdentityVersion =
+            targetObjectIdentity.Version;
+        relocation.TargetDirectoryObjectIdentity = targetObjectIdentity.Value;
+        relocation.TargetDirectoryObjectIdentityUnavailableReason =
+            targetObjectIdentity.UnavailableReason;
         relocation.TargetIdentityEnrollmentState =
             TargetIdentityEnrollmentState.Authorized;
         relocation.Error = null;

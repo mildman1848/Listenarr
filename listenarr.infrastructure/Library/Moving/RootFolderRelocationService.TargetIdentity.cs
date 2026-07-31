@@ -59,20 +59,24 @@ public sealed partial class RootFolderRelocationService
                     "The relocation target changed while its physical identity was reserved.");
             }
 
-            return new DirectoryObjectIdentityResolution(
-                1,
-                anchor.GetDirectoryObjectIdentity(),
-                null);
+            var nativeIdentity = anchor.GetDirectoryObjectIdentity();
+            return await ManagedDirectoryEnrollment.ResolveAsync(
+                anchor,
+                nativeIdentity,
+                enrollIfMissing: true,
+                cancellationToken);
         }
 
         try
         {
             using var existing = PinnedDirectoryCreation.OpenPinnedBoundary(
                 targetPath);
-            return new DirectoryObjectIdentityResolution(
-                1,
-                existing.GetDirectoryObjectIdentity(),
-                null);
+            var nativeIdentity = existing.GetDirectoryObjectIdentity();
+            return await ManagedDirectoryEnrollment.ResolveAsync(
+                existing,
+                nativeIdentity,
+                enrollIfMissing: true,
+                cancellationToken);
         }
         catch (Exception exception) when (exception is
             IOException or UnauthorizedAccessException
@@ -100,10 +104,12 @@ public sealed partial class RootFolderRelocationService
         try
         {
             using var anchor = PinnedDirectoryCreation.OpenPinnedBoundary(path);
-            return new DirectoryObjectIdentityResolution(
-                1,
-                anchor.GetDirectoryObjectIdentity(),
-                null);
+            var nativeIdentity = anchor.GetDirectoryObjectIdentity();
+            return await ManagedDirectoryEnrollment.ResolveAsync(
+                anchor,
+                nativeIdentity,
+                enrollIfMissing: true,
+                cancellationToken);
         }
         catch (Exception exception) when (exception is
             IOException or UnauthorizedAccessException

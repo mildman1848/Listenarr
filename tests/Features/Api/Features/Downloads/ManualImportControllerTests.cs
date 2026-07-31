@@ -124,6 +124,30 @@ namespace Listenarr.Tests.Features.Api.Features.Downloads
                         It.IsAny<CancellationToken>()))
                     .ReturnsAsync(true);
                 audiobookFileServiceMock
+                    .Setup(service => service.RegisterPublishedGenerationWithBasePathAsync(
+                        It.IsAny<Audiobook>(),
+                        It.IsAny<AudiobookFileOwnershipCheckResult>(),
+                        It.IsAny<IAudiobookFileRegistrationLease>(),
+                        It.IsAny<string>(),
+                        It.IsAny<string?>(),
+                        It.IsAny<CancellationToken>()))
+                    .ReturnsAsync((
+                        Audiobook audiobook,
+                        AudiobookFileOwnershipCheckResult _,
+                        IAudiobookFileRegistrationLease registrationLease,
+                        string authoritativeBasePath,
+                        string? _,
+                        CancellationToken _) =>
+                    {
+                        if (!registrationLease.PrepareCleanupRecovery(audiobook.Id))
+                        {
+                            return false;
+                        }
+
+                        audiobook.BasePath = authoritativeBasePath;
+                        return true;
+                    });
+                audiobookFileServiceMock
                     .Setup(service => service.RefreshPhysicalGenerationAsync(
                         It.IsAny<Audiobook>(),
                         It.IsAny<int>(),
@@ -776,7 +800,9 @@ namespace Listenarr.Tests.Features.Api.Features.Downloads
                     && command.PathIdentity.HasValue
                     && command.PhysicalIdentity.HasValue
                     && !command.IsAuthoritativeScope)), Times.Once);
-            repoMock.Verify(r => r.UpdateAsync(It.Is<Audiobook>(a => a.Id == book.Id && a.BasePath == expectedScanPath)), Times.AtLeastOnce);
+            repoMock.Verify(
+                repository => repository.UpdateAsync(It.IsAny<Audiobook>()),
+                Times.Never);
         }
 
         [Fact]
@@ -836,9 +862,44 @@ namespace Listenarr.Tests.Features.Api.Features.Downloads
             var book = new Audiobook
             {
                 Id = 334,
-                Title = "Focused Scan Failure",
-                BasePath = destinationRoot
+                Title = "Focused Scan Failure"
             };
+            string? persistedBasePath = null;
+            var repository = new Mock<IAudiobookRepository>(MockBehavior.Strict);
+            repository.Setup(candidate => candidate.GetByIdAsync(book.Id))
+                .ReturnsAsync(() => new Audiobook
+                {
+                    Id = book.Id,
+                    Title = book.Title,
+                    BasePath = persistedBasePath
+                });
+            var fileService = new Mock<IAudiobookFileService>(MockBehavior.Strict);
+            fileService.Setup(candidate => candidate.CheckAudiobookFileOwnershipAsync(
+                    It.IsAny<Audiobook>(),
+                    It.IsAny<string>(),
+                    It.IsAny<string>(),
+                    It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new AudiobookFileOwnershipCheckResult(
+                    AudiobookFileOwnershipCheckOutcome.Available));
+            fileService.Setup(candidate => candidate.RegisterPublishedGenerationWithBasePathAsync(
+                    It.IsAny<Audiobook>(),
+                    It.IsAny<AudiobookFileOwnershipCheckResult>(),
+                    It.IsAny<IAudiobookFileRegistrationLease>(),
+                    It.IsAny<string>(),
+                    "manual-import",
+                    It.IsAny<CancellationToken>()))
+                .Returns<Audiobook, AudiobookFileOwnershipCheckResult, IAudiobookFileRegistrationLease, string, string?, CancellationToken>((
+                    audiobook,
+                    _,
+                    _,
+                    authoritativeBasePath,
+                    _,
+                    _) =>
+                {
+                    persistedBasePath = authoritativeBasePath;
+                    audiobook.BasePath = authoritativeBasePath;
+                    return Task.FromResult(true);
+                });
             var scanQueue = new Mock<IScanQueueService>(MockBehavior.Strict);
             scanQueue.Setup(service => service.EnqueueScanAsync(
                     It.IsAny<ScanEnqueueCommand>()))
@@ -851,7 +912,9 @@ namespace Listenarr.Tests.Features.Api.Features.Downloads
                     FolderNamingPattern = "",
                     FileNamingPattern = "{Title}"
                 },
-                scanMock: scanQueue);
+                repoMock: repository,
+                scanMock: scanQueue,
+                audiobookFileService: fileService.Object);
             var request = new ManualImportRequestDto
             {
                 Path = sourceDir,
@@ -890,6 +953,12 @@ namespace Listenarr.Tests.Features.Api.Features.Downloads
                     "Focused Scan Failure.mp3")));
             scanQueue.Verify(service => service.EnqueueScanAsync(
                 It.IsAny<ScanEnqueueCommand>()), Times.Once);
+            var reloaded = await repository.Object.GetByIdAsync(book.Id);
+            Assert.NotNull(reloaded);
+            Assert.Equal(destinationRoot, reloaded.BasePath);
+            repository.Verify(
+                candidate => candidate.UpdateAsync(It.IsAny<Audiobook>()),
+                Times.Never);
         }
 
         [Fact]
@@ -1401,19 +1470,27 @@ namespace Listenarr.Tests.Features.Api.Features.Downloads
                             registeredFile)
                         : new AudiobookFileOwnershipCheckResult(
                             AudiobookFileOwnershipCheckOutcome.Available)));
-            fileService.Setup(candidate => candidate.RegisterPublishedGenerationAsync(
+            fileService.Setup(candidate => candidate.RegisterPublishedGenerationWithBasePathAsync(
                     book,
                     It.IsAny<AudiobookFileOwnershipCheckResult>(),
                     It.IsAny<IAudiobookFileRegistrationLease>(),
+                    It.IsAny<string>(),
                     "manual-import",
                     It.IsAny<CancellationToken>()))
-                .Returns<Audiobook, AudiobookFileOwnershipCheckResult, IAudiobookFileRegistrationLease, string?, CancellationToken>((
+                .Returns<Audiobook, AudiobookFileOwnershipCheckResult, IAudiobookFileRegistrationLease, string, string?, CancellationToken>((
                     audiobook,
                     _,
                     lease,
+                    authoritativeBasePath,
                     _,
                     _) =>
                 {
+                    if (!lease.PrepareCleanupRecovery(audiobook.Id))
+                    {
+                        return Task.FromResult(false);
+                    }
+
+                    audiobook.BasePath = authoritativeBasePath;
                     registered = true;
                     registeredFile = AudiobookFile.CreateUnresolved(
                         lease.PublicPath);
@@ -1604,7 +1681,10 @@ namespace Listenarr.Tests.Features.Api.Features.Downloads
             public bool MatchesCurrentPublication() =>
                 IsCurrent && inner.MatchesCurrentPublication();
 
-            public bool CompletePublication() =>
+            public bool PrepareCleanupRecovery(int audiobookId) =>
+                inner.PrepareCleanupRecovery(audiobookId);
+
+            public RegistrationPublicationCompletion CompletePublication() =>
                 inner.CompletePublication();
 
             public Task<bool> MatchesContentAsync(
