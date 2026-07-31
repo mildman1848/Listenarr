@@ -106,8 +106,10 @@ namespace Listenarr.Application.Audiobooks.Files
             string? authoritativeBasePath,
             AudiobookBasePathCommitContext? basePathCommitContext,
             string? source,
-            CancellationToken cancellationToken) =>
-            filesystemMutationCoordinator.ExecuteExclusiveAsync(
+            CancellationToken cancellationToken)
+        {
+            ArgumentNullException.ThrowIfNull(audiobook);
+            return filesystemMutationCoordinator.ExecuteExclusiveAsync(
                 globalToken => audiobookOperationCoordinator.ExecuteExclusiveAsync(
                     audiobook.Id,
                     async token =>
@@ -142,7 +144,7 @@ namespace Listenarr.Application.Audiobooks.Files
                     },
                     globalToken),
                 cancellationToken);
-
+        }
 
         private async Task<bool> EnsureAudiobookFileCoreAsync(
             Audiobook audiobook,
@@ -378,7 +380,7 @@ namespace Listenarr.Application.Audiobooks.Files
                             var historyEntry = new History
                             {
                                 AudiobookId = audiobook.Id,
-                                AudiobookTitle = audiobook?.Title ?? "Unknown",
+                                AudiobookTitle = audiobook.Title ?? "Unknown",
                                 EventType = "File Added",
                                 Message = $"File scanned and added: {Path.GetFileName(filePath)}",
                                 Source = source ?? "Scan",

@@ -39,6 +39,32 @@ namespace Listenarr.Tests.Features.Application.Audiobooks.Files
         }
 
         [Fact]
+        public async Task EnsureAudiobookFileAsync_NullAudiobook_ThrowsArgumentNullException()
+        {
+            var service = _provider.GetRequiredService<IAudiobookFileService>();
+
+            var exception = await Assert.ThrowsAsync<ArgumentNullException>(() =>
+                service.EnsureAudiobookFileAsync(null!, "unused.m4b"));
+
+            Assert.Equal("audiobook", exception.ParamName);
+        }
+
+        [Fact]
+        public async Task EnsureAudiobookFileAsync_RegistrationLeaseWithNullAudiobook_ThrowsArgumentNullException()
+        {
+            var service = _provider.GetRequiredService<IAudiobookFileService>();
+            using var registrationLease = new SequencedRegistrationLease(
+                "unused.m4b",
+                "unused-physical-identity",
+                [true]);
+
+            var exception = await Assert.ThrowsAsync<ArgumentNullException>(() =>
+                service.EnsureAudiobookFileAsync(null!, registrationLease));
+
+            Assert.Equal("audiobook", exception.ParamName);
+        }
+
+        [Fact]
         public async Task EnsureAudiobookFileAsync_CreatesFileRecord_HappyPath()
         {
             var testFile = Path.Join(Path.GetTempPath(), $"afs-test-{Guid.NewGuid()}.m4b");

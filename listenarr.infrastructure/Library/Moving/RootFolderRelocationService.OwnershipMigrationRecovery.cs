@@ -23,10 +23,10 @@ public sealed partial class RootFolderRelocationService
             .AsNoTracking()
             .Where(relocation =>
                 relocation.OwnershipPathMigrations.Count != 0);
-        if (requestedRelocationId.HasValue)
+        if (requestedRelocationId is { } requestedId)
         {
             relocationQuery = relocationQuery.Where(relocation =>
-                relocation.Id == requestedRelocationId.Value);
+                relocation.Id == requestedId);
         }
 
         var relocationIds = await relocationQuery
