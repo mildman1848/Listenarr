@@ -163,7 +163,8 @@ internal sealed partial class PinnedDirectoryCreation
 
     private static void FlushDirectoryPathToDisk(
         SafeFileHandle pinnedHandle,
-        string path)
+        string path,
+        bool followVisibleFinalLink)
     {
         if (!OperatingSystem.IsWindows())
         {
@@ -177,14 +178,18 @@ internal sealed partial class PinnedDirectoryCreation
             FileShareAll,
             IntPtr.Zero,
             OpenExisting,
-            FileFlagBackupSemantics | FileFlagOpenReparsePoint,
+            FileFlagBackupSemantics
+                | (followVisibleFinalLink ? 0u : FileFlagOpenReparsePoint),
             IntPtr.Zero);
         if (flushHandle.IsInvalid)
         {
             throw new PlatformNotSupportedException(
                 $"The filesystem could not open a durable directory barrier for '{path}' (Windows error {Marshal.GetLastWin32Error()}).");
         }
-        EnsureWindowsParentIsNotReparsePoint(flushHandle, path);
+        if (!followVisibleFinalLink)
+        {
+            EnsureWindowsParentIsNotReparsePoint(flushHandle, path);
+        }
         if (!HandlesIdentifySameDirectory(pinnedHandle, flushHandle))
         {
             throw new InvalidOperationException(

@@ -133,7 +133,10 @@ internal sealed partial class PinnedDirectoryCreation
         internal void FlushDirectoryEntry()
         {
             ThrowIfDisposed();
-            FlushDirectoryPathToDisk(_handle, FullPath);
+            FlushDirectoryPathToDisk(
+                _handle,
+                FullPath,
+                _followVisibleFinalLink);
         }
 
         internal bool IsOnSameVolume(PinnedDirectoryAnchor directory)

@@ -51,7 +51,8 @@ internal sealed partial class PinnedDirectoryCreation
                     destinationParent.DuplicateHandleForOperation();
                 FlushDirectoryPathToDisk(
                     destinationParentHandle,
-                    destinationParent.FullPath);
+                    destinationParent.FullPath,
+                    destinationParent.FollowsVisibleFinalLink);
                 return temporary.VisiblePathMatches();
             }
             catch (Exception exception) when (exception is not (

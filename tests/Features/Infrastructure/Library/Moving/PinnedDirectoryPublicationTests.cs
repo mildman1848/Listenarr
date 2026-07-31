@@ -474,6 +474,48 @@ public sealed class PinnedDirectoryCreationTests : BaseTests
             SearchOption.TopDirectoryOnly));
     }
 
+    [DirectoryLinkFact]
+    public async Task ReplaceWithinParent_LinkedBoundary_PublishesThroughPinnedPhysicalTarget()
+    {
+        var root = FileService.GetTempDirectory(
+            "pinned-file-linked-boundary-replacement");
+        var physicalParent = Path.Join(root, "physical");
+        var linkedParent = Path.Join(root, "linked");
+        Directory.CreateDirectory(physicalParent);
+        Directory.CreateSymbolicLink(linkedParent, physicalParent);
+        await FileService.GetFileAsync(
+            physicalParent,
+            "marker.json.pending",
+            "new marker");
+        await FileService.GetFileAsync(
+            physicalParent,
+            "marker.json",
+            "expected predecessor");
+
+        using (var anchor =
+            PinnedDirectoryCreation.OpenPinnedBoundary(linkedParent))
+        using (var temporary = anchor.OpenExistingFile(
+            "marker.json.pending",
+            requireDeleteAccess: true))
+        using (var expected = anchor.OpenExistingFile(
+            "marker.json",
+            requireDeleteAccess: false))
+        {
+            temporary.ReplaceWithinParent("marker.json", expected);
+        }
+
+        Assert.Equal(
+            "new marker",
+            await File.ReadAllTextAsync(
+                Path.Join(physicalParent, "marker.json")));
+        Assert.False(File.Exists(
+            Path.Join(physicalParent, "marker.json.pending")));
+        Assert.Empty(Directory.EnumerateFiles(
+            physicalParent,
+            "*.listenarr-predecessor.tmp",
+            SearchOption.TopDirectoryOnly));
+    }
+
     [Fact]
     public async Task PublishNewFileAsync_TemporaryNameReplacedBeforeCleanup_PreservesReplacementBytes()
     {

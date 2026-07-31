@@ -282,6 +282,29 @@ public partial class FileMover
         }
     }
 
+    private static bool TryValidateUnlinkedFileOperationEndpoints(
+        string sourcePath,
+        string destinationPath,
+        out string reason)
+    {
+        if (!TryResolvePhysicalPath(sourcePath, out var sourceResolution)
+            || !TryResolvePhysicalPath(destinationPath, out var destinationResolution))
+        {
+            reason = "A file endpoint could not be resolved to a stable physical path";
+            return false;
+        }
+
+        if (sourceResolution.EncounteredLink
+            || destinationResolution.EncounteredLink)
+        {
+            reason = "A file endpoint contains a symbolic link, junction, or linked ancestor";
+            return false;
+        }
+
+        reason = string.Empty;
+        return true;
+    }
+
     private static bool IsLinkedOrUnverifiableEntry(string path)
     {
         try

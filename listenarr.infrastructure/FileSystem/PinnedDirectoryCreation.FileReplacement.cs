@@ -79,11 +79,17 @@ internal sealed partial class PinnedDirectoryCreation
             var backupName =
                 GetConditionalReplacementBackupName(destinationName);
             stableExpected.MoveWithinParent(backupName);
-            FlushDirectoryPathToDisk(_parentHandle, _parentPath);
+            FlushDirectoryPathToDisk(
+                _parentHandle,
+                _parentPath,
+                _parentFollowsVisibleFinalLink);
             try
             {
                 MoveWithinParent(destinationName);
-                FlushDirectoryPathToDisk(_parentHandle, _parentPath);
+                FlushDirectoryPathToDisk(
+                    _parentHandle,
+                    _parentPath,
+                    _parentFollowsVisibleFinalLink);
                 var publishedIdentity = GetObjectIdentity();
                 _fileHandle.Dispose();
                 _fileHandle = OpenRelativeFileStableReadWindows(
@@ -114,7 +120,10 @@ internal sealed partial class PinnedDirectoryCreation
                 throw;
             }
 
-            FlushDirectoryPathToDisk(_parentHandle, _parentPath);
+            FlushDirectoryPathToDisk(
+                _parentHandle,
+                _parentPath,
+                _parentFollowsVisibleFinalLink);
         }
 
         private void ReplaceWithinParentUnix(
@@ -141,7 +150,10 @@ internal sealed partial class PinnedDirectoryCreation
                     "Could not atomically exchange a pinned replacement marker with its expected predecessor.");
             }
 
-            FlushDirectoryPathToDisk(_parentHandle, _parentPath);
+            FlushDirectoryPathToDisk(
+                _parentHandle,
+                _parentPath,
+                _parentFollowsVisibleFinalLink);
             var originalTemporaryName = _fileName;
             using var displaced = OpenPinnedSibling(
                 originalTemporaryName,
@@ -157,7 +169,10 @@ internal sealed partial class PinnedDirectoryCreation
                         "The marker exchange displaced an unexpected generation and could not be rolled back.");
                 }
 
-                FlushDirectoryPathToDisk(_parentHandle, _parentPath);
+                FlushDirectoryPathToDisk(
+                    _parentHandle,
+                    _parentPath,
+                    _parentFollowsVisibleFinalLink);
                 throw new InvalidOperationException(
                     "The marker destination changed during its conditional exchange.");
             }
@@ -171,7 +186,10 @@ internal sealed partial class PinnedDirectoryCreation
             }
 
             displaced.Delete(immediateWindows: true);
-            FlushDirectoryPathToDisk(_parentHandle, _parentPath);
+            FlushDirectoryPathToDisk(
+                _parentHandle,
+                _parentPath,
+                _parentFollowsVisibleFinalLink);
         }
 
         private static int ExchangeRelativeFilesUnix(
@@ -225,7 +243,8 @@ internal sealed partial class PinnedDirectoryCreation
                 stableExpected.MoveWithinParent(destinationName);
                 FlushDirectoryPathToDisk(
                     stableExpected._parentHandle,
-                    stableExpected._parentPath);
+                    stableExpected._parentPath,
+                    stableExpected._parentFollowsVisibleFinalLink);
             }
             catch (Exception exception) when (exception is
                 IOException or UnauthorizedAccessException

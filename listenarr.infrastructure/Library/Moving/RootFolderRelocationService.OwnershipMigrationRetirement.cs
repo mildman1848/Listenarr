@@ -79,6 +79,20 @@ public sealed partial class RootFolderRelocationService
                         "A shared ownership marker generation changed before source-name retirement.");
                 }
 
+                if (string.Equals(
+                        Path.GetFileName(sourceSiblingMarker),
+                        Path.GetFileName(targetSiblingMarker),
+                        StringComparison.Ordinal)
+                    && string.Equals(
+                        sourceParent.GetDirectoryObjectIdentity(),
+                        targetParent.GetDirectoryObjectIdentity(),
+                        StringComparison.Ordinal))
+                {
+                    // The source and target are lexical aliases for the same physical
+                    // marker name. There is no obsolete source name to retire.
+                    continue;
+                }
+
                 sourceMarker.Delete();
                 sourceParent.FlushDirectoryEntry();
                 ValidateRetirementTarget(plan, targetParent, targetMarker);

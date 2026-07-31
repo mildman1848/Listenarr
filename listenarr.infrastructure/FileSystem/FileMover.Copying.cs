@@ -172,6 +172,20 @@ namespace Listenarr.Infrastructure.FileSystem
                     return true;
                 }
 
+                if (!TryValidateUnlinkedFileOperationEndpoints(
+                        sourceFile,
+                        destFile,
+                        out var endpointReason))
+                {
+                    LogMutation(
+                        FileMutationOutcome.Blocked,
+                        action,
+                        sourceFile,
+                        destFile,
+                        endpointReason);
+                    return false;
+                }
+
                 if (BeforeFileSameContentShortcutForTestAsync != null)
                 {
                     await BeforeFileSameContentShortcutForTestAsync(
