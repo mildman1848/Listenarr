@@ -72,7 +72,8 @@ public sealed class ScanBackgroundServiceTests : BaseTests
         {
             await secondProcessed.Task.WaitAsync(TimeSpan.FromSeconds(5));
             Assert.True(queue.TryGetJob(firstId, out var first));
-            Assert.Equal("Failed", first!.Status);
+            var firstJob = Assert.IsType<ScanJob>(first);
+            Assert.Equal("Failed", firstJob.Status);
             processor.Verify(candidate => candidate.ProcessJobAsync(
                 It.IsAny<ScanJob>(),
                 It.IsAny<CancellationToken>()), Times.Exactly(2));

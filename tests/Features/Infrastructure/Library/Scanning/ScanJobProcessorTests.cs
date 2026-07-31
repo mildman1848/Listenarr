@@ -43,8 +43,8 @@ namespace Listenarr.Tests.Features.Infrastructure.Library.Scanning
             var processor = _provider.GetRequiredService<IScanJobProcessor>();
             await processor.ProcessJobAsync(job, CancellationToken.None);
 
-            Assert.True(queue.TryGetJob(job.Id, out var updatedJob));
-            Assert.Equal("Completed", updatedJob!.Status);
+            var updatedJob = GetRequiredJob(queue, job.Id);
+            Assert.Equal("Completed", updatedJob.Status);
 
             var files = await _audiobookFileRepository.GetByAudiobookIdAsync(audiobook.Id);
             var file = Assert.Single(files);
@@ -75,8 +75,8 @@ namespace Listenarr.Tests.Features.Infrastructure.Library.Scanning
             await _provider.GetRequiredService<IScanJobProcessor>()
                 .ProcessJobAsync(job, CancellationToken.None);
 
-            Assert.True(queue.TryGetJob(job.Id, out var updatedJob));
-            Assert.Equal("Completed", updatedJob!.Status);
+            var updatedJob = GetRequiredJob(queue, job.Id);
+            Assert.Equal("Completed", updatedJob.Status);
             Assert.Empty(
                 await _audiobookFileRepository.GetByAudiobookIdAsync(audiobook.Id));
         }
@@ -115,9 +115,9 @@ namespace Listenarr.Tests.Features.Infrastructure.Library.Scanning
             var file = Assert.Single(
                 await _audiobookFileRepository.GetByAudiobookIdAsync(audiobook.Id));
             Assert.Equal(requestedFile, file.Path);
-            var persisted = await _audiobookRepository.GetByIdSnapshotAsync(
-                audiobook.Id);
-            Assert.Equal(requestedPath, persisted!.BasePath);
+            var persisted = Assert.IsType<Audiobook>(
+                await _audiobookRepository.GetByIdSnapshotAsync(audiobook.Id));
+            Assert.Equal(requestedPath, persisted.BasePath);
         }
 
         [Fact]
@@ -160,8 +160,8 @@ namespace Listenarr.Tests.Features.Infrastructure.Library.Scanning
             await _provider.GetRequiredService<IScanJobProcessor>()
                 .ProcessJobAsync(job, CancellationToken.None);
 
-            Assert.True(queue.TryGetJob(job.Id, out var updated));
-            Assert.Equal("Failed", updated!.Status);
+            var updated = GetRequiredJob(queue, job.Id);
+            Assert.Equal("Failed", updated.Status);
             Assert.Contains(
                 "not within a configured root folder",
                 updated.Error ?? string.Empty,
@@ -188,11 +188,12 @@ namespace Listenarr.Tests.Features.Infrastructure.Library.Scanning
             await _provider.GetRequiredService<IScanJobProcessor>()
                 .ProcessJobAsync(job, CancellationToken.None);
 
-            Assert.True(queue.TryGetJob(job.Id, out var updatedJob));
-            Assert.Equal("Completed", updatedJob!.Status);
+            var updatedJob = GetRequiredJob(queue, job.Id);
+            Assert.Equal("Completed", updatedJob.Status);
             Assert.Empty(await _audiobookFileRepository.GetByAudiobookIdAsync(audiobook.Id));
-            var persistedAudiobook = await _audiobookRepository.GetByIdAsync(audiobook.Id);
-            Assert.Equal(basePath, persistedAudiobook!.BasePath);
+            var persistedAudiobook = Assert.IsType<Audiobook>(
+                await _audiobookRepository.GetByIdAsync(audiobook.Id));
+            Assert.Equal(basePath, persistedAudiobook.BasePath);
         }
 
         [LinuxFact]
@@ -219,8 +220,8 @@ namespace Listenarr.Tests.Features.Infrastructure.Library.Scanning
             await _provider.GetRequiredService<IScanJobProcessor>()
                 .ProcessJobAsync(job, CancellationToken.None);
 
-            Assert.True(queue.TryGetJob(job.Id, out var updatedJob));
-            Assert.Equal("Failed", updatedJob!.Status);
+            var updatedJob = GetRequiredJob(queue, job.Id);
+            Assert.Equal("Failed", updatedJob.Status);
             Assert.False(string.IsNullOrWhiteSpace(updatedJob.Error));
             Assert.Contains(
                 "link",
@@ -265,8 +266,8 @@ namespace Listenarr.Tests.Features.Infrastructure.Library.Scanning
             var processor = _provider.GetRequiredService<IScanJobProcessor>();
             await processor.ProcessJobAsync(job, CancellationToken.None);
 
-            Assert.True(queue.TryGetJob(job.Id, out var updatedJob));
-            Assert.Equal("Completed", updatedJob!.Status);
+            var updatedJob = GetRequiredJob(queue, job.Id);
+            Assert.Equal("Completed", updatedJob.Status);
 
             var metricsMock = _provider.GetRequiredService<Mock<IAppMetricsService>>();
             metricsMock.Verify(m => m.Increment("worker.scan.job.completed", It.IsAny<double>()), Times.Once);
@@ -356,12 +357,13 @@ namespace Listenarr.Tests.Features.Infrastructure.Library.Scanning
             var processor = _provider.GetRequiredService<IScanJobProcessor>();
             await processor.ProcessJobAsync(job, CancellationToken.None);
 
-            Assert.True(queue.TryGetJob(job.Id, out var updatedJob));
-            Assert.Equal("Failed", updatedJob!.Status);
+            var updatedJob = GetRequiredJob(queue, job.Id);
+            Assert.Equal("Failed", updatedJob.Status);
             Assert.Equal("BasePath unavailable", updatedJob.Error);
 
-            var persistedAudiobook = await _audiobookRepository.GetByIdAsync(audiobook.Id);
-            Assert.Equal(missingBasePath, persistedAudiobook!.BasePath);
+            var persistedAudiobook = Assert.IsType<Audiobook>(
+                await _audiobookRepository.GetByIdAsync(audiobook.Id));
+            Assert.Equal(missingBasePath, persistedAudiobook.BasePath);
             var files = await _audiobookFileRepository.GetByAudiobookIdAsync(audiobook.Id);
             Assert.Single(files);
         }
@@ -388,8 +390,8 @@ namespace Listenarr.Tests.Features.Infrastructure.Library.Scanning
             await _provider.GetRequiredService<IScanJobProcessor>()
                 .ProcessJobAsync(job, CancellationToken.None);
 
-            Assert.True(queue.TryGetJob(job.Id, out var updatedJob));
-            Assert.Equal("Failed", updatedJob!.Status);
+            var updatedJob = GetRequiredJob(queue, job.Id);
+            Assert.Equal("Failed", updatedJob.Status);
             var correlated = await _historyRepository.GetByCorrelationIdAsync(correlationId);
             Assert.Single(correlated, entry =>
                 entry.EventType == HistoryEvents.ScanFailed
@@ -409,8 +411,8 @@ namespace Listenarr.Tests.Features.Infrastructure.Library.Scanning
             var processor = _provider.GetRequiredService<IScanJobProcessor>();
             await Assert.ThrowsAsync<OperationCanceledException>(() => processor.ProcessJobAsync(job, cts.Token));
 
-            Assert.True(queue.TryGetJob(job.Id, out var updatedJob));
-            Assert.Equal("Queued", updatedJob!.Status);
+            var updatedJob = GetRequiredJob(queue, job.Id);
+            Assert.Equal("Queued", updatedJob.Status);
         }
 
         [Fact]
@@ -476,8 +478,8 @@ namespace Listenarr.Tests.Features.Infrastructure.Library.Scanning
             await processor.ProcessJobAsync(job, CancellationToken.None);
             await processor.ProcessJobAsync(job, CancellationToken.None);
 
-            Assert.True(queue.TryGetJob(job.Id, out var updatedJob));
-            Assert.Equal("Completed", updatedJob!.Status);
+            var updatedJob = GetRequiredJob(queue, job.Id);
+            Assert.Equal("Completed", updatedJob.Status);
             var files = await _audiobookFileRepository.GetByAudiobookIdAsync(audiobook.Id);
             Assert.Single(files);
         }
@@ -555,8 +557,8 @@ namespace Listenarr.Tests.Features.Infrastructure.Library.Scanning
 
             await processor.ProcessJobAsync(job, CancellationToken.None);
 
-            Assert.True(queue.TryGetJob(job.Id, out var updatedJob));
-            Assert.Equal("Failed", updatedJob!.Status);
+            var updatedJob = GetRequiredJob(queue, job.Id);
+            Assert.Equal("Failed", updatedJob.Status);
             Assert.Equal("Audiobook disappeared before scan completion", updatedJob.Error);
             historyRepository.Verify(repository => repository.AddAsync(
                 It.Is<History>(entry =>
@@ -564,6 +566,14 @@ namespace Listenarr.Tests.Features.Infrastructure.Library.Scanning
                     && entry.Outcome == HistoryOutcome.Failed
                     && entry.CorrelationId == "move:deleted-during-scan"),
                 It.IsAny<CancellationToken>()), Times.Once);
+        }
+
+        private static ScanJob GetRequiredJob(
+            ScanQueueService queue,
+            Guid jobId)
+        {
+            Assert.True(queue.TryGetJob(jobId, out var job));
+            return Assert.IsType<ScanJob>(job);
         }
 
         private async Task<(ScanQueueService Queue, ScanJob Job)> CreateQueuedScanJobAsync(

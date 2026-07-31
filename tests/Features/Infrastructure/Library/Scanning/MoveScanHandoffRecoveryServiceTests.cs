@@ -17,10 +17,11 @@ public sealed class MoveScanHandoffRecoveryServiceTests : BaseTests
             Title = "Recover Pending Move Scan",
             BasePath = FileService.GetTempDirectory("move-scan-handoff-pending")
         });
-        await AddAuthorizedRootAsync(audiobook.BasePath!);
+        var basePath = Assert.IsType<string>(audiobook.BasePath);
+        await AddAuthorizedRootAsync(basePath);
         var handoff = await InsertHandoffAsync(
             audiobook.Id,
-            audiobook.BasePath!,
+            basePath,
             MoveScanHandoffStatus.Pending);
         var store = _provider.GetRequiredService<IMoveScanHandoffStore>();
         var scanQueue = new ScanQueueService(
@@ -87,10 +88,11 @@ public sealed class MoveScanHandoffRecoveryServiceTests : BaseTests
             Title = "Recovery continues",
             BasePath = FileService.GetTempDirectory("move-scan-handoff-poison-valid")
         });
-        await AddAuthorizedRootAsync(audiobook.BasePath!);
+        var basePath = Assert.IsType<string>(audiobook.BasePath);
+        await AddAuthorizedRootAsync(basePath);
         var valid = await InsertHandoffAsync(
             audiobook.Id,
-            audiobook.BasePath!,
+            basePath,
             MoveScanHandoffStatus.Pending);
         var store = _provider.GetRequiredService<IMoveScanHandoffStore>();
         var scanQueue = new ScanQueueService(
@@ -193,7 +195,10 @@ public sealed class MoveScanHandoffRecoveryServiceTests : BaseTests
             Title = "Terminal Move Scan",
             BasePath = FileService.GetTempDirectory("move-scan-handoff-terminal")
         });
-        await InsertHandoffAsync(audiobook.Id, audiobook.BasePath!, status);
+        await InsertHandoffAsync(
+            audiobook.Id,
+            Assert.IsType<string>(audiobook.BasePath),
+            status);
         var scanQueue = new Mock<IScanQueueService>(MockBehavior.Strict);
         var service = new MoveScanHandoffRecoveryService(
             scanQueue.Object,
