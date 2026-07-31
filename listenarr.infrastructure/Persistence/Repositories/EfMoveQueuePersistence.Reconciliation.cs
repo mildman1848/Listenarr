@@ -158,8 +158,8 @@ public sealed partial class EfMoveQueuePersistence
                 var candidates = group.ToList();
                 var markerEvidence = ReadTargetOwnershipEvidence(candidates);
                 if (markerEvidence.State == OwnershipEvidenceState.Ambiguous
-                    || (markerEvidence.OwnerJobId.HasValue
-                        && candidates.All(candidate => candidate.Job.Id != markerEvidence.OwnerJobId.Value)))
+                    || (markerEvidence.OwnerJobId is { } ownerJobId
+                        && candidates.All(candidate => candidate.Job.Id != ownerJobId)))
                 {
                     foreach (var candidate in candidates)
                     {

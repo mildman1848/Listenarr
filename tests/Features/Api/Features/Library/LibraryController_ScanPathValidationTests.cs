@@ -31,19 +31,21 @@ namespace Listenarr.Tests.Features.Api.Features.Library
         public void GetScanJobStatus_ReturnsPublicContractWithoutPathAuthorityOrInternalError()
         {
             var jobId = Guid.NewGuid();
+            var pathIdentity = new PathIdentitySnapshot(
+                FileSystemPathSyntax.Windows,
+                FileSystemCaseSensitivity.Insensitive,
+                FileSystemCaseSensitivityMode.Auto,
+                "C:\\private\\library");
+            var physicalIdentity = new ScanPathPhysicalIdentity(
+                "boundary-secret",
+                "scan-root-secret");
             var job = new ScanJob
             {
                 Id = jobId,
                 AudiobookId = 42,
                 Path = "C:\\private\\library\\book",
-                PathIdentity = new PathIdentitySnapshot(
-                    FileSystemPathSyntax.Windows,
-                    FileSystemCaseSensitivity.Insensitive,
-                    FileSystemCaseSensitivityMode.Auto,
-                    "C:\\private\\library"),
-                PhysicalIdentity = new ScanPathPhysicalIdentity(
-                    "boundary-secret",
-                    "scan-root-secret"),
+                PathIdentity = pathIdentity,
+                PhysicalIdentity = physicalIdentity,
                 Status = "Failed",
                 Error = "C:\\private\\library\\book could not be opened by worker secret",
                 CorrelationId = "correlation-secret",
@@ -67,9 +69,9 @@ namespace Listenarr.Tests.Features.Api.Features.Library
             foreach (var forbidden in new[]
             {
                 job.Path,
-                job.PathIdentity.Value.BoundaryPath,
-                job.PhysicalIdentity.Value.BoundaryObjectIdentity,
-                job.PhysicalIdentity.Value.ScanRootObjectIdentity,
+                pathIdentity.BoundaryPath,
+                physicalIdentity.BoundaryObjectIdentity,
+                physicalIdentity.ScanRootObjectIdentity,
                 job.CorrelationId,
                 job.DownloadId,
                 "worker secret",

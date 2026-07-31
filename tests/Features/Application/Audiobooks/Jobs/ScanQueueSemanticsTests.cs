@@ -326,19 +326,19 @@ namespace Listenarr.Tests.Features.Application.Audiobooks.Jobs
                     "initial-worker",
                     1),
                 PhysicalIdentity);
-            Assert.NotNull(original);
+            var originalId = Assert.IsType<Guid>(original);
             Assert.True(queue.Reader.TryRead(out var originalJob));
             Assert.Equal("/library/book", originalJob.Path);
-            queue.UpdateJobStatus(original!.Value, "Failed", "first attempt failed");
+            queue.UpdateJobStatus(originalId, "Failed", "first attempt failed");
             var ordinary = await queue.EnqueueScanAsync(audiobook);
-            Assert.NotEqual(original.Value, ordinary);
+            Assert.NotEqual(originalId, ordinary);
 
-            var retried = await queue.RequeueScanAsync(original.Value);
+            var retried = await queue.RequeueScanAsync(originalId);
 
             Assert.Null(retried);
             store.Verify(candidate => candidate.RequeueAsync(
                 handoffId,
-                original.Value,
+                originalId,
                 1,
                 It.IsAny<string?>(),
                 It.IsAny<DateTimeOffset>(),
@@ -354,7 +354,7 @@ namespace Listenarr.Tests.Features.Application.Audiobooks.Jobs
                 handoffId,
                 It.IsAny<string>(),
                 1,
-                original.Value,
+                originalId,
                 It.IsAny<DateTimeOffset>(),
                 It.IsAny<CancellationToken>()), Times.Once);
         }
