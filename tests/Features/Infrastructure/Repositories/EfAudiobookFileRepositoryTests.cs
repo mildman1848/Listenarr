@@ -79,6 +79,127 @@ public sealed class EfAudiobookFileRepositoryTests : BaseTests
     }
 
     [Fact]
+    public async Task ReplacePhysicalGenerationAsync_RelationalUpdate_SynchronizesTrackedEntity()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        var options = new DbContextOptionsBuilder<ListenArrDbContext>()
+            .UseSqlite(connection)
+            .Options;
+        await using var context = new ListenArrDbContext(options);
+        await context.Database.EnsureCreatedAsync();
+        var observedAt = DateTime.UtcNow.AddMinutes(-1);
+        var file = AudiobookFile.CreateUnresolved("/library/book.m4b");
+        file.Audiobook = new Audiobook
+        {
+            Title = "Physical Generation",
+            BasePath = "/library"
+        };
+        file.DurationSeconds = 10;
+        file.ApplyPhysicalObjectIdentity("old-generation", observedAt);
+        context.AudiobookFiles.Add(file);
+        await context.SaveChangesAsync();
+
+        var repository = new EfAudiobookFileRepository(context);
+        var tracked = Assert.IsType<AudiobookFile>(
+            await repository.GetByIdAsync(file.Id));
+        var replacementObservedAt = DateTime.UtcNow;
+        var replacement = AudiobookFile.CreateUnresolved(tracked.Path);
+        replacement.AudiobookId = tracked.AudiobookId;
+        replacement.Size = 1234;
+        replacement.DurationSeconds = 25;
+        replacement.Format = "M4B";
+        replacement.ApplyPhysicalObjectIdentity(
+            "new-generation",
+            replacementObservedAt);
+
+        var updated = await repository.ReplacePhysicalGenerationAsync(
+            tracked.Id,
+            tracked.AudiobookId,
+            tracked.Path,
+            "old-generation",
+            replacement);
+
+        Assert.True(updated);
+        Assert.Equal(1234, tracked.Size);
+        Assert.Equal(25, tracked.DurationSeconds);
+        Assert.Equal("M4B", tracked.Format);
+        Assert.Equal("new-generation", tracked.PhysicalObjectIdentity);
+        Assert.Equal(
+            replacementObservedAt,
+            tracked.PhysicalIdentityObservedAtUtc);
+        var trackedEntry = context.Entry(tracked);
+        Assert.False(trackedEntry.Property(candidate => candidate.Size).IsModified);
+        Assert.False(trackedEntry.Property(candidate => candidate.PhysicalObjectIdentity).IsModified);
+        var persisted = await context.AudiobookFiles
+            .AsNoTracking()
+            .SingleAsync(candidate => candidate.Id == tracked.Id);
+        Assert.Equal("new-generation", persisted.PhysicalObjectIdentity);
+    }
+
+    [Fact]
+    public async Task DeletePhysicalGenerationAsync_NullLegacyIdentity_DeletesOnlyExpectedRow()
+    {
+        var options = new DbContextOptionsBuilder<ListenArrDbContext>()
+            .UseInMemoryDatabase(Guid.NewGuid().ToString())
+            .Options;
+        var fileId = await SeedFileAsync(options);
+        await using var context = new ListenArrDbContext(options);
+        var repository = new EfAudiobookFileRepository(context);
+        var file = await context.AudiobookFiles.AsNoTracking()
+            .SingleAsync(candidate => candidate.Id == fileId);
+
+        var deleted = await repository.DeletePhysicalGenerationAsync(
+            file.Id,
+            file.AudiobookId,
+            file.Path,
+            expectedPhysicalObjectIdentity: null);
+
+        Assert.True(deleted);
+        Assert.Empty(await context.AudiobookFiles.AsNoTracking().ToListAsync());
+    }
+
+    [Fact]
+    public async Task DeletePhysicalGenerationAsync_WrongIdentity_PreservesNewerRow()
+    {
+        var options = new DbContextOptionsBuilder<ListenArrDbContext>()
+            .UseInMemoryDatabase(Guid.NewGuid().ToString())
+            .Options;
+        int fileId;
+        int audiobookId;
+        await using (var setup = new ListenArrDbContext(options))
+        {
+            var file = AudiobookFile.CreateUnresolved(
+                "/library/source/book.m4b");
+            file.Audiobook = new Audiobook
+            {
+                Title = "Physical Generation",
+                BasePath = "/library/source"
+            };
+            file.ApplyPhysicalObjectIdentity(
+                "current-generation",
+                DateTime.UtcNow);
+            setup.AudiobookFiles.Add(file);
+            await setup.SaveChangesAsync();
+            fileId = file.Id;
+            audiobookId = file.AudiobookId;
+        }
+
+        await using var context = new ListenArrDbContext(options);
+        var repository = new EfAudiobookFileRepository(context);
+        var deleted = await repository.DeletePhysicalGenerationAsync(
+            fileId,
+            audiobookId,
+            "/library/source/book.m4b",
+            "stale-generation");
+
+        Assert.False(deleted);
+        var persisted = await context.AudiobookFiles.AsNoTracking()
+            .SingleAsync(candidate => candidate.Id == fileId);
+        Assert.Equal("current-generation", persisted.PhysicalObjectIdentity);
+    }
+
+    [Fact]
     public async Task UpdateAsync_TrackedMetadataChange_DoesNotOverwriteNewerPath()
     {
         var options = new DbContextOptionsBuilder<ListenArrDbContext>().UseInMemoryDatabase(Guid.NewGuid().ToString()).Options;

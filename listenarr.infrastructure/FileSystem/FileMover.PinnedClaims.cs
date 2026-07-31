@@ -65,11 +65,26 @@ public partial class FileMover
                 requireDeleteAccess: false);
             if (fence == null)
             {
-                if (prepared != null
-                    || (destination != null && previous != null))
+                if (destination != null && previous != null)
                 {
                     throw new IOException(
                         "Interrupted file publication has ambiguous pre-commit state.");
+                }
+
+                if (prepared != null)
+                {
+                    if (destination != null || previous == null)
+                    {
+                        throw new IOException(
+                            "Interrupted file publication has incomplete pre-commit evidence.");
+                    }
+
+                    prepared.Delete(immediateWindows: true);
+                    prepared.Dispose();
+                    prepared = null;
+                    FlushFileMoveDirectory(
+                        state,
+                        "uncommitted prepared-generation retirement");
                 }
 
                 if (previous != null)

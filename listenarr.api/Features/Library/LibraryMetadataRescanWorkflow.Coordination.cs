@@ -26,11 +26,11 @@ public sealed partial class LibraryMetadataRescanWorkflow
         }
 
         var legacyIdentifierFieldsTouched = ApplyMetadataRescanPatch(audiobook, metadata);
+        var fallbackImageUrl = audiobook.ImageUrl;
         if (!string.IsNullOrWhiteSpace(metadata.ImageUrl))
         {
-            audiobook.ImageUrl = await MoveMetadataImageToLibraryStorageAsync(
-                audiobook,
-                metadata.ImageUrl) ?? metadata.ImageUrl;
+            fallbackImageUrl = metadata.ImageUrl;
+            audiobook.ImageUrl = fallbackImageUrl;
         }
 
         if (legacyIdentifierFieldsTouched)
@@ -38,7 +38,41 @@ public sealed partial class LibraryMetadataRescanWorkflow
             AudiobookIdentifierMapper.SyncImportedIdentifiersFromLegacyFields(audiobook);
         }
 
-        await repository.UpdateAsync(audiobook);
+        if (!await repository.UpdateAsync(audiobook))
+        {
+            return new MetadataRescanApplyResult(
+                MetadataRescanApplyStatus.NotFound);
+        }
+
+        if (!string.IsNullOrWhiteSpace(metadata.ImageUrl))
+        {
+            var publishedImageUrl =
+                await MoveMetadataImageToLibraryStorageAsync(
+                    audiobook,
+                    metadata.ImageUrl);
+            if (!string.IsNullOrWhiteSpace(publishedImageUrl)
+                && !string.Equals(
+                    publishedImageUrl,
+                    fallbackImageUrl,
+                    StringComparison.Ordinal))
+            {
+                if (await repository.TryUpdateImageUrlAsync(
+                        audiobook.Id,
+                        fallbackImageUrl,
+                        publishedImageUrl,
+                        CancellationToken.None))
+                {
+                    audiobook.ImageUrl = publishedImageUrl;
+                }
+                else
+                {
+                    _logger.LogWarning(
+                        "Metadata rescan committed for audiobook {AudiobookId}, but its published image URL could not be enrolled because the stored value changed",
+                        audiobook.Id);
+                }
+            }
+        }
+
         return new MetadataRescanApplyResult(
             MetadataRescanApplyStatus.Applied,
             audiobook);

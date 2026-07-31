@@ -1,10 +1,13 @@
 using Listenarr.Domain.Common;
+using Microsoft.Extensions.Logging;
 
 namespace Listenarr.Infrastructure.Library.Scanning;
 
 internal sealed partial class AudiobookScanService
 {
     private async Task<ScanDiscoveryResult> EnrichWithMetadataAsync(
+        AudiobookScanCommand command,
+        PinnedScanAuthority pinnedAuthority,
         ScanDiscoveryResult discovery,
         Audiobook audiobook,
         string scanRoot,
@@ -43,7 +46,18 @@ internal sealed partial class AudiobookScanService
             cancellationToken.ThrowIfCancellationRequested();
             try
             {
-                var metadata = await metadataService.ExtractFileMetadataAsync(candidate);
+                ValidateDiscoveredPathParent(
+                    command,
+                    pinnedAuthority,
+                    discovery,
+                    candidate);
+                using var pinnedMetadataFile = OpenPinnedMetadataFile(
+                    command,
+                    pinnedAuthority,
+                    discovery,
+                    candidate);
+                var metadata = await metadataService.ExtractFileMetadataAsync(
+                    pinnedMetadataFile.MetadataPath);
                 if (metadata != null
                     && ScanFileDiscovery.MetadataMatchesAudiobook(metadata, audiobook))
                 {
@@ -52,10 +66,14 @@ internal sealed partial class AudiobookScanService
             }
             catch (Exception exception) when (WorkerExceptionClassifier.IsNonFatal(exception))
             {
+                logger.LogWarning(
+                    exception,
+                    "Metadata enrichment failed for scan candidate {Path}",
+                    LogRedaction.SanitizeFilePath(candidate));
                 issues.Add(new ScanDiscoveryIssue(
                     ScanDiscoveryIssueKind.MetadataUnavailable,
                     candidate,
-                    exception.Message));
+                    "Embedded metadata could not be read safely."));
             }
         }
 

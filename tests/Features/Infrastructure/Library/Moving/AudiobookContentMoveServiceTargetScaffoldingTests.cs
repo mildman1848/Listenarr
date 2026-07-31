@@ -410,10 +410,9 @@ public partial class AudiobookContentMoveServiceTests
         var state = await CreateQuarantinedTargetScaffoldAsync();
         Directory.Delete(state.Quarantine, recursive: true);
         var external = FileService.GetTempDirectory("content-move-scaffold-dangling-link");
-        if (!TryCreateDirectoryLink(state.Quarantine, external))
-        {
-            return;
-        }
+        Assert.True(
+            TryCreateDirectoryLink(state.Quarantine, external),
+            "The required directory link could not be created.");
         Directory.Delete(external, recursive: true);
 
         try
@@ -439,10 +438,9 @@ public partial class AudiobookContentMoveServiceTests
         var external = FileService.GetTempDirectory("content-move-scaffold-link-external");
         var externalFile = await FileService.GetFileAsync(external, "keep.txt", "preserve");
         var link = Path.Join(state.Quarantine, "linked");
-        if (!TryCreateDirectoryLink(link, external))
-        {
-            return;
-        }
+        Assert.True(
+            TryCreateDirectoryLink(link, external),
+            "The required directory link could not be created.");
 
         try
         {

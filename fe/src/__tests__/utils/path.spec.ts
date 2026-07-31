@@ -15,6 +15,8 @@
  * You should have received a copy of the GNU Affero General Public License
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 import { describe, it, expect } from 'vitest'
 import {
   toForward,
@@ -215,9 +217,35 @@ describe('path utils', () => {
     expect(hasWindowsReservedDeviceSegment('D:\\Books\\CON')).toBe(true)
     expect(hasWindowsReservedDeviceSegment('D:\\Books\\NUL.txt')).toBe(true)
     expect(hasWindowsReservedDeviceSegment('D:\\Books\\COM1.folder')).toBe(true)
+    expect(hasWindowsReservedDeviceSegment('D:\\Books\\COM¹.folder')).toBe(true)
+    expect(hasWindowsReservedDeviceSegment('D:\\Books\\com²')).toBe(true)
+    expect(hasWindowsReservedDeviceSegment('D:\\Books\\LPT³.txt')).toBe(true)
     expect(hasWindowsReservedDeviceSegment('\\\\server\\NUL\\Books', 'windows')).toBe(true)
     expect(hasWindowsReservedDeviceSegment('\\\\NUL\\share\\Books', 'windows')).toBe(true)
+    expect(hasWindowsReservedDeviceSegment('\\\\server\\COM¹\\Books', 'windows')).toBe(true)
+    expect(hasWindowsReservedDeviceSegment('\\\\LPT³\\share\\Books', 'windows')).toBe(true)
+    expect(hasWindowsReservedDeviceSegment('D:\\Books\\COM⁴.txt')).toBe(false)
     expect(hasWindowsReservedDeviceSegment('D:\\Books\\Concert')).toBe(false)
+  })
+
+  it('matches the shared Windows reserved-device fixture', () => {
+    const fixture = JSON.parse(
+      readFileSync(
+        resolve(process.cwd(), '../test-fixtures/windows-reserved-device-names.json'),
+        'utf8',
+      ),
+    ) as { reserved: string[]; nonReserved: string[] }
+
+    for (const name of fixture.reserved) {
+      expect(hasWindowsReservedDeviceSegment(`C:\\Books\\${name}.folder`, 'windows'), name).toBe(
+        true,
+      )
+    }
+    for (const name of fixture.nonReserved) {
+      expect(hasWindowsReservedDeviceSegment(`C:\\Books\\${name}.folder`, 'windows'), name).toBe(
+        false,
+      )
+    }
   })
 
   it('detects overlapping source and destination paths', () => {

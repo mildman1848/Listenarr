@@ -394,15 +394,11 @@ namespace Listenarr.Tests.Features.Application.Downloads.Common
             Assert.Equal(expectedCount, result.SourceFiles.Count);
         }
 
-        [Fact]
+        [LinuxFact]
         [Trait("Method", "GetQueueItemAsync")]
         [Trait("Scenario", "Directory expansion preserves whitespace-bearing filesystem paths")]
         public async Task GetQueueItemAsync_ExpandsWhitespaceBearingDirectoryIntoExactSourceFiles()
         {
-            if (OperatingSystem.IsWindows())
-            {
-                return;
-            }
 
             var root = Path.Join(Path.GetTempPath(), "listenarr-gateway-whitespace-" + Guid.NewGuid().ToString("N"));
             var sourceDirectory = Path.Join(root, " Book Folder ");

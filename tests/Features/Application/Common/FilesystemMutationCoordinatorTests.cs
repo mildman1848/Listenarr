@@ -67,6 +67,77 @@ public sealed class FilesystemMutationCoordinatorTests : BaseTests
     }
 
     [Fact]
+    public async Task ExecuteExclusiveAsync_ParallelNestedCallsAreSerialized()
+    {
+        using var coordinator = new FilesystemMutationCoordinator();
+        var firstEntered = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseFirst = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var secondEntered = false;
+
+        await coordinator.ExecuteExclusiveAsync(async _ =>
+        {
+            var first = coordinator.ExecuteExclusiveAsync(async _ =>
+            {
+                firstEntered.TrySetResult();
+                await releaseFirst.Task;
+            });
+            await firstEntered.Task;
+            var second = coordinator.ExecuteExclusiveAsync(_ =>
+            {
+                secondEntered = true;
+                return Task.CompletedTask;
+            });
+
+            await Task.Delay(50);
+            Assert.False(secondEntered);
+            releaseFirst.TrySetResult();
+            await Task.WhenAll(first, second);
+        });
+
+        Assert.True(secondEntered);
+    }
+
+    [Fact]
+    public async Task ExecuteExclusiveAsync_EscapedNestedCallHoldsGateUntilNestedScopeCompletes()
+    {
+        using var coordinator = new FilesystemMutationCoordinator();
+        var nestedEntered = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseNested = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        Task? nested = null;
+
+        var outer = coordinator.ExecuteExclusiveAsync(async _ =>
+        {
+            nested = coordinator.ExecuteExclusiveAsync(async _ =>
+            {
+                nestedEntered.TrySetResult();
+                await releaseNested.Task;
+            });
+            await nestedEntered.Task;
+        });
+        await nestedEntered.Task;
+        await Task.Yield();
+
+        Assert.False(outer.IsCompleted);
+        var independentEntered = false;
+        var independent = coordinator.ExecuteExclusiveAsync(_ =>
+        {
+            independentEntered = true;
+            return Task.CompletedTask;
+        });
+        await Task.Delay(50);
+        Assert.False(independentEntered);
+
+        releaseNested.TrySetResult();
+        Assert.NotNull(nested);
+        await Task.WhenAll(nested, outer, independent);
+        Assert.True(independentEntered);
+    }
+
+    [Fact]
     public async Task ExecuteExclusiveAsync_CancelledWaiterDoesNotEnter()
     {
         using var coordinator = new FilesystemMutationCoordinator();

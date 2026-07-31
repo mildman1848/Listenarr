@@ -16,6 +16,8 @@ public sealed class AudiobookFileConfiguration : IEntityTypeConfiguration<Audiob
         builder.Property(file => file.PathOwnershipKey).HasMaxLength(160);
         builder.Property(file => file.PathIdentityState).HasConversion<string>().HasMaxLength(16);
         builder.Property(file => file.PathIdentityReason).HasMaxLength(1024);
+        builder.Property(file => file.PhysicalObjectIdentity).HasMaxLength(512);
+        builder.Property(file => file.PhysicalIdentityVersion).HasDefaultValue(1);
 
         builder.HasIndex(file => file.PathIdentityLookupKey);
         builder.HasIndex(file => file.PathOwnershipKey)

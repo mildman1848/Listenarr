@@ -4,7 +4,7 @@ namespace Listenarr.Api.Features.Downloads;
 
 public partial class ManualImportController
 {
-    private async Task<bool> PerformOwnedManualImportActionAsync(
+    private async Task<IAudiobookFileRegistrationLease?> PrepareOwnedManualImportActionForRegistrationAsync(
         FileAction action,
         string source,
         string destination,
@@ -12,6 +12,8 @@ public partial class ManualImportController
         IReadOnlyCollection<RootFolder> rootFolders,
         FileSystemPathSemantics semantics,
         string fallbackBoundary,
+        Guid operationId,
+        string? expectedRegisteredPhysicalObjectIdentity,
         CancellationToken cancellationToken)
     {
         var destinationDirectory = Path.GetDirectoryName(destination)
@@ -28,12 +30,6 @@ public partial class ManualImportController
                 "The manual import destination has no managed ownership boundary.");
         }
 
-        var operationId = FileMoveOperationIdentity.Create(
-            "manual-import",
-            audiobook.Id,
-            action,
-            Path.GetFullPath(source),
-            Path.GetFullPath(destination));
         await _directoryOwnershipStore.EnsureCreatedHierarchyAsync(
             destinationDirectory,
             boundary,
@@ -44,7 +40,19 @@ public partial class ManualImportController
             cancellationToken);
 
         cancellationToken.ThrowIfCancellationRequested();
-        return await _fileMover.PerformActionOn(
+        if (action == FileAction.HardlinkCopy
+            && !string.IsNullOrWhiteSpace(
+                expectedRegisteredPhysicalObjectIdentity))
+        {
+            return await _fileMover.PrepareActionForRegistrationAsync(
+                action,
+                source,
+                destination,
+                operationId,
+                expectedRegisteredPhysicalObjectIdentity);
+        }
+
+        return await _fileMover.PrepareActionForRegistrationAsync(
             action,
             source,
             destination,

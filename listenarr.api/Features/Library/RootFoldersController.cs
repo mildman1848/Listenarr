@@ -46,7 +46,8 @@ namespace Listenarr.Api.Features.Library
         bool DeleteEmptySource,
         string DesiredName,
         bool DesiredIsDefault,
-        FileSystemCaseSensitivityMode TargetCaseSensitivityMode);
+        FileSystemCaseSensitivityMode TargetCaseSensitivityMode,
+        string ExpectedCurrentPath);
 
     [ApiController]
     [Route("api/v{version:apiVersion}/rootfolders")]
@@ -115,6 +116,11 @@ namespace Listenarr.Api.Features.Library
         [HttpPost]
         public async Task<IActionResult> Create([FromBody] RootFolder request)
         {
+            if (!Enum.IsDefined(request.CaseSensitivityMode))
+            {
+                return BadRequest(new { message = "The root folder request is invalid." });
+            }
+
             try
             {
                 var created = await _service.CreateAsync(new RootFolder
@@ -126,13 +132,19 @@ namespace Listenarr.Api.Features.Library
                 });
                 return CreatedAtAction(nameof(Get), new { id = created.Id }, await MapAsync(created));
             }
-            catch (ArgumentException ex)
+            catch (ArgumentException)
             {
-                return BadRequest(new { message = ex.Message });
+                return BadRequest(new
+                {
+                    message = "The root folder request is invalid."
+                });
             }
-            catch (InvalidOperationException ex)
+            catch (InvalidOperationException)
             {
-                return BadRequest(new { message = ex.Message });
+                return Conflict(new
+                {
+                    message = "The root folder conflicts with existing configuration or cannot be created in its current state."
+                });
             }
         }
 
@@ -153,6 +165,11 @@ namespace Listenarr.Api.Features.Library
             CancellationToken cancellationToken = default)
         {
             if (id != request.Id) return BadRequest(new { message = "Id mismatch" });
+            if (!Enum.IsDefined(request.CaseSensitivityMode))
+            {
+                return BadRequest(new { message = "The root folder path change request is invalid." });
+            }
+
             try
             {
                 var existing = await _service.GetByIdAsync(id);
@@ -186,7 +203,8 @@ namespace Listenarr.Api.Features.Library
                         deleteEmptySource,
                         request.Name,
                         request.IsDefault,
-                        request.CaseSensitivityMode),
+                        request.CaseSensitivityMode,
+                        existing.Path),
                     cancellationToken);
                 if (relocation.Status is RootFolderRelocationStatus.Completed
                     or RootFolderRelocationStatus.NeedsAttention)
@@ -199,19 +217,22 @@ namespace Listenarr.Api.Features.Library
                 return AcceptedAtRoute(
                     "GetRootFolderRelocation",
                     new { id = relocation.RelocationId },
-                    relocation);
+                    RootFolderRelocationPublicProjection.Sanitize(relocation));
             }
-            catch (KeyNotFoundException ex)
+            catch (KeyNotFoundException)
             {
-                return NotFound(new { message = ex.Message });
+                return NotFound(new { message = "Root folder not found" });
             }
-            catch (ArgumentException ex)
+            catch (ArgumentException)
             {
-                return BadRequest(new { message = ex.Message });
+                return BadRequest(new { message = "The root folder path change request is invalid." });
             }
-            catch (InvalidOperationException ex)
+            catch (InvalidOperationException)
             {
-                return BadRequest(new { message = ex.Message });
+                return BadRequest(new
+                {
+                    message = "The root folder path cannot be changed in its current state."
+                });
             }
         }
 
@@ -220,6 +241,11 @@ namespace Listenarr.Api.Features.Library
             int id,
             [FromBody] RootFolderMetadataUpdateRequest request)
         {
+            if (!Enum.IsDefined(request.CaseSensitivityMode))
+            {
+                return BadRequest(new { message = "The root folder metadata is invalid." });
+            }
+
             var existing = await _service.GetByIdAsync(id);
             if (existing == null) return NotFound(new { message = "Root folder not found" });
             existing.Name = request.Name;
@@ -230,13 +256,16 @@ namespace Listenarr.Api.Features.Library
                 var updated = await _service.UpdateAsync(existing);
                 return Ok(await MapAsync(updated));
             }
-            catch (ArgumentException exception)
+            catch (ArgumentException)
             {
-                return BadRequest(new { message = exception.Message });
+                return BadRequest(new { message = "The root folder metadata is invalid." });
             }
-            catch (InvalidOperationException exception)
+            catch (InvalidOperationException)
             {
-                return Conflict(new { message = exception.Message });
+                return Conflict(new
+                {
+                    message = "The root folder metadata conflicts with an existing root folder."
+                });
             }
         }
 
@@ -246,9 +275,11 @@ namespace Listenarr.Api.Features.Library
             [FromBody] RootFolderPathChangeRequest request,
             CancellationToken cancellationToken)
         {
-            if (!Enum.TryParse<RootFolderRelocationMode>(request.Mode, true, out var mode))
+            if (!RootFolderRequestValidation.TryParseRelocationMode(request.Mode, out var mode)
+                || !Enum.IsDefined(request.TargetCaseSensitivityMode)
+                || string.IsNullOrWhiteSpace(request.ExpectedCurrentPath))
             {
-                return BadRequest(new { message = "Mode must be 'relocate' or 'metadataOnly'." });
+                return BadRequest(new { message = "Mode must be 'relocate' or 'metadataOnly', and case sensitivity must be valid." });
             }
 
             try
@@ -261,26 +292,31 @@ namespace Listenarr.Api.Features.Library
                         request.DeleteEmptySource,
                         request.DesiredName,
                         request.DesiredIsDefault,
-                        request.TargetCaseSensitivityMode),
+                        request.TargetCaseSensitivityMode,
+                        request.ExpectedCurrentPath),
                     cancellationToken);
+                var publicResult = RootFolderRelocationPublicProjection.Sanitize(result);
                 return mode == RootFolderRelocationMode.Relocate
                     ? AcceptedAtRoute(
                         "GetRootFolderRelocation",
                         new { id = result.RelocationId },
-                        result)
-                    : Ok(result);
+                        publicResult)
+                    : Ok(publicResult);
             }
-            catch (KeyNotFoundException exception)
+            catch (KeyNotFoundException)
             {
-                return NotFound(new { message = exception.Message });
+                return NotFound(new { message = "Root folder not found" });
             }
-            catch (InvalidOperationException exception)
+            catch (InvalidOperationException)
             {
-                return Conflict(new { message = exception.Message });
+                return Conflict(new
+                {
+                    message = "The root folder path cannot be changed in its current state."
+                });
             }
-            catch (ArgumentException exception)
+            catch (ArgumentException)
             {
-                return BadRequest(new { message = exception.Message });
+                return BadRequest(new { message = "The root folder path change request is invalid." });
             }
         }
 
@@ -297,13 +333,16 @@ namespace Listenarr.Api.Features.Library
                 await _service.DeleteAsync(id, reassignTo);
                 return Ok(new { message = "Deleted" });
             }
-            catch (KeyNotFoundException ex)
+            catch (KeyNotFoundException)
             {
-                return NotFound(new { message = ex.Message });
+                return NotFound(new { message = "Root folder not found" });
             }
-            catch (InvalidOperationException ex)
+            catch (InvalidOperationException)
             {
-                return BadRequest(new { message = ex.Message });
+                return BadRequest(new
+                {
+                    message = "The root folder is in use or cannot be deleted in its current state."
+                });
             }
             catch (DbUpdateException)
             {
@@ -341,7 +380,7 @@ namespace Listenarr.Api.Features.Library
             {
                 jobId = job.Id.ToString(),
                 status = job.Status,
-                error = job.Error,
+                error = UnmatchedScanPublicError.FromInternal(job.Error),
                 items = job.Results ?? new List<UnmatchedFileResult>()
             });
         }
@@ -432,7 +471,10 @@ namespace Listenarr.Api.Features.Library
             var relocation = await _relocationService.GetActiveForRootAsync(root.Id);
             if (relocation != null)
             {
-                active = await _relocationService.GetAsync(relocation.Id);
+                var relocationResult = await _relocationService.GetAsync(relocation.Id);
+                active = relocationResult == null
+                    ? null
+                    : RootFolderRelocationPublicProjection.Sanitize(relocationResult);
             }
 
             return new RootFolderDto(

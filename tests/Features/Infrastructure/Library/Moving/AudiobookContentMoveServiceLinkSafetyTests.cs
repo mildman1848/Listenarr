@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using Listenarr.Tests.Common;
 using Microsoft.EntityFrameworkCore;
 
 namespace Listenarr.Tests.Features.Infrastructure.Library.Moving;
@@ -12,10 +13,9 @@ public partial class AudiobookContentMoveServiceTests
         var externalFile = await FileService.GetFileAsync(externalSource, "book.m4b", "external audio");
         var linkParent = FileService.GetTempDirectory("content-move-root-link-parent");
         var sourceLink = Path.Join(linkParent, "linked-source");
-        if (!TryCreateDirectoryLink(sourceLink, externalSource))
-        {
-            return;
-        }
+        Assert.True(
+            TryCreateDirectoryLink(sourceLink, externalSource),
+            "The required directory link could not be created.");
 
         try
         {
@@ -37,22 +37,17 @@ public partial class AudiobookContentMoveServiceTests
         }
     }
 
-    [Fact]
+    [WindowsFact]
     public async Task MoveContentsAsync_WindowsSourceJunction_BlocksAtomicRename()
     {
-        if (!OperatingSystem.IsWindows())
-        {
-            return;
-        }
 
         var externalSource = FileService.GetTempDirectory("content-move-root-junction-external");
         var externalFile = await FileService.GetFileAsync(externalSource, "book.m4b", "external audio");
         var linkParent = FileService.GetTempDirectory("content-move-root-junction-parent");
         var sourceJunction = Path.Join(linkParent, "junction-source");
-        if (!TryCreateWindowsJunction(sourceJunction, externalSource))
-        {
-            return;
-        }
+        Assert.True(
+            TryCreateWindowsJunction(sourceJunction, externalSource),
+            "The required Windows junction could not be created.");
 
         try
         {
@@ -81,10 +76,9 @@ public partial class AudiobookContentMoveServiceTests
         var external = FileService.GetTempDirectory("content-move-nested-link-external");
         var externalFile = await FileService.GetFileAsync(external, "external.txt", "external");
         var nestedLink = Path.Join(source, "linked");
-        if (!TryCreateDirectoryLink(nestedLink, external))
-        {
-            return;
-        }
+        Assert.True(
+            TryCreateDirectoryLink(nestedLink, external),
+            "The required directory link could not be created.");
 
         try
         {
@@ -145,13 +139,9 @@ public partial class AudiobookContentMoveServiceTests
         }
     }
 
-    [Fact]
+    [WindowsFact]
     public async Task MoveContentsAsync_AtomicSourceChangesAfterPlanning_DoesNotMoveDirectory()
     {
-        if (!OperatingSystem.IsWindows())
-        {
-            return;
-        }
 
         var source = FileService.GetTempDirectory("content-move-atomic-drift-src");
         await FileService.GetFileAsync(source, "book.m4b", "audio");
@@ -175,13 +165,9 @@ public partial class AudiobookContentMoveServiceTests
         Assert.False(Directory.Exists(target));
     }
 
-    [Fact]
+    [WindowsFact]
     public async Task MoveContentsAsync_AtomicSourceReplacedAtPublication_DoesNotMoveReplacement()
     {
-        if (!OperatingSystem.IsWindows())
-        {
-            return;
-        }
 
         var root = FileService.GetTempDirectory("content-move-atomic-publication-race");
         var source = Path.Join(root, "source");
@@ -223,13 +209,9 @@ public partial class AudiobookContentMoveServiceTests
         }
     }
 
-    [Fact]
+    [WindowsFact]
     public async Task MoveContentsAsync_AtomicVerificationIoFailure_PreservesRecoverableState()
     {
-        if (!OperatingSystem.IsWindows())
-        {
-            return;
-        }
 
         var source = FileService.GetTempDirectory("content-move-atomic-verify-retry-src");
         await FileService.GetFileAsync(source, "book.m4b", "audio");

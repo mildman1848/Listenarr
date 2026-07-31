@@ -127,11 +127,6 @@ public sealed class FileMoverFileAliasRegressionTests : BaseTests
     [InlineData(FileAction.HardlinkCopy)]
     public async Task FileOperation_DestinationSymlinkAlias_IsBlocked(FileAction action)
     {
-        if (OperatingSystem.IsWindows())
-        {
-            return;
-        }
-
         var root = FileService.GetTempDirectory("file-alias-leaf");
         var source = await FileService.GetFileAsync(root, "source.m4b", "audio");
         var destination = Path.Join(root, "destination.m4b");
@@ -152,11 +147,6 @@ public sealed class FileMoverFileAliasRegressionTests : BaseTests
     [InlineData(FileAction.HardlinkCopy)]
     public async Task FileOperation_SymbolicLinkAncestorAlias_IsBlocked(FileAction action)
     {
-        if (OperatingSystem.IsWindows())
-        {
-            return;
-        }
-
         var root = FileService.GetTempDirectory("file-alias-ancestor");
         var physicalParent = Path.Join(root, "physical");
         Directory.CreateDirectory(physicalParent);

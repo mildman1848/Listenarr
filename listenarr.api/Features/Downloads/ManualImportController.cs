@@ -190,6 +190,7 @@ public partial class ManualImportController : ControllerBase
                 request.Items,
                 sourceSemantics.Comparer);
             var selectedAudioProfiles = request.IncludeCompanionFiles
+                && request.Action != FileAction.None
                 ? await _companionImporter.BuildAudioMatchProfilesAsync(
                     orderedItems
                         .Where(item => !string.IsNullOrWhiteSpace(item.FullPath))
@@ -255,7 +256,8 @@ public partial class ManualImportController : ControllerBase
                                 companionImportCount);
                         }
 
-                        if (request.CleanupEmptySourceFolders)
+                        if (request.Action != FileAction.None
+                            && request.CleanupEmptySourceFolders)
                         {
                             operationToken.ThrowIfCancellationRequested();
                             _fileSystem.DeleteEmptyDirectories(sourceDirectory);
@@ -298,166 +300,6 @@ public partial class ManualImportController : ControllerBase
         {
             _logger.LogError(ex, "Error starting manual import");
             return StatusCode(500, new { error = "Failed to start import" });
-        }
-    }
-
-    /// <summary>
-    /// Import the file into the library
-    /// </summary>
-    /// <param name="item">File to import into the library</param>
-    /// <param name="action">Action to perform on the file</param>
-    /// <param name="sourceDirectory">Directory from which we are importing the file</param>
-    /// <param name="sourceSemantics">Resolved filesystem identity rules for the requested source directory</param>
-    /// <param name="destinationTracker">Tracks already reserved destinations using each target volume's path identity rules</param>
-    /// <param name="rootFolders">Previously fetched list of configured root folders (to save DB hits)</param>
-    /// <param name="settings">Application settings (to save DB hits)</param>
-    /// <param name="hasMultipleFile">Indicates if this file is part of multiple files for a same audiobook</param>
-    /// <param name="cancellationToken">Request cancellation token.</param>
-    /// <returns>Result of the importation</returns>
-    /// <exception cref="IOException"></exception>
-    private async Task<ManualImportResultDto> ImportFileAsync(
-        ManualImportItemDto item,
-        FileAction action,
-        string sourceDirectory,
-        FileSystemPathSemantics sourceSemantics,
-        ManualImportDestinationTracker destinationTracker,
-        List<RootFolder> rootFolders,
-        ApplicationSettings settings,
-        bool hasMultipleFile,
-        CancellationToken cancellationToken)
-    {
-        try
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            // Validate FullPath
-            if (string.IsNullOrWhiteSpace(item.FullPath))
-            {
-                return ManualImportResultDto.FailureResult("FullPath is required", item.FullPath);
-            }
-
-            // Get the associated audiobook
-            var audiobook = await _audiobookRepository.GetByIdAsync(item.MatchedAudiobookId);
-            if (audiobook == null)
-            {
-                return ManualImportResultDto.FailureResult($"Audiobook with ID {item.MatchedAudiobookId} not found", item.FullPath);
-            }
-
-            // Check if source file exists
-            if (!_fileSystem.FileExists(item.FullPath))
-            {
-                return ManualImportResultDto.FailureResult("Source file not found", item.FullPath);
-            }
-
-            // Validate source is within a configured root folder (prevents path traversal).
-            // Use the source/root volume semantics rather than the host OS so mounted
-            // case-insensitive Unix volumes cannot be misclassified by Linux defaults.
-            var isUnderSourceDirectory = FileSystemPathIdentity.IsSameOrInside(
-                item.FullPath,
-                sourceDirectory,
-                sourceSemantics);
-
-            var isUnderConfiguredRoot = await IsInsideAnyConfiguredRootAsync(
-                item.FullPath,
-                rootFolders,
-                cancellationToken);
-
-            if (!isUnderSourceDirectory && !isUnderConfiguredRoot)
-            {
-                _logger.LogWarning("Rejected manual import: {Path} is not within the requested path or a configured root folder", item.FullPath);
-                return ManualImportResultDto.FailureResult("Source file is not within the requested import path or a configured root folder", item.FullPath);
-            }
-
-            // Check if audiobook has a base path
-            if (string.IsNullOrWhiteSpace(audiobook.BasePath))
-            {
-                audiobook.BasePath = Path.GetDirectoryName(item.FullPath);
-                await PersistAudiobookBasePathAsync(audiobook, audiobook.BasePath);
-            }
-
-            // Extract metadata from the file
-            var metadata = await _metadataService.ExtractFileMetadataAsync(item.FullPath);
-            if (metadata == null)
-            {
-                return ManualImportResultDto.FailureResult("Failed to extract metadata from file", item.FullPath);
-            }
-
-            var destinationResolution = await ResolveDestinationResolutionAsync(
-                audiobook.BasePath,
-                cancellationToken);
-            var destinationSemantics = destinationResolution.Semantics;
-
-            // Generate destination path using the selected target root's identity semantics.
-            var destinationPath = await _pathPlanner.GeneratePathAsync(
-                audiobook,
-                metadata,
-                item,
-                rootFolders,
-                settings,
-                destinationSemantics,
-                hasMultipleFile);
-            var destinationReservation = await destinationTracker.PlanUniqueAsync(
-                destinationPath,
-                cancellationToken);
-            destinationPath = destinationReservation.Path;
-
-            if (action != FileAction.None)
-            {
-                var ownership = await _audiobookFileService.CheckAudiobookFileOwnershipAsync(
-                    audiobook,
-                    destinationPath,
-                    Path.GetDirectoryName(destinationPath));
-                if (ownership.Outcome is not (
-                        AudiobookFileOwnershipCheckOutcome.Available or
-                        AudiobookFileOwnershipCheckOutcome.AlreadyOwnedByAudiobook))
-                {
-                    _logger.LogWarning(
-                        "Blocked manual import because destination ownership is unavailable. Audiobook {AudiobookId}, Source {Source}, Destination {Destination}, Outcome {Outcome}, Reason {Reason}",
-                        audiobook.Id,
-                        item.FullPath,
-                        destinationPath,
-                        ownership.Outcome,
-                        ownership.Reason);
-                    return new ManualImportResultDto
-                    {
-                        Success = false,
-                        Error = ownership.Reason ?? "Destination ownership is unavailable.",
-                        SourcePath = item.FullPath,
-                        DestinationPath = destinationPath,
-                        Audiobook = audiobook
-                    };
-                }
-            }
-
-            var success = await PerformOwnedManualImportActionAsync(
-                action,
-                item.FullPath,
-                destinationPath,
-                audiobook,
-                rootFolders,
-                destinationSemantics,
-                destinationResolution.BoundaryPath,
-                cancellationToken);
-            if (success)
-            {
-                destinationTracker.Commit(destinationReservation);
-
-                // Write ASIN to embedded file tags (non-critical — failure is logged, not thrown)
-                if (!string.IsNullOrWhiteSpace(audiobook.Asin))
-                    await _metadataService.WriteAsinTagAsync(destinationPath, audiobook.Asin);
-            }
-
-            return new ManualImportResultDto
-            {
-                Success = success,
-                SourcePath = item.FullPath,
-                DestinationPath = destinationPath,
-                Audiobook = audiobook
-            };
-        }
-        catch (Exception ex) when (ex is not OperationCanceledException && ex is not OutOfMemoryException && ex is not StackOverflowException)
-        {
-            _logger.LogError(ex, "Error importing file {FilePath}", item.FullPath);
-            return ManualImportResultDto.FailureResult(ex.Message, item.FullPath);
         }
     }
 

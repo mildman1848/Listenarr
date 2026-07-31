@@ -5,6 +5,8 @@ namespace Listenarr.Infrastructure.Library.Moving;
 
 internal sealed partial class AudiobookContentMoveService
 {
+    private const int DestinationRetentionCleanupProtectionVersion = 1;
+
     private async Task MoveSourceFileToPinnedQuarantineAsync(
         AudiobookContentMoveRequest request,
         string source,
@@ -205,17 +207,122 @@ internal sealed partial class AudiobookContentMoveService
                     $"The pinned source or target generation changed at deletion: {manifestEntry.RelativePath}");
             }
 
+            var retentionName =
+                PinnedDestinationRetentionGuard.CreateRetentionName(
+                    request.JobId,
+                    manifestEntry.RelativePath);
+            using var retention =
+                await PinnedDestinationRetentionGuard.OpenOrRepairOwnedAsync(
+                    targetPath.Current,
+                    targetFileName,
+                    retentionName,
+                    manifestEntry.Length,
+                    manifestEntry.Sha256
+                        ?? throw new MoveNeedsAttentionException(
+                            $"The move manifest has no content identity for {manifestEntry.RelativePath}."),
+                    cancellationToken);
+            if (retention == null)
+            {
+                throw new MoveNeedsAttentionException(
+                    $"A durable target retention guard could not be established for {manifestEntry.RelativePath}.");
+            }
+
+            await UpdateCleanupProtectionVersionAsync(
+                request.JobId,
+                request.LeaseToken,
+                manifestEntry.RelativePath,
+                DestinationRetentionCleanupProtectionVersion,
+                cancellationToken);
+            manifestEntry.CleanupProtectionVersion =
+                DestinationRetentionCleanupProtectionVersion;
+
+            faultInjector?.OnSourceCleanupMutation(
+                request.JobId,
+                SourceCleanupFaultPoint.BeforePinnedQuarantineDelete);
+            if (!await retention.TryLinearizePublicationAsync(cancellationToken))
+            {
+                throw new MoveNeedsAttentionException(
+                    $"The published target changed at the durable source-retirement boundary: {manifestEntry.RelativePath}");
+            }
+
             quarantineEntry.Delete();
+            quarantinePath.Current.FlushDirectoryEntry();
+            faultInjector?.OnSourceCleanupMutation(
+                request.JobId,
+                SourceCleanupFaultPoint.AfterPinnedQuarantineDelete);
+            if (!await retention.CompleteAsync(cancellationToken))
+            {
+                throw new MoveNeedsAttentionException(
+                    $"The durable target retention guard could not be retired for {manifestEntry.RelativePath}.");
+            }
         }
         catch (MoveNeedsAttentionException)
         {
             throw;
         }
         catch (Exception exception) when (exception is
-            InvalidOperationException or Win32Exception or UnauthorizedAccessException)
+            IOException or InvalidOperationException or Win32Exception
+                or UnauthorizedAccessException)
         {
             throw new MoveNeedsAttentionException(
                 $"The quarantine file could not be removed through pinned directory handles: {exception.Message}");
+        }
+    }
+
+    private async Task<bool> TryCompleteMissingQuarantineRetentionAsync(
+        AudiobookContentMoveRequest request,
+        string source,
+        string target,
+        MoveJobEntry manifestEntry,
+        FileSystemPathSemantics targetSemantics,
+        CancellationToken cancellationToken)
+    {
+        var (targetDirectorySegments, targetFileName) = SplitPinnedRelativeFilePath(
+            manifestEntry.RelativePath,
+            targetSemantics);
+        try
+        {
+            await EnsureMutationAuthorizedAsync(
+                request,
+                source,
+                target,
+                cancellationToken);
+            using var targetPath = PinnedMoveDirectoryPath.OpenExisting(
+                target,
+                targetDirectorySegments);
+            targetPath.EnsureVisibleHierarchy();
+            var retentionName =
+                PinnedDestinationRetentionGuard.CreateRetentionName(
+                    request.JobId,
+                    manifestEntry.RelativePath);
+            using var retention =
+                await PinnedDestinationRetentionGuard.OpenExistingAsync(
+                    targetPath.Current,
+                    targetFileName,
+                    retentionName,
+                    manifestEntry.Length,
+                    manifestEntry.Sha256
+                        ?? throw new MoveNeedsAttentionException(
+                            $"The move manifest has no content identity for {manifestEntry.RelativePath}."),
+                    cancellationToken);
+            if (retention == null)
+            {
+                return false;
+            }
+
+            return await retention.TryLinearizePublicationAsync(cancellationToken)
+                && await retention.CompleteAsync(cancellationToken);
+        }
+        catch (MoveNeedsAttentionException)
+        {
+            throw;
+        }
+        catch (Exception exception) when (exception is
+            IOException or InvalidOperationException or Win32Exception
+                or UnauthorizedAccessException or PlatformNotSupportedException)
+        {
+            throw new MoveNeedsAttentionException(
+                $"The durable target retention could not be recovered for '{manifestEntry.RelativePath}': {exception.Message}");
         }
     }
 

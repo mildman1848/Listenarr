@@ -40,5 +40,37 @@ namespace Listenarr.Application.Downloads.Contracts
             string source,
             string? destination = null,
             Guid? operationId = null);
+
+        /// <summary>
+        /// Publishes the requested copy or hardlink destination and returns a lease
+        /// bound to the exact published file generation. Move requests are staged as
+        /// a copy; callers must retire the source only after durable registration.
+        /// </summary>
+        Task<IAudiobookFileRegistrationLease?> PrepareActionForRegistrationAsync(
+            FileAction action,
+            string source,
+            string destination,
+            Guid? operationId = null);
+
+        /// <summary>
+        /// Resumes a registration publication when durable audiobook-file
+        /// ownership already proves the expected destination generation.
+        /// </summary>
+        Task<IAudiobookFileRegistrationLease?> PrepareActionForRegistrationAsync(
+            FileAction action,
+            string source,
+            string destination,
+            Guid? operationId,
+            string expectedRegisteredPhysicalObjectIdentity);
+
+        /// <summary>
+        /// Completes a staged move by retiring only the verified source generation
+        /// while preserving the destination generation held by the registration lease.
+        /// </summary>
+        Task<bool> CompletePreparedMoveAsync(
+            string source,
+            string destination,
+            IAudiobookFileRegistrationLease registrationLease,
+            Guid? operationId = null);
     }
 }

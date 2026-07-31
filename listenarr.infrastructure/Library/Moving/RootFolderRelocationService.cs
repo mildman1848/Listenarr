@@ -80,6 +80,8 @@ public sealed partial class RootFolderRelocationService(
             candidate => candidate.Id == rootFolderId,
             cancellationToken)
             ?? throw new KeyNotFoundException("Root folder not found");
+        ValidateExpectedCurrentPath(command, root);
+
         if (await db.RootFolderRelocations.AnyAsync(
             relocation => relocation.ActiveRootFolderId == rootFolderId,
             cancellationToken))

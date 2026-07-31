@@ -23,7 +23,7 @@ namespace Listenarr.Domain.Common
     {
         private static readonly Regex WindowsDriveRootPattern = new("^[A-Za-z]:[\\\\/]", RegexOptions.Compiled);
         private static readonly Regex WindowsReservedDeviceNamePattern = new(
-            "^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$",
+            "^(CON|PRN|AUX|NUL|COM(?:[1-9]|[¹²³])|LPT(?:[1-9]|[¹²³]))$",
             RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
         /// <summary>

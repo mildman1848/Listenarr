@@ -36,6 +36,12 @@ Required review behavior:
 - Do not call a diff clean or merge-ready until two consecutive, complete, unchanged review passes find no confirmed defects or repository-rule violations.
 - Clearly distinguish confirmed findings, unverified risks, missing platform validation, process blockers, and non-blocking suggestions.
 
+## Cross-shell null redirection
+
+- Never redirect output to `NUL` from Git Bash, MSYS, WSL, or another POSIX shell; those environments can create a real Windows-reserved file named `NUL` in the checkout.
+- Use `/dev/null` only in POSIX shells, `$null` only in PowerShell, and process APIs with ignored standard streams when writing cross-platform automation.
+- Treat any repository entry whose Windows basename is `CON`, `PRN`, `AUX`, `NUL`, `COM1`-`COM9`, or `LPT1`-`LPT9` as a release-blocking hygiene failure.
+
 As a security-aware developer, generate secure .NET code using ASP.NET Core that inherently prevents top security weaknesses.
 Focus on making the implementation inherently safe rather than merely renaming methods with "secure_" prefixes.
 Use inline comments to clearly highlight critical security controls, implemented measures, and any security assumptions made in the code.

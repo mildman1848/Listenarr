@@ -83,6 +83,25 @@ namespace Listenarr.Infrastructure.FileSystem
 
         public async Task<bool> MoveDirectoryAsync(string sourceDir, string destDir)
         {
+            var recoveredRename = TryRecoverPinnedDirectoryRename(
+                sourceDir,
+                destDir);
+            switch (recoveredRename)
+            {
+                case PinnedDirectoryMoveOutcome.Moved:
+                    return true;
+                case PinnedDirectoryMoveOutcome.NotMoved:
+                case PinnedDirectoryMoveOutcome.NotApplicable:
+                case null:
+                    break;
+                case PinnedDirectoryMoveOutcome.Indeterminate:
+                    throw new IOException(
+                        "An interrupted directory rename could not be reconciled safely.");
+                default:
+                    throw new InvalidOperationException(
+                        $"Unsupported recovered directory move outcome: {recoveredRename}.");
+            }
+
             var pathEquivalence = await TryDetermineFilesystemPathEquivalenceAsync(
                 sourceDir,
                 destDir);
@@ -150,9 +169,20 @@ namespace Listenarr.Infrastructure.FileSystem
                 var nativeMove = TryPinnedSameVolumeDirectoryMove(
                     sourceDir,
                     destDir);
-                if (nativeMove.HasValue)
+                switch (nativeMove)
                 {
-                    return nativeMove.Value;
+                    case PinnedDirectoryMoveOutcome.Moved:
+                        return true;
+                    case PinnedDirectoryMoveOutcome.NotMoved:
+                        return false;
+                    case PinnedDirectoryMoveOutcome.Indeterminate:
+                        throw new IOException(
+                            "The directory rename may have completed, but its final filesystem state could not be reconciled safely.");
+                    case PinnedDirectoryMoveOutcome.NotApplicable:
+                        break;
+                    default:
+                        throw new InvalidOperationException(
+                            $"Unsupported pinned directory move outcome: {nativeMove}.");
                 }
             }
 

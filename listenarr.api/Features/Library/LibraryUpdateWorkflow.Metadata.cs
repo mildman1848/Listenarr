@@ -8,6 +8,7 @@ public sealed partial class LibraryUpdateWorkflow
         int id,
         AudiobookUpdateRequest request,
         bool basePathRewritten,
+        bool suppressStaleImageUrl,
         bool metadataUpdateRequested)
     {
         using var scope = _scopeFactory.CreateScope();
@@ -22,7 +23,10 @@ public sealed partial class LibraryUpdateWorkflow
         if (request.Title != null) existingAudiobook.Title = request.Title;
         if (request.Subtitle != null) existingAudiobook.Subtitle = request.Subtitle;
         if (request.Authors != null) existingAudiobook.Authors = request.Authors;
-        if (!basePathRewritten && request.ImageUrl != null) existingAudiobook.ImageUrl = request.ImageUrl;
+        if (request.ImageUrl != null && !suppressStaleImageUrl)
+        {
+            existingAudiobook.ImageUrl = request.ImageUrl;
+        }
         if (request.PublishYear != null) existingAudiobook.PublishYear = request.PublishYear;
         if (request.PublishedDate != null) existingAudiobook.PublishedDate = request.PublishedDate;
         if (request.Description != null) existingAudiobook.Description = request.Description;
@@ -70,9 +74,13 @@ public sealed partial class LibraryUpdateWorkflow
             AudiobookIdentifierMapper.SyncImportedIdentifiersFromLegacyFields(existingAudiobook);
         }
 
-        if (metadataUpdateRequested)
+        if (metadataUpdateRequested
+            && !await repository.UpdateAsync(existingAudiobook))
         {
-            await repository.UpdateAsync(existingAudiobook);
+            return new NotFoundObjectResult(new
+            {
+                message = "Audiobook not found"
+            });
         }
 
         _logger.LogInformation(

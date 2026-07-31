@@ -7,6 +7,12 @@ namespace Listenarr.Infrastructure.Library.Moving;
 
 public sealed partial class RootFolderRelocationService
 {
+    internal Action? AfterMetadataOnlyJournalCommitForTest
+    {
+        get;
+        set;
+    }
+
     internal Action? AfterMetadataOnlyCommitForTest
     {
         get;
@@ -131,11 +137,14 @@ public sealed partial class RootFolderRelocationService
         cancellationToken.ThrowIfCancellationRequested();
         await transaction.CommitAsync(CancellationToken.None);
 
+        var completionToken = CancellationToken.None;
+        AfterMetadataOnlyJournalCommitForTest?.Invoke();
         try
         {
             await PublishOwnershipMigrationTargetsAsync(
                 ownershipPlans,
-                cancellationToken);
+                targetPath,
+                completionToken);
             foreach (var plan in ownershipPlans)
             {
                 plan.Journal.State =
@@ -143,11 +152,10 @@ public sealed partial class RootFolderRelocationService
                         .MarkersPublished;
                 plan.Journal.UpdatedAt = DateTime.UtcNow;
             }
-            await db.SaveChangesAsync(cancellationToken);
+            await db.SaveChangesAsync(completionToken);
         }
         catch (Exception exception) when (exception is not (
-            OperationCanceledException or OutOfMemoryException
-                or StackOverflowException))
+            OutOfMemoryException or StackOverflowException))
         {
             metadataRelocation.Status =
                 RootFolderRelocationStatus.NeedsAttention;
@@ -155,12 +163,12 @@ public sealed partial class RootFolderRelocationService
                 $"Directory ownership marker migration requires attention: {exception.Message}";
             metadataRelocation.UpdatedAt =
                 timeProvider.GetUtcNow().UtcDateTime;
-            await db.SaveChangesAsync(CancellationToken.None);
+            await db.SaveChangesAsync(completionToken);
             throw;
         }
 
         await using var metadataTransaction =
-            await db.Database.BeginTransactionAsync(cancellationToken);
+            await db.Database.BeginTransactionAsync(completionToken);
         foreach (var plan in metadataPlans)
         {
             AudiobookPathReferenceRewriter.Rewrite(
@@ -175,7 +183,7 @@ public sealed partial class RootFolderRelocationService
 
         RejectDuplicateAudiobookFileOwnership(db);
         ApplyOwnershipMigrationMetadata(ownershipPlans, nowUtc);
-        await db.SaveChangesAsync(cancellationToken);
+        await db.SaveChangesAsync(completionToken);
         AssignOwnershipMigrationKeys(ownershipPlans, nowUtc);
         ApplyRootMetadata(
             root,
@@ -189,7 +197,7 @@ public sealed partial class RootFolderRelocationService
             await ClearOtherDefaultsAsync(
                 db,
                 rootFolderId,
-                cancellationToken);
+                completionToken);
         }
 
         metadataRelocation.CompletedJobs = completed;
@@ -208,8 +216,7 @@ public sealed partial class RootFolderRelocationService
                 ? metadataRelocation.TargetIdentityEnrollmentState
                 : TargetIdentityEnrollmentState.NotRequired;
         metadataRelocation.UpdatedAt = nowUtc;
-        await db.SaveChangesAsync(cancellationToken);
-        cancellationToken.ThrowIfCancellationRequested();
+        await db.SaveChangesAsync(completionToken);
         await metadataTransaction.CommitAsync(CancellationToken.None);
 
         try
@@ -217,8 +224,12 @@ public sealed partial class RootFolderRelocationService
             AfterMetadataOnlyCommitForTest?.Invoke();
             await PublishOwnershipMigrationTargetsAsync(
                 ownershipPlans,
+                targetPath,
                 CancellationToken.None);
-            RetireOwnershipMigrationSources(ownershipPlans);
+            RetireOwnershipMigrationSources(
+                ownershipPlans,
+                sourcePath,
+                targetPath);
             db.LibraryDirectoryOwnershipPathMigrations.RemoveRange(
                 ownershipPlans.Select(plan => plan.Journal));
             var completedWithoutAttention = skipped.Count == 0;

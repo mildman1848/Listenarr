@@ -207,15 +207,25 @@ public sealed partial class RootFolderRelocationService
 
     private static async Task PublishOwnershipMigrationTargetsAsync(
         IReadOnlyList<OwnershipMigrationPlan> plans,
+        string targetBoundary,
         CancellationToken cancellationToken)
     {
         foreach (var plan in plans)
         {
             cancellationToken.ThrowIfCancellationRequested();
+            var targetParentPath = Path.GetDirectoryName(
+                plan.Target.CanonicalPath)
+                ?? throw new InvalidOperationException(
+                    "The migrated ownership target has no parent directory.");
+            using var targetParent = OpenMarkerParentWithinBoundary(
+                targetBoundary,
+                targetParentPath,
+                plan.Target.GetIdentity().Semantics);
             await PinnedLibraryDirectoryOwnershipMarker
                 .PublishMigrationTargetAsync(
                     plan.Source,
                     plan.Target,
+                    targetParent,
                     cancellationToken);
         }
     }
@@ -262,38 +272,6 @@ public sealed partial class RootFolderRelocationService
                 LibraryDirectoryOwnershipPathMigrationState
                     .MetadataCommitted;
             plan.Journal.UpdatedAt = now;
-        }
-    }
-
-    private static void RetireOwnershipMigrationSources(
-        IReadOnlyList<OwnershipMigrationPlan> plans)
-    {
-        foreach (var plan in plans)
-        {
-            var sourceSiblingMarker =
-                LibraryDirectoryOwnershipMarker.GetMarkerPaths(
-                    plan.Source)[1];
-            var targetSiblingMarker =
-                LibraryDirectoryOwnershipMarker.GetMarkerPaths(
-                    plan.Target)[1];
-            if (FileSystemPathIdentity.AreEquivalentEndpoints(
-                    sourceSiblingMarker,
-                    plan.Source.GetIdentity().Semantics,
-                    targetSiblingMarker,
-                    plan.Target.GetIdentity().Semantics))
-            {
-                continue;
-            }
-
-            if (!LibraryDirectoryOwnershipMarker
-                .TryDeleteRetiredSiblingMarker(
-                    plan.Source,
-                    out var reason))
-            {
-                throw new InvalidOperationException(
-                    reason
-                        ?? "The retired ownership marker could not be removed.");
-            }
         }
     }
 

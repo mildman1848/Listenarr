@@ -7,6 +7,7 @@ internal sealed partial class AudiobookScanService
 {
     private async Task<IReadOnlyList<AudiobookScanRemovedFile>> ReconcileMissingFilesAsync(
         AudiobookScanCommand command,
+        PinnedScanAuthority pinnedAuthority,
         Audiobook audiobook,
         IReadOnlyCollection<AudiobookFile> existingFiles,
         IReadOnlyDictionary<int, string> resolvedPaths,
@@ -30,7 +31,7 @@ internal sealed partial class AudiobookScanService
                 "ReconciliationSkippedIncompleteScan",
                 command.ScanRoot,
                 "Filesystem discovery was incomplete; destructive reconciliation was skipped."));
-            await historyRepository.AddAsync(new History
+            await TryAddHistoryAsync(new History
             {
                 AudiobookId = audiobook.Id,
                 AudiobookTitle = audiobook.Title ?? "Unknown",
@@ -74,9 +75,109 @@ internal sealed partial class AudiobookScanService
                 continue;
             }
 
-            if (fileSystem.FileExists(resolvedPath))
+            ValidateNearestDirectorySnapshot(
+                command,
+                pinnedAuthority,
+                discovery,
+                resolvedPath);
+            if (PinnedFileExists(command, pinnedAuthority, resolvedPath))
             {
-                if (!discovery.AttributedFiles.Contains(resolvedPath, semantics.Comparer))
+                var canonicalResolvedPath = FileSystemPathIdentity.Canonicalize(
+                    resolvedPath,
+                    command.ScanIdentity.Syntax);
+                var isAttributed = discovery.AttributedFiles.Contains(
+                    resolvedPath,
+                    semantics.Comparer);
+                var hasDiscoveredIdentity = discovery.FileObjectIdentities.TryGetValue(
+                    canonicalResolvedPath,
+                    out var discoveredPhysicalIdentity);
+                var physicalGenerationChanged = hasDiscoveredIdentity
+                    && !string.IsNullOrWhiteSpace(file.PhysicalObjectIdentity)
+                    && !string.Equals(
+                        file.PhysicalObjectIdentity,
+                        discoveredPhysicalIdentity,
+                        StringComparison.Ordinal);
+                var physicalIdentityMissing = hasDiscoveredIdentity
+                    && string.IsNullOrWhiteSpace(file.PhysicalObjectIdentity);
+                if ((physicalGenerationChanged || physicalIdentityMissing)
+                    && !isAttributed)
+                {
+                    diagnostics.Add(new AudiobookScanDiagnostic(
+                        physicalGenerationChanged
+                            ? "TrackedFileGenerationChangedWithoutAttribution"
+                            : "TrackedFilePhysicalIdentityNotBackfilled",
+                        resolvedPath,
+                        physicalGenerationChanged
+                            ? "The tracked pathname identifies a replacement generation, but attribution was inconclusive; the existing row was preserved for operator review."
+                            : "The tracked file was not attributed confidently enough to backfill its physical identity."));
+                    continue;
+                }
+
+                if ((physicalGenerationChanged || physicalIdentityMissing)
+                    && isAttributed)
+                {
+                    await ValidateCommandAsync(command, cancellationToken);
+                    ValidateDiscoveredPathParent(
+                        command,
+                        pinnedAuthority,
+                        discovery,
+                        resolvedPath);
+                    using var registrationLease = OpenPinnedMetadataFile(
+                        command,
+                        pinnedAuthority,
+                        discovery,
+                        resolvedPath);
+                    var refreshed = await fileService.RefreshPhysicalGenerationAsync(
+                        audiobook,
+                        file.Id,
+                        file.PhysicalObjectIdentity,
+                        registrationLease,
+                        physicalGenerationChanged
+                            ? command.Source + "-replacement"
+                            : file.Source ?? command.Source,
+                        cancellationToken);
+                    if (!refreshed)
+                    {
+                        diagnostics.Add(new AudiobookScanDiagnostic(
+                            physicalGenerationChanged
+                                ? "TrackedFileGenerationReplacementDeferred"
+                                : "TrackedFilePhysicalIdentityBackfillDeferred",
+                            resolvedPath,
+                            "The physical file generation changed before its durable row could be updated; the existing row was preserved."));
+                        continue;
+                    }
+
+                    diagnostics.Add(new AudiobookScanDiagnostic(
+                        physicalGenerationChanged
+                            ? "TrackedFileGenerationReplaced"
+                            : "TrackedFilePhysicalIdentityBackfilled",
+                        resolvedPath,
+                        physicalGenerationChanged
+                            ? "The tracked pathname now identifies a different physical file generation; the existing row was updated atomically."
+                            : "The tracked file row was enrolled with its verified physical object identity."));
+                    if (physicalGenerationChanged)
+                    {
+                        await TryAddHistoryAsync(new History
+                        {
+                            AudiobookId = audiobook.Id,
+                            AudiobookTitle = audiobook.Title ?? "Unknown",
+                            EventType = "File Replaced",
+                            Message = $"Tracked file generation replaced: {Path.GetFileName(file.Path)}",
+                            Source = command.Source,
+                            CorrelationId = command.CorrelationId,
+                            Data = JsonSerializer.Serialize(new
+                            {
+                                StoredPath = file.Path,
+                                ResolvedPath = resolvedPath,
+                                PreviousPhysicalObjectIdentity = file.PhysicalObjectIdentity,
+                                CurrentPhysicalObjectIdentity = discoveredPhysicalIdentity
+                            }),
+                            Timestamp = DateTime.UtcNow
+                        }, CancellationToken.None);
+                    }
+                }
+
+                if (!isAttributed)
                 {
                     diagnostics.Add(new AudiobookScanDiagnostic(
                         "ExistingFileNotAttributed",
@@ -87,9 +188,37 @@ internal sealed partial class AudiobookScanService
                 continue;
             }
 
-            await fileRepository.DeleteAsync(file.Id, cancellationToken);
+            await ValidateCommandAsync(command, cancellationToken);
+            ValidateNearestDirectorySnapshot(
+                command,
+                pinnedAuthority,
+                discovery,
+                resolvedPath);
+            if (PinnedFileExists(command, pinnedAuthority, resolvedPath))
+            {
+                diagnostics.Add(new AudiobookScanDiagnostic(
+                    "TrackedFileReappeared",
+                    resolvedPath,
+                    "The tracked file reappeared before reconciliation and was preserved."));
+                continue;
+            }
+
+            if (!await fileRepository.DeletePhysicalGenerationAsync(
+                    file.Id,
+                    file.AudiobookId,
+                    file.Path,
+                    file.PhysicalObjectIdentity,
+                    cancellationToken))
+            {
+                diagnostics.Add(new AudiobookScanDiagnostic(
+                    "TrackedFileChangedBeforeRemoval",
+                    resolvedPath,
+                    "The tracked file row changed before verified-missing reconciliation and was preserved."));
+                continue;
+            }
+
             removed.Add(new AudiobookScanRemovedFile(file.Id, file.Path));
-            await historyRepository.AddAsync(new History
+            await TryAddHistoryAsync(new History
             {
                 AudiobookId = audiobook.Id,
                 AudiobookTitle = audiobook.Title ?? "Unknown",
@@ -106,7 +235,7 @@ internal sealed partial class AudiobookScanService
                     file.Source
                 }),
                 Timestamp = DateTime.UtcNow
-            }, cancellationToken);
+            }, CancellationToken.None);
         }
 
         return removed;
@@ -114,6 +243,7 @@ internal sealed partial class AudiobookScanService
 
     private async Task<int> ReconcileLegacyFilePathAsync(
         AudiobookScanCommand command,
+        PinnedScanAuthority pinnedAuthority,
         Audiobook audiobook,
         ScanDiscoveryResult discovery,
         FileSystemPathSemantics semantics,
@@ -140,7 +270,12 @@ internal sealed partial class AudiobookScanService
             return 0;
         }
 
-        if (fileSystem.FileExists(resolvedPath))
+        ValidateNearestDirectorySnapshot(
+            command,
+            pinnedAuthority,
+            discovery,
+            resolvedPath);
+        if (PinnedFileExists(command, pinnedAuthority, resolvedPath))
         {
             if (!discovery.AttributedFiles.Contains(
                     resolvedPath,
@@ -153,9 +288,14 @@ internal sealed partial class AudiobookScanService
                 return 0;
             }
 
+            using var registrationLease = OpenPinnedMetadataFile(
+                command,
+                pinnedAuthority,
+                discovery,
+                resolvedPath);
             return await fileService.EnsureAudiobookFileAsync(
                 audiobook,
-                resolvedPath,
+                registrationLease,
                 command.Source + "-legacy",
                 cancellationToken)
                 ? 1
@@ -177,10 +317,37 @@ internal sealed partial class AudiobookScanService
             return 0;
         }
 
+        await ValidateCommandAsync(command, cancellationToken);
+        ValidateNearestDirectorySnapshot(
+            command,
+            pinnedAuthority,
+            discovery,
+            resolvedPath);
+        if (PinnedFileExists(command, pinnedAuthority, resolvedPath))
+        {
+            diagnostics.Add(new AudiobookScanDiagnostic(
+                "LegacyPathReappeared",
+                resolvedPath,
+                "The legacy file reappeared before reconciliation and was preserved."));
+            return 0;
+        }
+
+        var previousFilePath = audiobook.FilePath;
+        var previousFileSize = audiobook.FileSize;
         audiobook.FilePath = null;
         audiobook.FileSize = null;
-        await audiobookRepository.UpdateAsync(audiobook);
-        await historyRepository.AddAsync(new History
+        if (!await audiobookRepository.UpdateAsync(audiobook))
+        {
+            audiobook.FilePath = previousFilePath;
+            audiobook.FileSize = previousFileSize;
+            diagnostics.Add(new AudiobookScanDiagnostic(
+                "LegacyPathPersistenceFailed",
+                resolvedPath,
+                "The verified-missing legacy path could not be cleared from storage."));
+            return 0;
+        }
+
+        await TryAddHistoryAsync(new History
         {
             AudiobookId = audiobook.Id,
             AudiobookTitle = audiobook.Title ?? "Unknown",
@@ -195,7 +362,7 @@ internal sealed partial class AudiobookScanService
                 Source = "legacy-reconciliation"
             }),
             Timestamp = DateTime.UtcNow
-        }, cancellationToken);
+        }, CancellationToken.None);
         return 0;
     }
 
@@ -244,7 +411,7 @@ internal sealed partial class AudiobookScanService
             ArgumentException or NotSupportedException or PathTooLongException
             or System.Security.SecurityException)
         {
-            reason = exception.Message;
+            reason = "The legacy audiobook file path is invalid for this filesystem.";
             return false;
         }
     }

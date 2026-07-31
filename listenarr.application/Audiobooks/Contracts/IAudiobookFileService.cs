@@ -1,6 +1,19 @@
 
 namespace Listenarr.Application.Audiobooks.Contracts
 {
+    public interface IAudiobookFileRegistrationLease : IDisposable
+    {
+        string PublicPath { get; }
+        string MetadataPath { get; }
+        string PhysicalObjectIdentity { get; }
+        string? SourcePhysicalObjectIdentity { get; }
+        bool MatchesCurrentPublication();
+        bool CompletePublication();
+        Task<bool> MatchesContentAsync(
+            Stream candidateStream,
+            CancellationToken cancellationToken = default);
+    }
+
     /// <summary>
     /// Manages audio file metadata extraction and database tracking
     /// </summary>
@@ -19,6 +32,38 @@ namespace Listenarr.Application.Audiobooks.Contracts
             string filePath,
             string? source = "scan",
             CancellationToken cancellationToken = default);
+
+        Task<bool> EnsureAudiobookFileAsync(
+            Audiobook audiobook,
+            IAudiobookFileRegistrationLease registrationLease,
+            string? source = "scan",
+            CancellationToken cancellationToken = default);
+
+        Task<bool> RefreshPhysicalGenerationAsync(
+            Audiobook audiobook,
+            int fileId,
+            string? expectedPhysicalObjectIdentity,
+            IAudiobookFileRegistrationLease registrationLease,
+            string? source = "scan",
+            CancellationToken cancellationToken = default);
+
+        Task<bool> RollbackPhysicalGenerationClaimAsync(
+            Audiobook audiobook,
+            int fileId,
+            string? expectedPath,
+            string expectedPhysicalObjectIdentity,
+            CancellationToken cancellationToken = default);
+
+        Task<bool> RegisterPublishedGenerationAsync(
+            Audiobook audiobook,
+            AudiobookFileOwnershipCheckResult initialOwnership,
+            IAudiobookFileRegistrationLease registrationLease,
+            string? source = "scan",
+            CancellationToken cancellationToken = default);
+
+        Task RollbackPublishedGenerationIfStaleAsync(
+            Audiobook audiobook,
+            IAudiobookFileRegistrationLease registrationLease);
 
         Task<AudiobookFileOwnershipCheckResult> CheckAudiobookFileOwnershipAsync(
             Audiobook audiobook,

@@ -992,6 +992,8 @@ export interface ManualImportRequest {
 
 export interface ManualImportResult {
   success: boolean
+  skipped?: boolean
+  skipReason?: string
   filePath?: string
   destinationPath?: string
   audiobookId?: number

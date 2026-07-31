@@ -20,7 +20,7 @@ using Microsoft.EntityFrameworkCore;
 
 namespace Listenarr.Infrastructure.Persistence.Repositories
 {
-    public class EfAudiobookFileRepository : IAudiobookFileRepository
+    public partial class EfAudiobookFileRepository : IAudiobookFileRepository
     {
         private readonly ListenArrDbContext _db;
 
@@ -296,7 +296,10 @@ namespace Listenarr.Infrastructure.Persistence.Repositories
             nameof(AudiobookFile.PathOwnershipKey),
             nameof(AudiobookFile.PathIdentityVersion),
             nameof(AudiobookFile.PathIdentityState),
-            nameof(AudiobookFile.PathIdentityReason)
+            nameof(AudiobookFile.PathIdentityReason),
+            nameof(AudiobookFile.PhysicalObjectIdentity),
+            nameof(AudiobookFile.PhysicalIdentityVersion),
+            nameof(AudiobookFile.PhysicalIdentityObservedAtUtc)
         ];
 
         private static bool UnresolvedIdentityOverlaps(

@@ -18,6 +18,7 @@
 using Microsoft.EntityFrameworkCore;
 using Xunit.Abstractions;
 using Listenarr.Infrastructure.Persistence.Repositories;
+using Listenarr.Tests.Common;
 using AppRootFolderService = Listenarr.Application.Audiobooks.RootFolders.RootFolderService;
 using RootFolderService = Listenarr.Tests.Features.Application.Audiobooks.RootFolders.RootFolderServiceTestAdapter;
 
@@ -198,13 +199,9 @@ namespace Listenarr.Tests.Features.Application.Audiobooks.RootFolders
             Assert.Equal(Path.GetFullPath(filesystemRoot!), created.Path);
         }
 
-        [Fact]
+        [WindowsFact]
         public async Task Create_AllowsWindowsCurrentDriveRootPath()
         {
-            if (!OperatingSystem.IsWindows())
-            {
-                return;
-            }
 
             var options = new DbContextOptionsBuilder<ListenArrDbContext>()
                 .UseInMemoryDatabase(Guid.NewGuid().ToString())
@@ -359,13 +356,9 @@ namespace Listenarr.Tests.Features.Application.Audiobooks.RootFolders
             Assert.Contains("nested", exception.Message, StringComparison.OrdinalIgnoreCase);
         }
 
-        [Fact]
+        [LinuxFact]
         public async Task Create_InsensitiveRequestedRootRejectsCaseVariantNestedExistingRoot()
         {
-            if (OperatingSystem.IsWindows())
-            {
-                return;
-            }
 
             var options = new DbContextOptionsBuilder<ListenArrDbContext>()
                 .UseInMemoryDatabase(Guid.NewGuid().ToString())
@@ -437,13 +430,9 @@ namespace Listenarr.Tests.Features.Application.Audiobooks.RootFolders
             Assert.Contains("contain", exception.Message, StringComparison.OrdinalIgnoreCase);
         }
 
-        [Fact]
+        [WindowsFact]
         public async Task Create_Throws_WhenWindowsCaseOnlyDuplicate()
         {
-            if (!OperatingSystem.IsWindows())
-            {
-                return;
-            }
 
             var options = new DbContextOptionsBuilder<ListenArrDbContext>()
                 .UseInMemoryDatabase(Guid.NewGuid().ToString())
@@ -985,10 +974,9 @@ namespace Listenarr.Tests.Features.Application.Audiobooks.RootFolders
                 It.IsAny<CancellationToken>()), Times.Never);
         }
 
-        [Fact]
+        [LinuxFact]
         public async Task Update_CaseOnlyRenameOnCaseSensitiveHost_MigratesAudiobookPaths()
         {
-            if (OperatingSystem.IsWindows()) return;
 
             var options = new DbContextOptionsBuilder<ListenArrDbContext>()
                 .UseInMemoryDatabase(Guid.NewGuid().ToString())

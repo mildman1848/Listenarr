@@ -168,29 +168,55 @@ namespace Listenarr.Infrastructure.Library.Scanning
             CancellationToken cancellationToken)
         {
             var moveOwned = job.MoveScanHandoffId.HasValue;
-            var usedBasePath = string.IsNullOrWhiteSpace(job.Path)
+            var usedBasePath =
+                job.AuthorizationMode == ScanAuthorizationMode.ResolveCurrentAudiobookPath
                 && !string.IsNullOrWhiteSpace(audiobook.BasePath);
-            if (moveOwned
-                && (string.IsNullOrWhiteSpace(job.Path)
-                    || !job.PathIdentity.HasValue))
+            var authorizationContractError = ValidateAuthorizationContract(job, moveOwned);
+            if (authorizationContractError != null)
             {
                 return await RejectScanAsync(
                     historyRepository,
                     job,
                     audiobook,
-                    "The move scan handoff has no authoritative target filesystem identity.",
+                    authorizationContractError,
                     cancellationToken);
+            }
+
+            var requestedScanPath =
+                job.AuthorizationMode == ScanAuthorizationMode.ResolveCurrentAudiobookPath
+                    ? audiobook.BasePath
+                    : job.Path;
+            if (!string.IsNullOrWhiteSpace(requestedScanPath)
+                && !Directory.Exists(requestedScanPath))
+            {
+                var missingError = usedBasePath
+                    ? "BasePath unavailable"
+                    : "Scan path not found";
+                var missing = await RejectScanAsync(
+                    historyRepository,
+                    job,
+                    audiobook,
+                    missingError,
+                    cancellationToken);
+                return missing with
+                {
+                    BroadcastFailure = usedBasePath,
+                    Metric = usedBasePath
+                        ? "worker.scan.job.failed"
+                        : "worker.scan.job.skipped"
+                };
             }
 
             var authorizationService = services
                 .GetRequiredService<IScanPathAuthorizationService>();
-            var authorization = string.IsNullOrWhiteSpace(job.Path)
-                ? await authorizationService.ResolveDefaultAsync(
-                    audiobook.BasePath,
-                    cancellationToken)
-                : await authorizationService.AuthorizeAsync(
-                    job.Path,
-                    cancellationToken);
+            var authorization =
+                job.AuthorizationMode == ScanAuthorizationMode.ResolveCurrentAudiobookPath
+                    ? await authorizationService.ResolveDefaultAsync(
+                        audiobook.BasePath,
+                        cancellationToken)
+                    : await authorizationService.AuthorizeAsync(
+                        job.Path!,
+                        cancellationToken);
             if (!authorization.IsAuthorized)
             {
                 var rejection = await RejectScanAsync(
@@ -210,6 +236,7 @@ namespace Listenarr.Infrastructure.Library.Scanning
 
             var scanRoot = authorization.Path!;
             var identity = authorization.Identity!.Value;
+            var physicalIdentity = authorization.PhysicalIdentity!.Value;
             if (job.PathIdentity.HasValue)
             {
                 try
@@ -235,6 +262,17 @@ namespace Listenarr.Infrastructure.Library.Scanning
                         exception.Message,
                         cancellationToken);
                 }
+            }
+
+            if (job.PhysicalIdentity.HasValue
+                && job.PhysicalIdentity.Value != physicalIdentity)
+            {
+                return await RejectScanAsync(
+                    historyRepository,
+                    job,
+                    audiobook,
+                    "The physical scan-root generation changed after the job was queued.",
+                    cancellationToken);
             }
 
             if (!Directory.Exists(scanRoot))
@@ -278,12 +316,53 @@ namespace Listenarr.Infrastructure.Library.Scanning
                     audiobook.Id,
                     scanRoot,
                     identity,
+                    physicalIdentity,
                     MoveOwned: moveOwned,
                     AllowReconciliation: true,
-                    IsAuthoritativeScope: moveOwned || job.IsAuthoritativeScope,
+                    IsAuthoritativeScope: job.AuthorizationMode switch
+                    {
+                        ScanAuthorizationMode.ResolveCurrentAudiobookPath =>
+                            job.IsAuthoritativeScope,
+                        ScanAuthorizationMode.PreauthorizedPath =>
+                            job.IsAuthoritativeScope,
+                        ScanAuthorizationMode.MoveHandoff =>
+                            moveOwned && job.IsAuthoritativeScope,
+                        _ => false
+                    },
                     Source: "LibraryScan",
                     CorrelationId: job.CorrelationId ?? job.Id.ToString("N")),
                 "worker.scan.job.completed");
+        }
+
+        private static string? ValidateAuthorizationContract(
+            ScanJob job,
+            bool moveOwned)
+        {
+            return job.AuthorizationMode switch
+            {
+                ScanAuthorizationMode.ResolveCurrentAudiobookPath
+                    when moveOwned
+                        || !string.IsNullOrWhiteSpace(job.Path)
+                        || job.PathIdentity.HasValue
+                        || job.PhysicalIdentity.HasValue =>
+                    "The current-path scan contains incompatible queued path authority.",
+                ScanAuthorizationMode.PreauthorizedPath
+                    when moveOwned
+                        || string.IsNullOrWhiteSpace(job.Path)
+                        || !job.PathIdentity.HasValue
+                        || !job.PhysicalIdentity.HasValue =>
+                    "The preauthorized scan has incomplete or incompatible queued path authority.",
+                ScanAuthorizationMode.MoveHandoff
+                    when !moveOwned
+                        || string.IsNullOrWhiteSpace(job.Path)
+                        || !job.PathIdentity.HasValue
+                        || !job.PhysicalIdentity.HasValue =>
+                    "The move scan handoff has incomplete or incompatible target filesystem authority.",
+                ScanAuthorizationMode.ResolveCurrentAudiobookPath
+                    or ScanAuthorizationMode.PreauthorizedPath
+                    or ScanAuthorizationMode.MoveHandoff => null,
+                _ => "The scan job has an unknown authorization mode."
+            };
         }
 
         private static bool PersistedAuthorizationMatches(

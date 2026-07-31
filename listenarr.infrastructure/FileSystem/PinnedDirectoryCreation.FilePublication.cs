@@ -9,6 +9,29 @@ internal sealed partial class PinnedDirectoryCreation
 {
     internal sealed partial class PinnedDirectoryAnchor
     {
+        internal bool TryExchangeRelativeFiles(
+            string firstName,
+            string secondName)
+        {
+            ThrowIfDisposed();
+            ValidateLeafName(firstName);
+            ValidateLeafName(secondName);
+            if (!OperatingSystem.IsLinux() || !VisiblePathMatches())
+            {
+                return false;
+            }
+
+            var directoryFileDescriptor = _handle
+                .DangerousGetHandle()
+                .ToInt32();
+            return RenameAtNoReplaceLinux(
+                    directoryFileDescriptor,
+                    firstName,
+                    directoryFileDescriptor,
+                    secondName,
+                    RenameExchange) == 0;
+        }
+
         internal async Task PublishNewFileAsync(
             string temporaryFileName,
             string finalFileName,
@@ -152,20 +175,35 @@ internal sealed partial class PinnedDirectoryCreation
                 Marshal.WriteByte(buffer, index, 0);
             }
 
-            Marshal.WriteByte(buffer, 0, replaceExisting ? (byte)1 : (byte)0);
+            const int fileRenameInformation = 10;
+            const int fileRenameInformationEx = 65;
+            const int fileRenameReplaceIfExists = 0x00000001;
+            const int fileRenamePosixSemantics = 0x00000002;
+            if (replaceExisting)
+            {
+                Marshal.WriteInt32(
+                    buffer,
+                    0,
+                    fileRenameReplaceIfExists | fileRenamePosixSemantics);
+            }
+            else
+            {
+                Marshal.WriteByte(buffer, 0, 0);
+            }
             Marshal.WriteIntPtr(
                 buffer,
                 rootDirectoryOffset,
                 directoryHandle.DangerousGetHandle());
             Marshal.WriteInt32(buffer, fileNameLengthOffset, fileNameBytes.Length);
             Marshal.Copy(fileNameBytes, 0, buffer + fileNameOffset, fileNameBytes.Length);
-            const int fileRenameInformation = 10;
             var status = NtSetInformationFile(
                 entryHandle,
                 out _,
                 buffer,
                 checked((uint)bufferSize),
-                fileRenameInformation);
+                replaceExisting
+                    ? fileRenameInformationEx
+                    : fileRenameInformation);
             if (status < 0)
             {
                 var error = unchecked((int)RtlNtStatusToDosError(status));

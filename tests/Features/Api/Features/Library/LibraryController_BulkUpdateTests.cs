@@ -27,6 +27,253 @@ namespace Listenarr.Tests.Features.Api.Features.Library
     public sealed class LibraryController_BulkUpdateTests : BaseTests
     {
         [Fact]
+        public async Task BulkDelete_DatabaseFailure_PreservesCachedImageAndDoesNotWriteDeletionHistory()
+        {
+            var audiobook = new Audiobook
+            {
+                Id = 8123,
+                Title = "Delete Failure",
+                Asin = "B000DELETE"
+            };
+            var repository = new Mock<IAudiobookRepository>(MockBehavior.Strict);
+            repository.Setup(service => service.GetByIdAsync(audiobook.Id))
+                .ReturnsAsync(audiobook);
+            repository.Setup(service => service.DeleteByIdAsync(audiobook.Id))
+                .ReturnsAsync(false);
+            var imageCache = new Mock<IImageCacheService>(MockBehavior.Strict);
+            var history = new Mock<IHistoryRepository>(MockBehavior.Strict);
+            var fileSystem = new Mock<IFileSystem>(MockBehavior.Strict);
+            Init(services => services
+                .WithSingleton<IAudiobookRepository>(repository.Object)
+                .WithSingleton<IImageCacheService>(imageCache.Object)
+                .WithSingleton<IHistoryRepository>(history.Object)
+                .WithSingleton<IFileSystem>(fileSystem.Object));
+
+            var result = await _provider.GetRequiredService<LibraryController>()
+                .BulkDeleteAudiobooks(new LibraryController.BulkDeleteRequest
+                {
+                    Ids = [audiobook.Id]
+                });
+
+            var badRequest = Assert.IsType<BadRequestObjectResult>(result);
+            var json = JsonSerializer.Serialize(badRequest.Value);
+            Assert.Contains(
+                $"Failed to delete audiobook with ID {audiobook.Id}",
+                json,
+                StringComparison.Ordinal);
+            repository.Verify(service => service.GetByIdAsync(audiobook.Id), Times.Once);
+            repository.Verify(service => service.DeleteByIdAsync(audiobook.Id), Times.Once);
+            repository.VerifyNoOtherCalls();
+            imageCache.VerifyNoOtherCalls();
+            history.VerifyNoOtherCalls();
+            fileSystem.VerifyNoOtherCalls();
+        }
+
+        [Fact]
+        public async Task BulkUpdate_DatabaseFailure_DoesNotWriteHistoryOrExposeInternalError()
+        {
+            var audiobook = new Audiobook
+            {
+                Id = 8124,
+                Title = "Update Failure",
+                Monitored = false
+            };
+            var repository = new Mock<IAudiobookRepository>(MockBehavior.Strict);
+            repository.Setup(service => service.GetByIdAsync(audiobook.Id))
+                .ReturnsAsync(audiobook);
+            repository.Setup(service => service.UpdateAsync(audiobook))
+                .ThrowsAsync(new InvalidOperationException(
+                    "C:\\private\\database worker secret"));
+            var history = new Mock<IHistoryRepository>(MockBehavior.Strict);
+            Init(services => services
+                .WithSingleton<IAudiobookRepository>(repository.Object)
+                .WithSingleton<IHistoryRepository>(history.Object));
+
+            var result = await _provider.GetRequiredService<LibraryController>()
+                .BulkUpdateAudiobooks(new LibraryController.BulkUpdateRequest
+                {
+                    Ids = [audiobook.Id],
+                    Updates = new Dictionary<string, object>
+                    {
+                        ["monitored"] = true
+                    }
+                });
+
+            var ok = Assert.IsType<OkObjectResult>(result);
+            var json = JsonSerializer.Serialize(ok.Value);
+            Assert.Contains("Unhandled bulk update error", json, StringComparison.Ordinal);
+            Assert.DoesNotContain("worker secret", json, StringComparison.OrdinalIgnoreCase);
+            repository.Verify(service => service.GetByIdAsync(audiobook.Id), Times.Once);
+            repository.Verify(service => service.UpdateAsync(audiobook), Times.Once);
+            repository.VerifyNoOtherCalls();
+            history.VerifyNoOtherCalls();
+        }
+
+        [Fact]
+        public async Task BulkUpdate_UpdateReturnsFalse_DoesNotWriteHistoryOrReportMetadataUpdated()
+        {
+            var audiobook = new Audiobook
+            {
+                Id = 8126,
+                Title = "Update Lost",
+                Monitored = false
+            };
+            var repository = new Mock<IAudiobookRepository>(MockBehavior.Strict);
+            repository.Setup(service => service.GetByIdAsync(audiobook.Id))
+                .ReturnsAsync(audiobook);
+            repository.Setup(service => service.UpdateAsync(audiobook))
+                .ReturnsAsync(false);
+            var history = new Mock<IHistoryRepository>(MockBehavior.Strict);
+            Init(services => services
+                .WithSingleton<IAudiobookRepository>(repository.Object)
+                .WithSingleton<IHistoryRepository>(history.Object));
+
+            var result = await _provider.GetRequiredService<LibraryController>()
+                .BulkUpdateAudiobooks(new LibraryController.BulkUpdateRequest
+                {
+                    Ids = [audiobook.Id],
+                    Updates = new Dictionary<string, object>
+                    {
+                        ["monitored"] = true
+                    }
+                });
+
+            var ok = Assert.IsType<OkObjectResult>(result);
+            var json = JsonSerializer.Serialize(ok.Value);
+            Assert.Contains("disappeared", json, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains("\"metadataUpdated\":false", json, StringComparison.OrdinalIgnoreCase);
+            history.VerifyNoOtherCalls();
+        }
+
+        [Theory]
+        [InlineData("\"false\"")]
+        [InlineData("0")]
+        [InlineData("null")]
+        [InlineData("{}")]
+        public async Task BulkUpdate_InvalidJsonMonitoredValue_DoesNotDisableMonitoring(
+            string jsonValue)
+        {
+            var audiobook = new Audiobook
+            {
+                Id = 8127,
+                Title = "Strict Boolean Update",
+                Monitored = true
+            };
+            var repository = new Mock<IAudiobookRepository>(MockBehavior.Strict);
+            repository.Setup(service => service.GetByIdAsync(audiobook.Id))
+                .ReturnsAsync(audiobook);
+            var history = new Mock<IHistoryRepository>(MockBehavior.Strict);
+            Init(services => services
+                .WithSingleton<IAudiobookRepository>(repository.Object)
+                .WithSingleton<IHistoryRepository>(history.Object));
+            using var document = JsonDocument.Parse(jsonValue);
+
+            var result = await _provider.GetRequiredService<LibraryController>()
+                .BulkUpdateAudiobooks(new LibraryController.BulkUpdateRequest
+                {
+                    Ids = [audiobook.Id],
+                    Updates = new Dictionary<string, object>
+                    {
+                        ["monitored"] = document.RootElement.Clone()
+                    }
+                });
+
+            var ok = Assert.IsType<OkObjectResult>(result);
+            var json = JsonSerializer.Serialize(ok.Value);
+            Assert.Contains("Invalid monitored value", json, StringComparison.Ordinal);
+            Assert.Contains("\"success\":false", json, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains("\"metadataUpdated\":false", json, StringComparison.OrdinalIgnoreCase);
+            Assert.True(audiobook.Monitored);
+            repository.Verify(service => service.GetByIdAsync(audiobook.Id), Times.Once);
+            repository.VerifyNoOtherCalls();
+            history.VerifyNoOtherCalls();
+        }
+
+        [Fact]
+        public async Task BulkUpdate_UndefinedPathChangeMode_IsRejectedBeforeMetadataMutation()
+        {
+            var audiobook = new Audiobook
+            {
+                Id = 8128,
+                Title = "Undefined Path Mode",
+                Monitored = true
+            };
+            var repository = new Mock<IAudiobookRepository>(MockBehavior.Strict);
+            var history = new Mock<IHistoryRepository>(MockBehavior.Strict);
+            Init(services => services
+                .WithSingleton<IAudiobookRepository>(repository.Object)
+                .WithSingleton<IHistoryRepository>(history.Object));
+
+            var result = await _provider.GetRequiredService<LibraryController>()
+                .BulkUpdateAudiobooks(new LibraryController.BulkUpdateRequest
+                {
+                    Ids = [audiobook.Id],
+                    Updates = new Dictionary<string, object>
+                    {
+                        ["monitored"] = false
+                    },
+                    PathChange = new LibraryController.BulkPathChangeRequest
+                    {
+                        Mode = (LibraryController.BulkPathChangeMode)999,
+                        DestinationRootOrPath = "ignored"
+                    }
+                });
+
+            var badRequest = Assert.IsType<BadRequestObjectResult>(result);
+            var json = JsonSerializer.Serialize(badRequest.Value);
+            Assert.Contains("Invalid path change mode", json, StringComparison.Ordinal);
+            Assert.True(audiobook.Monitored);
+            repository.VerifyNoOtherCalls();
+            history.VerifyNoOtherCalls();
+        }
+
+        [Fact]
+        public async Task BulkUpdate_HistoryFailure_DoesNotReverseCommittedMetadataUpdate()
+        {
+            var audiobook = new Audiobook
+            {
+                Id = 8125,
+                Title = "History Failure",
+                Monitored = false
+            };
+            var repository = new Mock<IAudiobookRepository>(MockBehavior.Strict);
+            repository.Setup(service => service.GetByIdAsync(audiobook.Id))
+                .ReturnsAsync(audiobook);
+            repository.Setup(service => service.UpdateAsync(audiobook))
+                .ReturnsAsync(true);
+            var history = new Mock<IHistoryRepository>(MockBehavior.Strict);
+            history.Setup(service => service.AddAsync(
+                    It.IsAny<History>(),
+                    It.IsAny<CancellationToken>()))
+                .ThrowsAsync(new InvalidOperationException("history unavailable"));
+            Init(services => services
+                .WithSingleton<IAudiobookRepository>(repository.Object)
+                .WithSingleton<IHistoryRepository>(history.Object));
+
+            var result = await _provider.GetRequiredService<LibraryController>()
+                .BulkUpdateAudiobooks(new LibraryController.BulkUpdateRequest
+                {
+                    Ids = [audiobook.Id],
+                    Updates = new Dictionary<string, object>
+                    {
+                        ["monitored"] = true
+                    }
+                });
+
+            var ok = Assert.IsType<OkObjectResult>(result);
+            var json = JsonSerializer.Serialize(ok.Value);
+            Assert.Contains("\"success\":true", json, StringComparison.OrdinalIgnoreCase);
+            Assert.True(audiobook.Monitored);
+            repository.Verify(service => service.GetByIdAsync(audiobook.Id), Times.Once);
+            repository.Verify(service => service.UpdateAsync(audiobook), Times.Once);
+            history.Verify(service => service.AddAsync(
+                It.Is<History>(entry =>
+                    entry.AudiobookId == audiobook.Id
+                    && entry.EventType == "Updated"),
+                It.IsAny<CancellationToken>()), Times.Once);
+        }
+
+        [Fact]
         public async Task BulkUpdate_PhysicalPathChange_EnqueuesFromAuthoritativeSourceWithoutRewritingPaths()
         {
             MoveEnqueueCommand? captured = null;
@@ -629,17 +876,6 @@ namespace Listenarr.Tests.Features.Api.Features.Library
             using var scope = _provider.CreateScope();
             var repository = scope.ServiceProvider.GetRequiredService<IAudiobookRepository>();
             return await repository.GetByIdAsync(id);
-        }
-    }
-
-    public sealed class LinuxFactAttribute : FactAttribute
-    {
-        public LinuxFactAttribute()
-        {
-            if (!OperatingSystem.IsLinux())
-            {
-                Skip = "This test requires Linux filesystem path semantics.";
-            }
         }
     }
 }

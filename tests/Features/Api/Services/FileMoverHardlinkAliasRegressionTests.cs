@@ -19,10 +19,9 @@ public sealed class FileMoverHardlinkAliasRegressionTests : BaseTests
         var root = FileService.GetTempDirectory("file-hardlink-alias");
         var source = await FileService.GetFileAsync(root, "source.m4b", "audio");
         var destination = Path.Join(root, "destination.m4b");
-        if (!TryCreateHardLink(destination, source))
-        {
-            return;
-        }
+        Assert.True(
+            TryCreateHardLink(destination, source),
+            "The required hard link could not be created.");
         var mover = new FileMover(
             new NullLogger<FileMover>(),
             options: Options.Create(new FileMoverOptions { MaxRetries = 1 }),
@@ -66,10 +65,9 @@ public sealed class FileMoverHardlinkAliasRegressionTests : BaseTests
         var result = await PerformAsync(mover, action, source, destination);
 
         Assert.True(hookRan);
-        if (!supported)
-        {
-            return;
-        }
+        Assert.True(
+            supported,
+            "The required hard link could not be created inside the race hook.");
         Assert.False(result);
         Assert.True(File.Exists(source));
         Assert.True(File.Exists(destination));

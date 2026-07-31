@@ -231,7 +231,7 @@ internal static class LibraryDirectoryOwnershipMarker
         var parentPath = Path.GetDirectoryName(Path.GetFullPath(markerPath))
             ?? throw new InvalidOperationException(
                 "The durable directory ownership marker has no parent.");
-        using var parent = PinnedDirectoryCreation.OpenPinnedDirectoryNoFollow(
+        using var parent = PinnedDirectoryCreation.OpenPinnedBoundary(
             parentPath);
         using var marker = parent.OpenExistingFile(
             Path.GetFileName(markerPath),

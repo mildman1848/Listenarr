@@ -37,6 +37,11 @@ namespace Listenarr.Application.Audiobooks.Contracts.Repositories
             string expectedBasePath,
             string newBasePath,
             CancellationToken ct = default);
+        Task<bool> TryUpdateImageUrlAsync(
+            int audiobookId,
+            string? expectedImageUrl,
+            string? newImageUrl,
+            CancellationToken ct = default) => Task.FromResult(false);
         Task<string?> GetAuthorAsinByNameAsync(string name);
         Task<AuthorCacheEntry?> GetCachedAuthorByNameAsync(string name, string region);
         Task<AuthorCacheEntry?> GetCachedAuthorByAsinAsync(string asin, string region);

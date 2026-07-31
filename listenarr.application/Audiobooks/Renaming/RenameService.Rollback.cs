@@ -211,7 +211,7 @@ public partial class RenameService
                 && exception is not StackOverflowException)
             {
                 rollbackSucceeded = false;
-                item.Error = $"Rollback failed: {exception.Message}";
+                item.Error = "Rollback failed.";
                 _logger.LogError(
                     exception,
                     "Failed to roll back organize operation for audiobook {AudiobookId}, file {FileId}",

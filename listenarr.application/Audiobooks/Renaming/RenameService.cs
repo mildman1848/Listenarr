@@ -382,7 +382,7 @@ namespace Listenarr.Application.Audiobooks.Renaming
                 {
                     AudiobookId = operation.AudiobookId,
                     Success = false,
-                    Error = ex.Message
+                    Error = "The organize operation failed. Review the server logs for details."
                 };
             }
         }

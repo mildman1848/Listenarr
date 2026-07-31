@@ -99,7 +99,8 @@ namespace Listenarr.Api.Features.Library
                 });
             }
 
-            if (!pathResolution.PathIdentity.HasValue)
+            if (!pathResolution.PathIdentity.HasValue
+                || !pathResolution.PhysicalIdentity.HasValue)
             {
                 return new ObjectResult(new
                 {
@@ -118,6 +119,7 @@ namespace Listenarr.Api.Features.Library
                 audiobook,
                 scanRoot,
                 pathResolution.PathIdentity,
+                pathResolution.PhysicalIdentity,
                 isAuthoritative);
             if (queuedResult != null)
             {
@@ -138,6 +140,7 @@ namespace Listenarr.Api.Features.Library
                         audiobook.Id,
                         scanRoot,
                         pathResolution.PathIdentity.Value,
+                        pathResolution.PhysicalIdentity.Value,
                         AllowReconciliation: true,
                         IsAuthoritativeScope: isAuthoritative,
                         Source: "Manual Scan"),
@@ -161,9 +164,13 @@ namespace Listenarr.Api.Features.Library
             }
             catch (DirectoryNotFoundException exception)
             {
+                _logger.LogWarning(
+                    exception,
+                    "Manual scan path was unavailable for audiobook {AudiobookId}",
+                    audiobook.Id);
                 return new BadRequestObjectResult(new
                 {
-                    message = exception.Message,
+                    message = "The scan path does not exist or is unavailable.",
                     path = scanRoot
                 });
             }
@@ -175,7 +182,7 @@ namespace Listenarr.Api.Features.Library
                     audiobook.Id);
                 return new ObjectResult(new
                 {
-                    message = exception.Message
+                    message = "The scan could not be completed safely. Review the server logs for details."
                 })
                 {
                     StatusCode = StatusCodes.Status409Conflict
@@ -197,9 +204,9 @@ namespace Listenarr.Api.Features.Library
                 return true;
             }
 
-            return !FileSystemPathIdentity.IsSameOrInside(
-                scanRoot,
+            return FileSystemPathIdentity.IsSameOrInside(
                 existingBasePath,
+                scanRoot,
                 semantics);
         }
 

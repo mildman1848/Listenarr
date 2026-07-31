@@ -165,6 +165,32 @@ public sealed class ScanFileDiscoveryTests : BaseTests, IDisposable
         Assert.False(discovery.ProvenBookBoundaries.ContainsKey(outside));
     }
 
+    [Fact]
+    public void Discover_EnumerationFailure_DoesNotExposeExceptionMessage()
+    {
+        const string secret = "secret-volume-path";
+        var fileSystem = new Mock<IFileSystem>(MockBehavior.Strict);
+        fileSystem.Setup(candidate => candidate.EnumerateFiles(_root))
+            .Throws(new IOException(secret));
+        var audiobook = new AudiobookBuilder()
+            .WithTitle("Book")
+            .WithAuthor("Author")
+            .Build();
+
+        var discovery = ScanFileDiscovery.Discover(
+            fileSystem.Object,
+            _root,
+            audiobook,
+            Guid.NewGuid(),
+            NullLogger.Instance,
+            FileSystemPathSemantics.CurrentHostDefault);
+
+        var issue = Assert.Single(discovery.Issues);
+        Assert.Equal(ScanDiscoveryIssueKind.EnumerationFailure, issue.Kind);
+        Assert.Equal("The path could not be enumerated safely.", issue.Message);
+        Assert.DoesNotContain(secret, issue.Message, StringComparison.Ordinal);
+    }
+
     [Theory]
     [InlineData(FileSystemCaseSensitivity.Sensitive, false)]
     [InlineData(FileSystemCaseSensitivity.Insensitive, true)]
@@ -185,13 +211,9 @@ public sealed class ScanFileDiscoveryTests : BaseTests, IDisposable
         Assert.Equal(expected, result);
     }
 
-    [Fact]
+    [LinuxFact]
     public void Discover_LinkedDirectoryInsideIdentifierBoundary_IsNotTraversed()
     {
-        if (!OperatingSystem.IsLinux())
-        {
-            return;
-        }
 
         var identifierDirectory = Path.Join(_root, "Author", "Book B012345678");
         var foreignDirectory = Path.Join(_root, "foreign");

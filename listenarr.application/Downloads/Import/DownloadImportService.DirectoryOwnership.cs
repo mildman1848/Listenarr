@@ -15,6 +15,78 @@ public partial class DownloadImportService
         int audiobookId,
         CancellationToken cancellationToken)
     {
+        if (!await EnsureOwnedImportDestinationAsync(
+                source,
+                destination,
+                managedBoundary,
+                semantics,
+                operationId,
+                audiobookId,
+                cancellationToken))
+        {
+            return false;
+        }
+
+        cancellationToken.ThrowIfCancellationRequested();
+        return await fileMover.PerformActionOn(
+            action,
+            source,
+            destination,
+            operationId);
+    }
+
+    private async Task<IAudiobookFileRegistrationLease?> PrepareOwnedFileActionForRegistrationAsync(
+        FileAction action,
+        string source,
+        string destination,
+        string managedBoundary,
+        FileSystemPathSemantics semantics,
+        Guid operationId,
+        string? expectedRegisteredPhysicalObjectIdentity,
+        int audiobookId,
+        CancellationToken cancellationToken)
+    {
+        if (!await EnsureOwnedImportDestinationAsync(
+                source,
+                destination,
+                managedBoundary,
+                semantics,
+                operationId,
+                audiobookId,
+                cancellationToken))
+        {
+            return null;
+        }
+
+        cancellationToken.ThrowIfCancellationRequested();
+        if (action == FileAction.HardlinkCopy
+            && !string.IsNullOrWhiteSpace(
+                expectedRegisteredPhysicalObjectIdentity))
+        {
+            return await fileMover.PrepareActionForRegistrationAsync(
+                action,
+                source,
+                destination,
+                operationId,
+                expectedRegisteredPhysicalObjectIdentity);
+        }
+
+        return await fileMover.PrepareActionForRegistrationAsync(
+            action,
+            source,
+            destination,
+            operationId);
+    }
+
+    private async Task<bool> EnsureOwnedImportDestinationAsync(
+        string source,
+        string destination,
+        string managedBoundary,
+        FileSystemPathSemantics semantics,
+        Guid operationId,
+        int audiobookId,
+        CancellationToken cancellationToken)
+    {
         var destinationDirectory = Path.GetDirectoryName(destination)
             ?? throw new InvalidOperationException(
                 "The import destination has no parent directory.");
@@ -56,11 +128,6 @@ public partial class DownloadImportService
             operationId,
             audiobookId,
             cancellationToken);
-        cancellationToken.ThrowIfCancellationRequested();
-        return await fileMover.PerformActionOn(
-            action,
-            source,
-            destination,
-            operationId);
+        return true;
     }
 }

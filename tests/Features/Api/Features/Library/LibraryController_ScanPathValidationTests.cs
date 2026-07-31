@@ -15,6 +15,7 @@
  * You should have received a copy of the GNU Affero General Public License
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
+using System.Text.Json;
 using Microsoft.AspNetCore.Mvc;
 using Listenarr.Tests.Builders;
 using Listenarr.Tests.Common;
@@ -26,6 +27,102 @@ namespace Listenarr.Tests.Features.Api.Features.Library
     [Trait("Category", "LibraryController")]
     public class LibraryController_ScanPathValidationTests : BaseTests
     {
+        [Fact]
+        public void GetScanJobStatus_ReturnsPublicContractWithoutPathAuthorityOrInternalError()
+        {
+            var jobId = Guid.NewGuid();
+            var job = new ScanJob
+            {
+                Id = jobId,
+                AudiobookId = 42,
+                Path = "C:\\private\\library\\book",
+                PathIdentity = new PathIdentitySnapshot(
+                    FileSystemPathSyntax.Windows,
+                    FileSystemCaseSensitivity.Insensitive,
+                    FileSystemCaseSensitivityMode.Auto,
+                    "C:\\private\\library"),
+                PhysicalIdentity = new ScanPathPhysicalIdentity(
+                    "boundary-secret",
+                    "scan-root-secret"),
+                Status = "Failed",
+                Error = "C:\\private\\library\\book could not be opened by worker secret",
+                CorrelationId = "correlation-secret",
+                DownloadId = "download-secret",
+                AuthorizationMode = ScanAuthorizationMode.PreauthorizedPath,
+                EnqueuedAt = new DateTime(2026, 7, 29, 12, 0, 0, DateTimeKind.Utc)
+            };
+            ScanJob? queuedJob = job;
+            var queue = new Mock<IScanQueueService>(MockBehavior.Strict);
+            queue.Setup(service => service.TryGetJob(jobId, out queuedJob))
+                .Returns(true);
+            Init(services => services.WithSingleton(queue.Object));
+
+            var result = _provider.GetRequiredService<LibraryController>()
+                .GetScanJobStatus(jobId.ToString("D"));
+
+            var ok = Assert.IsType<OkObjectResult>(result);
+            Assert.IsNotType<ScanJob>(ok.Value);
+            var json = JsonSerializer.Serialize(ok.Value);
+            Assert.Contains("The scan failed", json, StringComparison.Ordinal);
+            foreach (var forbidden in new[]
+            {
+                job.Path,
+                job.PathIdentity.Value.BoundaryPath,
+                job.PhysicalIdentity.Value.BoundaryObjectIdentity,
+                job.PhysicalIdentity.Value.ScanRootObjectIdentity,
+                job.CorrelationId,
+                job.DownloadId,
+                "worker secret",
+                nameof(ScanJob.PathIdentity),
+                nameof(ScanJob.PhysicalIdentity),
+                nameof(ScanJob.AuthorizationMode)
+            })
+            {
+                Assert.DoesNotContain(forbidden!, json, StringComparison.OrdinalIgnoreCase);
+            }
+        }
+
+        [Fact]
+        public async Task ScanAudiobook_PathAuthorizationFailure_DoesNotExposeInternalReason()
+        {
+            const string secret = "C:\\private\\identity-secret";
+            var authorization = new Mock<IScanPathAuthorizationService>(
+                MockBehavior.Strict);
+            authorization.Setup(service => service.AuthorizeAsync(
+                    It.IsAny<string>(),
+                    It.IsAny<CancellationToken>()))
+                .ReturnsAsync(ScanPathAuthorizationResult.Rejected(
+                    ScanPathAuthorizationFailure.IdentityUnavailable,
+                    secret));
+            Init(services => services
+                .Without<IScanQueueService>()
+                .WithSingleton(authorization.Object));
+            var audiobook = await _audiobookRepository.AddAsync(
+                new AudiobookBuilder().WithTitle("Secret Scan").Build());
+
+            var result = await _provider
+                .GetRequiredService<LibraryController>()
+                .ScanAudiobookFiles(
+                    audiobook.Id,
+                    new LibraryController.ScanRequest
+                    {
+                        Path = Path.GetTempPath()
+                    });
+
+            var conflict = Assert.IsType<ObjectResult>(result);
+            Assert.Equal(409, conflict.StatusCode);
+            var json = JsonSerializer.Serialize(conflict.Value);
+            Assert.Contains(
+                "Scan path identity could not be established safely",
+                json,
+                StringComparison.Ordinal);
+            Assert.Contains(
+                nameof(ScanPathAuthorizationFailure.IdentityUnavailable),
+                json,
+                StringComparison.Ordinal);
+            Assert.DoesNotContain(secret, json, StringComparison.Ordinal);
+        }
+
         [Fact]
         [Trait("Method", "ScanAudiobookFiles")]
         [Trait("Scenario", "AllowsRequestPathWithinConfiguredRoot_ReturnsOk")]
@@ -82,6 +179,56 @@ namespace Listenarr.Tests.Features.Api.Features.Library
                 job.PathIdentity.Value.Semantics));
         }
 
+        [Theory]
+        [InlineData("same", true)]
+        [InlineData("ancestor", true)]
+        [InlineData("descendant", false)]
+        [InlineData("sibling", false)]
+        public async Task ScanAudiobook_AuthoritativeScope_RequiresScanRootToCoverExistingBasePath(
+            string relationship,
+            bool expectedAuthoritative)
+        {
+            var configuredRoot = FileService.GetTempDirectory(
+                $"listenarr-scan-authority-{relationship}");
+            var existingBasePath = Path.Join(configuredRoot, "Author", "Book");
+            Directory.CreateDirectory(existingBasePath);
+            var requestedPath = relationship switch
+            {
+                "same" => existingBasePath,
+                "ancestor" => Path.Join(configuredRoot, "Author"),
+                "descendant" => Path.Join(existingBasePath, "Disc 1"),
+                "sibling" => Path.Join(configuredRoot, "Other Author", "Other Book"),
+                _ => throw new InvalidOperationException(
+                    $"Unknown relationship fixture: {relationship}")
+            };
+            Directory.CreateDirectory(requestedPath);
+            await _rootFolderRepository.AddAsync(new RootFolder
+            {
+                Name = "root",
+                Path = configuredRoot
+            });
+            await _applicationSettingsRepository.SaveAsync(
+                new ApplicationSettingsBuilder()
+                    .WithOutputPath(configuredRoot)
+                    .Build());
+            var audiobook = await _audiobookRepository.AddAsync(
+                new AudiobookBuilder()
+                    .WithTitle("Authority Book")
+                    .WithBasePath(existingBasePath)
+                    .Build());
+
+            var result = await _provider.GetRequiredService<LibraryController>()
+                .ScanAudiobookFiles(
+                    audiobook.Id,
+                    new LibraryController.ScanRequest { Path = requestedPath });
+
+            Assert.IsType<AcceptedResult>(result);
+            var queue = Assert.IsType<ScanQueueService>(
+                _provider.GetRequiredService<IScanQueueService>());
+            Assert.True(queue.Reader.TryRead(out var job));
+            Assert.Equal(expectedAuthoritative, job.IsAuthoritativeScope);
+        }
+
         [Fact]
         public async Task ScanAudiobook_PersistsBasePathBeforeClaimingRelativeFileOwnership()
         {
@@ -95,11 +242,13 @@ namespace Listenarr.Tests.Features.Api.Features.Library
             var audiobook = await _audiobookRepository.AddAsync(new AudiobookBuilder().WithTitle("Test").Build());
             fileService.Setup(service => service.EnsureAudiobookFileAsync(
                     It.IsAny<Audiobook>(),
-                    audioPath,
+                    It.IsAny<IAudiobookFileRegistrationLease>(),
                     "Manual Scan",
                     It.IsAny<CancellationToken>()))
-                .Returns<Audiobook, string, string?, CancellationToken>(async (claimedAudiobook, _, _, token) =>
+                .Returns<Audiobook, IAudiobookFileRegistrationLease, string?, CancellationToken>(async (claimedAudiobook, lease, _, token) =>
                 {
+                    Assert.Equal(Path.GetFullPath(audioPath), Path.GetFullPath(lease.PublicPath));
+                    Assert.True(lease.MatchesCurrentPublication());
                     var persisted = await _audiobookRepository.GetByIdSnapshotAsync(claimedAudiobook.Id, token);
                     Assert.NotNull(persisted);
                     Assert.Equal(Path.GetFullPath(tempRoot), Path.GetFullPath(persisted!.BasePath!));
@@ -109,7 +258,8 @@ namespace Listenarr.Tests.Features.Api.Features.Library
             Assert.IsType<OkObjectResult>(result);
             fileService.Verify(service => service.EnsureAudiobookFileAsync(
                 It.IsAny<Audiobook>(),
-                audioPath,
+                It.Is<IAudiobookFileRegistrationLease>(lease =>
+                    lease.PublicPath == audioPath),
                 "Manual Scan",
                 It.IsAny<CancellationToken>()), Times.Once);
         }
@@ -138,13 +288,9 @@ namespace Listenarr.Tests.Features.Api.Features.Library
             Assert.Equal(audioPath, retained.Path);
         }
 
-        [Fact]
+        [LinuxFact]
         public async Task ScanAudiobook_SymlinkedDirectoryOutsideRoot_IsNotTraversed()
         {
-            if (OperatingSystem.IsWindows())
-            {
-                return;
-            }
 
             var tempRoot = FileService.GetTempDirectory("listenarr-scan-link-root");
             var outsideRoot = FileService.GetTempDirectory("listenarr-scan-link-outside");

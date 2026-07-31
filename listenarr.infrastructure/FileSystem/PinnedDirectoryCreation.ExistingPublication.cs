@@ -8,7 +8,7 @@ internal sealed partial class PinnedDirectoryCreation
         var anchor = new PinnedDirectoryAnchor(
             DuplicateSafeHandle(_parentHandle),
             _parentPath,
-            followVisibleFinalLink: false);
+            _parentFollowsVisibleFinalLink);
         if (anchor.VisiblePathMatches())
         {
             return anchor;
@@ -26,8 +26,9 @@ internal sealed partial class PinnedDirectoryCreation
         {
             ThrowIfDisposed();
             ValidateLeafName(childName);
-            EnsureVisiblePathMatches();
             var childPath = Path.Join(FullPath, childName);
+            ExclusiveDirectoryCreator.InvokeBeforeOpenParentHook(childPath);
+            EnsureVisiblePathMatches();
             var directoryHandle = OperatingSystem.IsWindows()
                 ? OpenRelativeDirectoryWindows(
                     _handle,
@@ -40,7 +41,8 @@ internal sealed partial class PinnedDirectoryCreation
                 directoryHandle,
                 FullPath,
                 childName,
-                created: true);
+                created: true,
+                _followVisibleFinalLink);
             if (publication.VisiblePathMatches())
             {
                 return publication;

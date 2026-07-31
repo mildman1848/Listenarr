@@ -127,6 +127,82 @@ public sealed class DirectoryCreationParentReplacementTests : BaseTests
         }
     }
 
+    [DirectoryLinkFact]
+    public async Task EnsureCreatedHierarchyAsync_LinkedManagedBoundary_TopLevelOwnershipResolves()
+    {
+        var root = FileService.GetTempDirectory("directory-create-linked-top-level");
+        var physicalBoundary = Path.Join(root, "physical");
+        var linkedBoundary = Path.Join(root, "linked");
+        Directory.CreateDirectory(physicalBoundary);
+        RequireDirectoryLinkCapability(root);
+        Directory.CreateSymbolicLink(linkedBoundary, physicalBoundary);
+        await AddAuthorizedRootAsync(linkedBoundary, "Linked Top-Level Test Root");
+
+        var destination = Path.Join(linkedBoundary, "Book");
+        var semantics = FileSystemPathSemantics.CurrentHostDefault;
+        var store = _provider.GetRequiredService<ILibraryDirectoryOwnershipStore>();
+        try
+        {
+            var created = await store.EnsureCreatedHierarchyAsync(
+                destination,
+                linkedBoundary,
+                semantics,
+                "linked-top-level-regression");
+
+            Assert.Single(created);
+            Assert.True(Directory.Exists(Path.Join(physicalBoundary, "Book")));
+            var resolution = await store.ResolveOwnedAsync(
+                destination,
+                semantics,
+                CancellationToken.None);
+            Assert.Equal(
+                LibraryDirectoryOwnershipResolutionState.Owned,
+                resolution.State);
+        }
+        finally
+        {
+            TryDeleteDirectoryLink(linkedBoundary);
+        }
+    }
+
+    [DirectoryLinkFact]
+    public void PinnedFileEntry_DeleteUnderLinkedBoundary_RetiresThroughPinnedTarget()
+    {
+        var root = FileService.GetTempDirectory("pinned-file-retirement-linked-boundary");
+        var physicalBoundary = Path.Join(root, "physical");
+        var linkedBoundary = Path.Join(root, "linked");
+        Directory.CreateDirectory(physicalBoundary);
+        RequireDirectoryLinkCapability(root);
+        Directory.CreateSymbolicLink(linkedBoundary, physicalBoundary);
+        var fileName = "retire.tmp";
+
+        try
+        {
+            using var boundary =
+                PinnedDirectoryCreation.OpenPinnedBoundary(linkedBoundary);
+            using var file = boundary.CreateNewFile(fileName, hiddenFile: true);
+            using (var stream = file.OpenWriteStream(
+                bufferSize: 4096,
+                asynchronous: false))
+            {
+                stream.WriteByte(1);
+                stream.Flush(flushToDisk: true);
+            }
+
+            file.Delete();
+
+            Assert.False(File.Exists(Path.Join(physicalBoundary, fileName)));
+            Assert.Empty(Directory.EnumerateDirectories(
+                physicalBoundary,
+                ".listenarr-retire-*.state",
+                SearchOption.TopDirectoryOnly));
+        }
+        finally
+        {
+            TryDeleteDirectoryLink(linkedBoundary);
+        }
+    }
+
     private async Task AssertParentReplacementBlockedAsync(bool replaceBeforeOpen)
     {
         var suffix = replaceBeforeOpen ? "before-open" : "after-open";

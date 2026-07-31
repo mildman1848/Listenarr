@@ -201,7 +201,7 @@ public sealed class FileSystemSemanticsResolverTests : BaseTests
         }
     }
 
-    [Fact]
+    [LinuxFact]
     public async Task AutoProbe_AlternateSpellingHardlinkSpoof_ReturnsUnavailableAndPreservesUnownedLink()
     {
         var root = Path.Join(
@@ -214,7 +214,7 @@ public sealed class FileSystemSemanticsResolverTests : BaseTests
         if (!TryCreateHardLink(capabilityUpper, capabilityLower))
         {
             Directory.Delete(root, true);
-            return;
+            Assert.Fail("The required hard link could not be created.");
         }
 
         File.Delete(capabilityLower);

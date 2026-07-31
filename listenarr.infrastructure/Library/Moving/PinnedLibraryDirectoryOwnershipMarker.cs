@@ -1,19 +1,16 @@
 namespace Listenarr.Infrastructure.Library.Moving;
 
-internal static class PinnedLibraryDirectoryOwnershipMarker
+internal static partial class PinnedLibraryDirectoryOwnershipMarker
 {
     public static async Task PublishMigrationTargetAsync(
         LibraryDirectoryOwnership source,
         LibraryDirectoryOwnership target,
+        PinnedDirectoryCreation.PinnedDirectoryAnchor parent,
         CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(source);
         ArgumentNullException.ThrowIfNull(target);
-        var parentPath = Path.GetDirectoryName(target.CanonicalPath)
-            ?? throw new InvalidOperationException(
-                "The migrated ownership path has no parent directory.");
-        using var parent =
-            PinnedDirectoryCreation.OpenPinnedDirectoryNoFollow(parentPath);
+        ArgumentNullException.ThrowIfNull(parent);
         using var publication = parent.OpenExistingChildForPublication(
             Path.GetFileName(target.CanonicalPath));
         using var directory = publication.OpenCreatedDirectoryAnchor();
@@ -53,7 +50,8 @@ internal static class PinnedLibraryDirectoryOwnershipMarker
     public static async Task EnsureAsync(
         LibraryDirectoryOwnership ownership,
         PinnedDirectoryCreation creation,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        Action? afterInsideMarkerPublication = null)
     {
         ArgumentNullException.ThrowIfNull(ownership);
         ArgumentNullException.ThrowIfNull(creation);
@@ -73,6 +71,7 @@ internal static class PinnedLibraryDirectoryOwnershipMarker
             LibraryDirectoryOwnershipMarker.FileName,
             payload,
             cancellationToken);
+        afterInsideMarkerPublication?.Invoke();
         await EnsureMarkerAsync(
             ownership,
             parent,
@@ -175,6 +174,15 @@ internal static class PinnedLibraryDirectoryOwnershipMarker
         string fileName,
         CancellationToken cancellationToken)
     {
+        RecoverConditionalReplacement(
+            parent,
+            fileName,
+            payload => LibraryDirectoryOwnershipMarker.MatchesCurrentPayload(
+                source,
+                payload),
+            payload => LibraryDirectoryOwnershipMarker.MatchesCurrentPayload(
+                target,
+                payload));
         using var existing = parent.TryOpenExistingFile(
             fileName,
             requireDeleteAccess: false);
@@ -185,6 +193,16 @@ internal static class PinnedLibraryDirectoryOwnershipMarker
                     target,
                     payload))
             {
+                RetireCompletedReplacementTemporary(
+                    parent,
+                    fileName + ".migration.tmp",
+                    temporaryPayload =>
+                        LibraryDirectoryOwnershipMarker.MatchesCurrentPayload(
+                            target,
+                            temporaryPayload)
+                        || LibraryDirectoryOwnershipMarker.MatchesCurrentPayload(
+                            source,
+                            temporaryPayload));
                 return;
             }
             if (!LibraryDirectoryOwnershipMarker.MatchesCurrentPayload(
@@ -247,21 +265,58 @@ internal static class PinnedLibraryDirectoryOwnershipMarker
         }
     }
 
-    internal static async Task UpgradeLegacyAsync(
+    internal static async Task ReconcileAsync(
         LibraryDirectoryOwnership ownership,
         PinnedDirectoryCreation.PinnedDirectoryAnchor directory,
         PinnedDirectoryCreation.PinnedDirectoryAnchor parent,
         CancellationToken cancellationToken)
     {
-        await UpgradeLegacyMarkerAsync(
+        await ReconcileMarkerAsync(
             ownership,
             directory,
             LibraryDirectoryOwnershipMarker.FileName,
             cancellationToken);
-        await UpgradeLegacyMarkerAsync(
+        await ReconcileMarkerAsync(
             ownership,
             parent,
             $".listenarr-directory-owner-{ownership.OwnershipToken}.json",
+            cancellationToken);
+    }
+
+    private static async Task ReconcileMarkerAsync(
+        LibraryDirectoryOwnership ownership,
+        PinnedDirectoryCreation.PinnedDirectoryAnchor parent,
+        string fileName,
+        CancellationToken cancellationToken)
+    {
+        RecoverConditionalReplacement(
+            parent,
+            fileName,
+            payload => LibraryDirectoryOwnershipMarker.MatchesLegacyPayload(
+                ownership,
+                payload),
+            payload => LibraryDirectoryOwnershipMarker.MatchesCurrentPayload(
+                ownership,
+                payload));
+        var existing = parent.TryOpenExistingFile(
+            fileName,
+            requireDeleteAccess: false);
+        if (existing == null)
+        {
+            await EnsureMarkerAsync(
+                ownership,
+                parent,
+                fileName,
+                LibraryDirectoryOwnershipMarker.SerializePayload(ownership),
+                cancellationToken);
+            return;
+        }
+
+        existing.Dispose();
+        await UpgradeLegacyMarkerAsync(
+            ownership,
+            parent,
+            fileName,
             cancellationToken);
     }
 
@@ -271,6 +326,15 @@ internal static class PinnedLibraryDirectoryOwnershipMarker
         string fileName,
         CancellationToken cancellationToken)
     {
+        RecoverConditionalReplacement(
+            parent,
+            fileName,
+            payload => LibraryDirectoryOwnershipMarker.MatchesLegacyPayload(
+                ownership,
+                payload),
+            payload => LibraryDirectoryOwnershipMarker.MatchesCurrentPayload(
+                ownership,
+                payload));
         var temporaryName = fileName + ".v2.tmp";
         using var predecessor = parent.TryOpenExistingFile(
             fileName,
@@ -285,20 +349,31 @@ internal static class PinnedLibraryDirectoryOwnershipMarker
         {
             var temporaryPayload =
                 LibraryDirectoryOwnershipMarker.ReadPayload(existingTemporary);
+            if (LibraryDirectoryOwnershipMarker.MatchesCurrentPayload(
+                    ownership,
+                    predecessorPayload))
+            {
+                if (!LibraryDirectoryOwnershipMarker.MatchesCurrentPayload(
+                        ownership,
+                        temporaryPayload)
+                    && !LibraryDirectoryOwnershipMarker.MatchesLegacyPayload(
+                        ownership,
+                        temporaryPayload))
+                {
+                    throw new InvalidOperationException(
+                        "The completed ownership marker replacement left an unrelated temporary file.");
+                }
+
+                existingTemporary.Delete();
+                parent.FlushDirectoryEntry();
+                return;
+            }
             if (!LibraryDirectoryOwnershipMarker.MatchesCurrentPayload(
                     ownership,
                     temporaryPayload))
             {
                 throw new InvalidOperationException(
                     "The ownership marker temporary file is stale or mismatched.");
-            }
-
-            if (LibraryDirectoryOwnershipMarker.MatchesCurrentPayload(
-                    ownership,
-                    predecessorPayload))
-            {
-                existingTemporary.Delete();
-                return;
             }
             if (!LibraryDirectoryOwnershipMarker.MatchesLegacyPayload(
                     ownership,
@@ -338,6 +413,30 @@ internal static class PinnedLibraryDirectoryOwnershipMarker
             stream.Flush(flushToDisk: true);
         }
         temporary.ReplaceWithinParent(fileName, predecessor);
+    }
+
+    private static void RetireCompletedReplacementTemporary(
+        PinnedDirectoryCreation.PinnedDirectoryAnchor parent,
+        string temporaryName,
+        Func<LibraryDirectoryOwnershipMarker.MarkerPayload, bool> isExpected)
+    {
+        using var temporary = parent.TryOpenExistingFile(
+            temporaryName,
+            requireDeleteAccess: true);
+        if (temporary == null)
+        {
+            return;
+        }
+
+        var payload = LibraryDirectoryOwnershipMarker.ReadPayload(temporary);
+        if (!isExpected(payload))
+        {
+            throw new InvalidOperationException(
+                "The completed ownership marker replacement left an unrelated temporary file.");
+        }
+
+        temporary.Delete();
+        parent.FlushDirectoryEntry();
     }
 
     private static void ValidateExistingMarker(

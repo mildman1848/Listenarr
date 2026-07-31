@@ -275,7 +275,7 @@ public sealed partial class LibraryMoveWorkflow
                 id);
             return new ConflictObjectResult(new
             {
-                message = ex.Message,
+                message = "The move overlaps an active root folder relocation. Retry after the relocation completes.",
                 code = "move_relocation_conflict"
             });
         }

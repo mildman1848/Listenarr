@@ -211,5 +211,6 @@ namespace Listenarr.Domain.Audiobooks
         public string? Sha256 { get; set; }
         public MoveJobEntryCopyState CopyState { get; set; }
         public MoveJobEntryCleanupState CleanupState { get; set; }
+        public int CleanupProtectionVersion { get; set; }
     }
 }

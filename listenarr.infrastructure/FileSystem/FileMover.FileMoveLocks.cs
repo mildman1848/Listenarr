@@ -103,9 +103,11 @@ public partial class FileMover
     private async Task<FileMoveGateLease?> TryAcquireFileMoveGateAsync(
         string sourceFile,
         string destinationFile,
-        bool createDestinationParent = false)
+        bool createDestinationParent = false,
+        bool allowExistingAliasForRecovery = false)
     {
-        if (await IsFilesystemAliasAsync(sourceFile, destinationFile))
+        if (!allowExistingAliasForRecovery
+            && await IsFilesystemAliasAsync(sourceFile, destinationFile))
         {
             LogBlockedAlias(sourceFile, destinationFile);
             return null;
@@ -123,7 +125,8 @@ public partial class FileMover
             return null;
         }
 
-        if (await IsFilesystemAliasAsync(sourceFile, destinationFile))
+        if (!allowExistingAliasForRecovery
+            && await IsFilesystemAliasAsync(sourceFile, destinationFile))
         {
             LogBlockedAlias(sourceFile, destinationFile);
             return null;
@@ -201,7 +204,8 @@ public partial class FileMover
                 currentDestination,
                 sourceParent,
                 destinationParent);
-            if (await IsFilesystemAliasAsync(sourceFile, destinationFile))
+            if (!allowExistingAliasForRecovery
+                && await IsFilesystemAliasAsync(sourceFile, destinationFile))
             {
                 lease.Dispose();
                 LogBlockedAlias(sourceFile, destinationFile);

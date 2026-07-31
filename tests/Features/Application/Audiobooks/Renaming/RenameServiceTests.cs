@@ -16,6 +16,7 @@
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
 using Listenarr.Infrastructure.Persistence.Repositories;
+using Listenarr.Tests.Common;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging.Abstractions;
 
@@ -532,13 +533,9 @@ namespace Listenarr.Tests.Features.Application.Audiobooks.Renaming
             Assert.False(Directory.Exists(targetFolder));
         }
 
-        [Fact]
+        [LinuxFact]
         public async Task ExecuteRename_SymbolicLinkDestinationOutsideRoot_IsRejected()
         {
-            if (OperatingSystem.IsWindows())
-            {
-                return;
-            }
 
             var libraryRoot = Path.Join(_tempRoot, "library-link-guard");
             var sourceFolder = Path.Join(libraryRoot, "Old");
@@ -671,6 +668,79 @@ namespace Listenarr.Tests.Features.Application.Audiobooks.Renaming
             Assert.True(File.Exists(secondSourcePath));
             Assert.False(File.Exists(firstTargetPath));
             Assert.False(File.Exists(secondTargetPath));
+        }
+
+        [Fact]
+        public async Task ExecuteRename_MoverException_DoesNotExposeInternalError()
+        {
+            var libraryRoot = Path.Join(_tempRoot, "rename-public-error");
+            var sourceFolder = Path.Join(libraryRoot, "Book");
+            Directory.CreateDirectory(sourceFolder);
+            var sourcePath = Path.Join(sourceFolder, "Old.m4b");
+            var targetPath = Path.Join(sourceFolder, "New.m4b");
+            await File.WriteAllTextAsync(sourcePath, "audio");
+            const string secret = "C:\\private\\organize-secret";
+
+            var settings = new ApplicationSettings
+            {
+                OutputPath = libraryRoot,
+                FolderNamingPattern = "{Title}",
+                FileNamingPattern = "{Title}"
+            };
+            var (service, db, _) = BuildService(settings, fileMover =>
+            {
+                fileMover.Setup(mover => mover.PerformActionOn(
+                        FileAction.Move,
+                        sourcePath,
+                        targetPath,
+                        It.IsAny<Guid?>()))
+                    .ThrowsAsync(new IOException(secret));
+            });
+            db.Audiobooks.Add(new Audiobook
+            {
+                Id = 73,
+                Title = "Book",
+                BasePath = sourceFolder,
+                Files =
+                [
+                    new AudiobookFile
+                    {
+                        Id = 731,
+                        AudiobookId = 73,
+                        Path = sourcePath,
+                        Format = "m4b"
+                    }
+                ]
+            });
+            await db.SaveChangesAsync();
+
+            var result = Assert.Single(await service.ExecuteRenameAsync(
+            [
+                new RenameOperation
+                {
+                    AudiobookId = 73,
+                    CurrentFolderPath = sourceFolder,
+                    CurrentFolderSemantics = ExpectedSemantics(sourceFolder),
+                    FileRenames =
+                    [
+                        new FileRenameOperation
+                        {
+                            FileId = 731,
+                            CurrentPath = sourcePath,
+                            NewPath = targetPath
+                        }
+                    ]
+                }
+            ]));
+
+            Assert.False(result.Success);
+            Assert.Equal("File organize operation failed.", result.Error);
+            Assert.Equal(
+                "File organize operation failed.",
+                Assert.Single(result.RenamedFiles).Error);
+            Assert.DoesNotContain(secret, result.Error, StringComparison.OrdinalIgnoreCase);
+            Assert.True(File.Exists(sourcePath));
+            Assert.False(File.Exists(targetPath));
         }
 
         [Fact]

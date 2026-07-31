@@ -8,7 +8,7 @@ namespace Listenarr.Application.Common;
 public sealed class FilesystemMutationCoordinator : IFilesystemMutationCoordinator, IDisposable
 {
     private readonly SemaphoreSlim _gate = new(1, 1);
-    private readonly AsyncLocal<int> _depth = new();
+    private readonly AsyncLocal<ReentrantOperationFrame<object?>?> _held = new();
 
     public Task ExecuteExclusiveAsync(
         Func<CancellationToken, Task> operation,
@@ -28,29 +28,57 @@ public sealed class FilesystemMutationCoordinator : IFilesystemMutationCoordinat
         ArgumentNullException.ThrowIfNull(operation);
         cancellationToken.ThrowIfCancellationRequested();
 
-        if (_depth.Value > 0)
-        {
-            _depth.Value++;
-            try
-            {
-                return await operation(cancellationToken);
-            }
-            finally
-            {
-                _depth.Value--;
-            }
-        }
-
-        await _gate.WaitAsync(cancellationToken);
-        _depth.Value = 1;
+        var parent = _held.Value;
+        var enteredParent = false;
+        var acquiredParentGate = false;
+        var acquiredRootGate = false;
+        ReentrantOperationFrame<object?>? frame = null;
         try
         {
+            if (parent != null)
+            {
+                await parent.ChildGate.WaitAsync(cancellationToken);
+                acquiredParentGate = true;
+                if (!parent.Lifetime.TryEnter())
+                {
+                    throw new InvalidOperationException(
+                        "A filesystem mutation operation escaped its owning scope.");
+                }
+
+                enteredParent = true;
+            }
+            else
+            {
+                await _gate.WaitAsync(cancellationToken);
+                acquiredRootGate = true;
+            }
+
+            frame = new ReentrantOperationFrame<object?>(null);
+            _held.Value = frame;
             return await operation(cancellationToken);
         }
         finally
         {
-            _depth.Value = 0;
-            _gate.Release();
+            if (frame != null)
+            {
+                await frame.Lifetime.CloseAsync();
+                _held.Value = parent;
+            }
+
+            if (enteredParent)
+            {
+                parent!.Lifetime.Exit();
+            }
+
+            if (acquiredParentGate)
+            {
+                parent!.ChildGate.Release();
+            }
+
+            if (acquiredRootGate)
+            {
+                _gate.Release();
+            }
         }
     }
 

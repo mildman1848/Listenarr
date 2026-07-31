@@ -10,6 +10,7 @@
 
 using Listenarr.Infrastructure.Persistence.Repositories;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
 using Microsoft.Extensions.Logging.Abstractions;
 
 using Listenarr.Tests.Common;
@@ -25,6 +26,7 @@ public sealed class RootFolderReassignmentTransactionTests : BaseTests
         Path.GetTempPath(),
         "listenarr-tests",
         $"root-reassignment-{Guid.NewGuid():N}.db");
+    private readonly CancelAfterSaveChangesInterceptor _cancelAfterSaveChanges = new();
     private IDbContextFactory<ListenArrDbContext> _factory = null!;
     private EfRootFolderRepository _repository = null!;
 
@@ -34,6 +36,7 @@ public sealed class RootFolderReassignmentTransactionTests : BaseTests
         Directory.CreateDirectory(Path.GetDirectoryName(_databasePath)!);
         var options = new DbContextOptionsBuilder<ListenArrDbContext>()
             .UseSqlite($"Data Source={_databasePath};Pooling=False;Foreign Keys=True")
+            .AddInterceptors(_cancelAfterSaveChanges)
             .Options;
         _factory = new TestDbContextFactory(options);
         _repository = new EfRootFolderRepository(
@@ -103,6 +106,103 @@ public sealed class RootFolderReassignmentTransactionTests : BaseTests
         Assert.Equal(Path.Join(expectedBasePath, "cover.jpg"), updated.ImageUrl);
         Assert.Contains(updated.Files!, file => file.Path == Path.Join(expectedBasePath, "book.m4b"));
         Assert.Contains(updated.Files!, file => file.Path == Path.Join("disc-1", "chapter.mp3"));
+    }
+
+    [Fact]
+    public async Task ReassignAudiobooksAndRemoveAsync_CancelledAfterSave_RollsBackBeforeCommit()
+    {
+        var sourcePath = Path.Join(
+            Path.GetTempPath(),
+            $"root-reassign-cancel-source-{Guid.NewGuid():N}");
+        var targetPath = Path.Join(
+            Path.GetTempPath(),
+            $"root-reassign-cancel-target-{Guid.NewGuid():N}");
+        var sourceBasePath = Path.Join(sourcePath, "Book");
+        int sourceRootId;
+        int targetRootId;
+        int audiobookId;
+        await using (var db = await _factory.CreateDbContextAsync())
+        {
+            var sourceRoot = new RootFolder { Name = "Source", Path = sourcePath };
+            var targetRoot = new RootFolder { Name = "Target", Path = targetPath };
+            var audiobook = new Audiobook
+            {
+                Title = "Book",
+                BasePath = sourceBasePath
+            };
+            db.RootFolders.AddRange(sourceRoot, targetRoot);
+            db.Audiobooks.Add(audiobook);
+            await db.SaveChangesAsync();
+            sourceRootId = sourceRoot.Id;
+            targetRootId = targetRoot.Id;
+            audiobookId = audiobook.Id;
+        }
+
+        using var cancellation = new CancellationTokenSource();
+        _cancelAfterSaveChanges.Arm(cancellation);
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+            _repository.ReassignAudiobooksAndRemoveAsync(
+                sourceRootId,
+                targetRootId,
+                FileSystemPathSemantics.CurrentHostDefault,
+                FileSystemPathSemantics.CurrentHostDefault,
+                cancellation.Token));
+
+        Assert.True(cancellation.IsCancellationRequested);
+        await using var verification = await _factory.CreateDbContextAsync();
+        Assert.NotNull(await verification.RootFolders.FindAsync(sourceRootId));
+        Assert.Equal(
+            sourceBasePath,
+            (await verification.Audiobooks.FindAsync(audiobookId))!.BasePath);
+    }
+
+    [Fact]
+    public async Task ReassignAudiobooksAndRemoveAsync_CancelledDuringCommit_CommitsUnambiguously()
+    {
+        var sourcePath = Path.Join(
+            Path.GetTempPath(),
+            $"root-reassign-commit-cancel-source-{Guid.NewGuid():N}");
+        var targetPath = Path.Join(
+            Path.GetTempPath(),
+            $"root-reassign-commit-cancel-target-{Guid.NewGuid():N}");
+        var sourceBasePath = Path.Join(sourcePath, "Book");
+        int sourceRootId;
+        int targetRootId;
+        int audiobookId;
+        await using (var db = await _factory.CreateDbContextAsync())
+        {
+            var sourceRoot = new RootFolder { Name = "Source", Path = sourcePath };
+            var targetRoot = new RootFolder { Name = "Target", Path = targetPath };
+            var audiobook = new Audiobook
+            {
+                Title = "Book",
+                BasePath = sourceBasePath
+            };
+            db.RootFolders.AddRange(sourceRoot, targetRoot);
+            db.Audiobooks.Add(audiobook);
+            await db.SaveChangesAsync();
+            sourceRootId = sourceRoot.Id;
+            targetRootId = targetRoot.Id;
+            audiobookId = audiobook.Id;
+        }
+
+        using var cancellation = new CancellationTokenSource();
+        _cancelAfterSaveChanges.ArmDuringCommit(cancellation);
+
+        await _repository.ReassignAudiobooksAndRemoveAsync(
+            sourceRootId,
+            targetRootId,
+            FileSystemPathSemantics.CurrentHostDefault,
+            FileSystemPathSemantics.CurrentHostDefault,
+            cancellation.Token);
+
+        Assert.True(cancellation.IsCancellationRequested);
+        await using var verification = await _factory.CreateDbContextAsync();
+        Assert.Null(await verification.RootFolders.FindAsync(sourceRootId));
+        Assert.Equal(
+            Path.Join(targetPath, "Book"),
+            (await verification.Audiobooks.FindAsync(audiobookId))!.BasePath);
     }
 
     [Fact]
@@ -613,6 +713,43 @@ public sealed class RootFolderReassignmentTransactionTests : BaseTests
             CreationWorkflow = "root-removal-test",
             ManagedRootFolderId = managedRootFolderId
         };
+    }
+
+    private sealed class CancelAfterSaveChangesInterceptor :
+        ISaveChangesInterceptor,
+        IDbTransactionInterceptor
+    {
+        private CancellationTokenSource? _afterSaveCancellation;
+        private CancellationTokenSource? _duringCommitCancellation;
+
+        public void Arm(CancellationTokenSource cancellation)
+        {
+            _afterSaveCancellation = cancellation;
+        }
+
+        public void ArmDuringCommit(CancellationTokenSource cancellation)
+        {
+            _duringCommitCancellation = cancellation;
+        }
+
+        public ValueTask<int> SavedChangesAsync(
+            SaveChangesCompletedEventData eventData,
+            int result,
+            CancellationToken cancellationToken = default)
+        {
+            Interlocked.Exchange(ref _afterSaveCancellation, null)?.Cancel();
+            return ValueTask.FromResult(result);
+        }
+
+        public ValueTask<InterceptionResult> TransactionCommittingAsync(
+            System.Data.Common.DbTransaction transaction,
+            TransactionEventData eventData,
+            InterceptionResult result,
+            CancellationToken cancellationToken = default)
+        {
+            Interlocked.Exchange(ref _duringCommitCancellation, null)?.Cancel();
+            return ValueTask.FromResult(result);
+        }
     }
 
     private sealed class TestDbContextFactory(DbContextOptions<ListenArrDbContext> options)

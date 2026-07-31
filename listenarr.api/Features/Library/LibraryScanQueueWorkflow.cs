@@ -21,6 +21,14 @@ using Microsoft.AspNetCore.Mvc;
 
 namespace Listenarr.Api.Features.Library
 {
+    internal sealed record ScanJobStatusResponse(
+        Guid Id,
+        int AudiobookId,
+        string Status,
+        string? Error,
+        DateTime EnqueuedAt,
+        bool CanRequeue);
+
     public sealed class LibraryScanQueueWorkflow
     {
         private readonly IScanQueueService? _scanQueueService;
@@ -41,6 +49,7 @@ namespace Listenarr.Api.Features.Library
             Audiobook audiobook,
             string? requestedPath,
             PathIdentitySnapshot? pathIdentity,
+            ScanPathPhysicalIdentity? physicalIdentity,
             bool isAuthoritativeScope)
         {
             if (_scanQueueService == null)
@@ -55,7 +64,11 @@ namespace Listenarr.Api.Features.Library
                         audiobook,
                         requestedPath,
                         pathIdentity,
-                        IsAuthoritativeScope: isAuthoritativeScope));
+                        physicalIdentity,
+                        IsAuthoritativeScope: isAuthoritativeScope,
+                        AuthorizationMode: string.IsNullOrWhiteSpace(requestedPath)
+                            ? ScanAuthorizationMode.ResolveCurrentAudiobookPath
+                            : ScanAuthorizationMode.PreauthorizedPath));
                 _logger.LogInformation("Enqueued scan job {JobId} for audiobook {AudiobookId}", jobId, audiobook.Id);
                 await BroadcastQueuedAsync(jobId, audiobook.Id);
 
@@ -64,7 +77,11 @@ namespace Listenarr.Api.Features.Library
             catch (Exception ex) when (ex is not OperationCanceledException && ex is not OutOfMemoryException && ex is not StackOverflowException)
             {
                 _logger.LogError(ex, "Failed to enqueue scan job for audiobook {AudiobookId}", audiobook.Id);
-                return new ObjectResult(new { message = "Failed to enqueue scan job", error = ex.Message })
+                return new ObjectResult(new
+                {
+                    message = "Failed to enqueue scan job",
+                    code = "scan_enqueue_failed"
+                })
                 {
                     StatusCode = StatusCodes.Status500InternalServerError
                 };
@@ -86,7 +103,13 @@ namespace Listenarr.Api.Features.Library
             if (_scanQueueService.TryGetJob(parsedJobId, out var job))
             {
                 _logger.LogInformation("Queried scan job {JobId} status: {Status}", parsedJobId, job!.Status);
-                return new OkObjectResult(job);
+                return new OkObjectResult(new ScanJobStatusResponse(
+                    job.Id,
+                    job.AudiobookId,
+                    job.Status,
+                    ScanJobPublicError.FromInternal(job.Error),
+                    job.EnqueuedAt,
+                    CanRequeueJob(job.Status)));
             }
 
             return new NotFoundObjectResult(new { message = "Job not found" });
@@ -113,6 +136,11 @@ namespace Listenarr.Api.Features.Library
             await BroadcastQueuedAsync(newJobId.Value, audiobookId: null);
             return new AcceptedResult(string.Empty, new { message = "Requeued scan job", jobId = newJobId });
         }
+
+        private static bool CanRequeueJob(string status) =>
+            string.Equals(status, "Failed", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(status, "Completed", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(status, "Queued", StringComparison.OrdinalIgnoreCase);
 
         private async Task BroadcastQueuedAsync(Guid jobId, int? audiobookId)
         {

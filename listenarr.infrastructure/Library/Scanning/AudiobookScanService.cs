@@ -29,6 +29,7 @@ internal sealed partial class AudiobookScanService(
         }
 
         var semantics = await ValidateCommandAsync(command, cancellationToken);
+        using var pinnedAuthority = OpenPinnedScanAuthority(command);
         var audiobook = await audiobookRepository.GetByIdAsync(command.AudiobookId)
             ?? throw new InvalidOperationException(
                 $"Audiobook {command.AudiobookId} no longer exists.");
@@ -54,8 +55,11 @@ internal sealed partial class AudiobookScanService(
             logger,
             semantics,
             resolvedExistingPaths.Values,
-            ownershipMap);
+            ownershipMap,
+            pinnedAuthority.Root);
         discovery = await EnrichWithMetadataAsync(
+            command,
+            pinnedAuthority,
             discovery,
             audiobook,
             command.ScanRoot,
@@ -69,6 +73,7 @@ internal sealed partial class AudiobookScanService(
         // identity to change. Re-prove the authorized root before any durable
         // mutation is attempted.
         await ValidateCommandAsync(command, cancellationToken);
+        ValidateDiscoverySnapshot(command, pinnedAuthority, discovery);
 
         var previousBasePath = audiobook.BasePath;
         var effectiveBasePath = await ApplyBasePathPlanAsync(
@@ -79,18 +84,48 @@ internal sealed partial class AudiobookScanService(
             semantics,
             diagnostics,
             cancellationToken);
+        var trackedPaths = resolvedExistingPaths.Values.ToHashSet(
+            semantics.Comparer);
+        var attributedPaths = discovery.AttributedFiles.ToHashSet(
+            semantics.Comparer);
         var createdCount = await ClaimAttributedFilesAsync(
+            command,
+            pinnedAuthority,
             audiobook,
-            discovery.AttributedFiles,
+            discovery,
+            discovery.AttributedFiles
+                .Where(path => !trackedPaths.Contains(path))
+                .ToList(),
             command.Source,
             cancellationToken);
-        if (createdCount == 0
-            && existingFiles.Count == 0
+        var hasDurableAttributedOwnership = createdCount > 0
+            || trackedPaths.Any(attributedPaths.Contains);
+        if (!hasDurableAttributedOwnership
+            && discovery.AttributedFiles.Count > 0)
+        {
+            var currentFiles = await fileRepository.GetByAudiobookIdAsync(
+                audiobook.Id,
+                cancellationToken);
+            var currentResolvedPaths = ResolveExistingPaths(
+                audiobook,
+                currentFiles,
+                semantics,
+                []);
+            hasDurableAttributedOwnership = currentResolvedPaths.Values
+                .Any(attributedPaths.Contains);
+        }
+
+        if (!hasDurableAttributedOwnership
             && discovery.AttributedFiles.Count > 0
             && !PathsEquivalent(previousBasePath, effectiveBasePath, semantics))
         {
             audiobook.BasePath = previousBasePath;
-            await audiobookRepository.UpdateAsync(audiobook);
+            if (!await audiobookRepository.UpdateAsync(audiobook))
+            {
+                throw new InvalidOperationException(
+                    "The scan BasePath rollback could not be persisted.");
+            }
+
             effectiveBasePath = previousBasePath;
             diagnostics.Add(new AudiobookScanDiagnostic(
                 "BasePathRolledBack",
@@ -99,8 +134,10 @@ internal sealed partial class AudiobookScanService(
         }
 
         await ValidateCommandAsync(command, cancellationToken);
+        ValidateDiscoverySnapshot(command, pinnedAuthority, discovery);
         var removedFiles = await ReconcileMissingFilesAsync(
             command,
+            pinnedAuthority,
             audiobook,
             existingFiles,
             resolvedExistingPaths,
@@ -110,6 +147,7 @@ internal sealed partial class AudiobookScanService(
             cancellationToken);
         createdCount += await ReconcileLegacyFilePathAsync(
             command,
+            pinnedAuthority,
             audiobook,
             discovery,
             semantics,
@@ -143,7 +181,8 @@ internal sealed partial class AudiobookScanService(
             command.ScanRoot,
             cancellationToken);
         if (!currentAuthorization.IsAuthorized
-            || !currentAuthorization.Identity.HasValue)
+            || !currentAuthorization.Identity.HasValue
+            || !currentAuthorization.PhysicalIdentity.HasValue)
         {
             throw new InvalidOperationException(
                 currentAuthorization.Error
@@ -156,6 +195,13 @@ internal sealed partial class AudiobookScanService(
         {
             throw new InvalidOperationException(
                 "The configured scan-root authority changed after authorization.");
+        }
+
+        if (command.ScanPhysicalIdentity
+            != currentAuthorization.PhysicalIdentity.Value)
+        {
+            throw new InvalidOperationException(
+                "The physical scan-root generation changed after authorization.");
         }
 
         if (!fileSystem.DirectoryExists(command.ScanRoot))
@@ -199,7 +245,10 @@ internal sealed partial class AudiobookScanService(
             current.Semantics);
 
     private async Task<int> ClaimAttributedFilesAsync(
+        AudiobookScanCommand command,
+        PinnedScanAuthority pinnedAuthority,
         Audiobook audiobook,
+        ScanDiscoveryResult discovery,
         IReadOnlyCollection<string> attributedFiles,
         string source,
         CancellationToken cancellationToken)
@@ -208,11 +257,22 @@ internal sealed partial class AudiobookScanService(
         foreach (var filePath in attributedFiles)
         {
             cancellationToken.ThrowIfCancellationRequested();
+            await ValidateCommandAsync(command, cancellationToken);
+            ValidateDiscoveredPathParent(
+                command,
+                pinnedAuthority,
+                discovery,
+                filePath);
             try
             {
+                using var registrationLease = OpenPinnedMetadataFile(
+                    command,
+                    pinnedAuthority,
+                    discovery,
+                    filePath);
                 if (await fileService.EnsureAudiobookFileAsync(
                         audiobook,
-                        filePath,
+                        registrationLease,
                         source,
                         cancellationToken))
                 {

@@ -5,6 +5,134 @@ namespace Listenarr.Infrastructure.FileSystem;
 
 public partial class FileMover
 {
+    public Task<IAudiobookFileRegistrationLease?> PrepareActionForRegistrationAsync(
+        FileAction action,
+        string source,
+        string destination,
+        Guid? operationId = null)
+    {
+        return PrepareActionForRegistrationCoreAsync(
+            action,
+            source,
+            destination,
+            operationId,
+            expectedRegisteredPhysicalObjectIdentity: null);
+    }
+
+    public Task<IAudiobookFileRegistrationLease?> PrepareActionForRegistrationAsync(
+        FileAction action,
+        string source,
+        string destination,
+        Guid? operationId,
+        string expectedRegisteredPhysicalObjectIdentity)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(
+            expectedRegisteredPhysicalObjectIdentity);
+        return PrepareActionForRegistrationCoreAsync(
+            action,
+            source,
+            destination,
+            operationId,
+            expectedRegisteredPhysicalObjectIdentity);
+    }
+
+    private async Task<IAudiobookFileRegistrationLease?>
+        PrepareActionForRegistrationCoreAsync(
+            FileAction action,
+            string source,
+            string destination,
+            Guid? operationId,
+            string? expectedRegisteredPhysicalObjectIdentity)
+    {
+        if (action is not (
+                FileAction.Move or
+                FileAction.Copy or
+                FileAction.HardlinkCopy))
+        {
+            LogMutation(
+                FileMutationOutcome.Blocked,
+                action,
+                source,
+                destination,
+                "The requested action cannot publish a registration candidate");
+            return null;
+        }
+
+        if (action == FileAction.HardlinkCopy)
+        {
+            if (!operationId.HasValue)
+            {
+                LogMutation(
+                    FileMutationOutcome.Blocked,
+                    action,
+                    source,
+                    destination,
+                    "Retryable hardlink registration requires a stable operation identifier");
+                return null;
+            }
+
+            var recovery = await TryRecoverHardlinkRegistrationPublicationAsync(
+                source,
+                destination,
+                operationId.Value);
+            if (recovery.Lease != null)
+            {
+                return recovery.Lease;
+            }
+
+            if (!string.IsNullOrWhiteSpace(
+                    expectedRegisteredPhysicalObjectIdentity))
+            {
+                var registeredLease =
+                    await TryOpenRegisteredHardlinkPublicationAsync(
+                        source,
+                        destination,
+                        operationId.Value,
+                        expectedRegisteredPhysicalObjectIdentity);
+                return registeredLease;
+            }
+
+            if (recovery.StateFound)
+            {
+                return null;
+            }
+        }
+
+        IAudiobookFileRegistrationLease? registrationLease = null;
+        var publicationAction = action == FileAction.Move
+            ? FileAction.Copy
+            : action;
+        var published = await CopyOrHardlinkPinnedFileAsync(
+            publicationAction,
+            source,
+            destination,
+            preferHardlink: action == FileAction.HardlinkCopy,
+            capturePublication: lease =>
+            {
+                if (registrationLease != null)
+                {
+                    throw new InvalidOperationException(
+                        "A file publication returned more than one registration lease.");
+                }
+
+                registrationLease = lease;
+            },
+            registrationOperationId: operationId);
+        if (!published)
+        {
+            registrationLease?.Dispose();
+            return null;
+        }
+
+        if (registrationLease == null)
+        {
+            throw new InvalidOperationException(
+                "The file publication completed without a registration lease.");
+        }
+
+        return registrationLease;
+    }
+
     public async Task<bool> PerformActionOn(
         FileAction action,
         string source,

@@ -19,6 +19,10 @@
 
 namespace Listenarr.Application.Metadata.Contracts
 {
+    public readonly record struct MetadataFileSource(
+        string ReadPath,
+        string PublicPath);
+
     /// <summary>
     /// Provides metadata retrieval and file tagging for audiobook files
     /// </summary>
@@ -53,6 +57,13 @@ namespace Listenarr.Application.Metadata.Contracts
         /// <param name="filePath">Path to the audio file</param>
         /// <returns>Extracted audio metadata, or null if extraction failed</returns>
         Task<AudioMetadata?> ExtractFileMetadataAsync(string filePath);
+
+        /// <summary>
+        /// Extracts metadata through a stable read path while deriving fallback
+        /// identity from the separate public path.
+        /// </summary>
+        Task<AudioMetadata?> ExtractFileMetadataAsync(
+            MetadataFileSource fileSource);
 
         /// <summary>
         /// Applies metadata tags to an audio file

@@ -25,7 +25,7 @@ namespace Listenarr.Tests.Features.Infrastructure.Metadata.Jobs
             var extractionStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             var releaseExtraction = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             var metadataService = new Mock<IMetadataService>();
-            metadataService.Setup(service => service.ExtractFileMetadataAsync(It.IsAny<string>()))
+            metadataService.Setup(service => service.ExtractFileMetadataAsync(It.IsAny<MetadataFileSource>()))
                 .Returns(async () =>
                 {
                     extractionStarted.SetResult();
@@ -78,6 +78,140 @@ namespace Listenarr.Tests.Features.Infrastructure.Metadata.Jobs
             Assert.Equal(newPath, persisted.Path);
             Assert.Null(persisted.DurationSeconds);
             Assert.Null(persisted.Format);
+        }
+
+        [Fact]
+        public async Task RunCycleAsync_FileGenerationReplacedDuringExtraction_DoesNotApplyMetadataToReplacement()
+        {
+            var replacementSucceeded = false;
+            string audioPath = string.Empty;
+            var metadataService = new Mock<IMetadataService>();
+            metadataService.Setup(service => service.ExtractFileMetadataAsync(It.IsAny<MetadataFileSource>()))
+                .Returns<MetadataFileSource>(source =>
+                {
+                    var displaced = Path.Join(
+                        Path.GetDirectoryName(audioPath)!,
+                        $"original-{Guid.NewGuid():N}.m4b");
+                    try
+                    {
+                        File.Move(audioPath, displaced);
+                        File.WriteAllText(audioPath, "replacement audio");
+                        replacementSucceeded = true;
+                    }
+                    catch (IOException)
+                    {
+                        // Windows holds a stable handle that denies replacement and writes.
+                    }
+                    catch (UnauthorizedAccessException)
+                    {
+                        // Some Windows filesystems report the sharing denial as access denied.
+                    }
+
+                    return Task.FromResult<AudioMetadata?>(new AudioMetadata
+                    {
+                        Duration = TimeSpan.FromSeconds(321),
+                        Format = "metadata-from-original"
+                    });
+                });
+            Init(builder => builder.WithSingleton(metadataService.Object));
+
+            audioPath = await FileService.GetFileAsync(
+                FileService.GetTempDirectory("metadata-rescan-generation-race"),
+                "book.m4b",
+                "original audio");
+            var audiobook = await _audiobookRepository.AddAsync(new AudiobookBuilder()
+                .WithTitle("Metadata Generation Race")
+                .WithBasePath(Path.GetDirectoryName(audioPath)!)
+                .Build());
+            var pending = new AudiobookFileBuilder()
+                .WithAudiobook(audiobook)
+                .WithPath(audioPath)
+                .Build();
+            string originalPhysicalIdentity;
+            using (var lease = PinnedAudiobookFileRegistrationLease.Open(audioPath))
+            {
+                originalPhysicalIdentity = lease.PhysicalObjectIdentity;
+                pending.ApplyPhysicalObjectIdentity(
+                    originalPhysicalIdentity,
+                    DateTime.UtcNow);
+            }
+            var file = await _audiobookFileRepository.AddAsync(pending);
+
+            var processor = new MetadataRescanProcessor(
+                _provider.GetRequiredService<IServiceScopeFactory>(),
+                _provider.GetRequiredService<IAudiobookOperationCoordinator>(),
+                NullLogger<MetadataRescanProcessor>.Instance);
+            await processor.RunCycleAsync(CancellationToken.None);
+
+            var factory = _provider.GetRequiredService<IDbContextFactory<ListenArrDbContext>>();
+            await using var verification = await factory.CreateDbContextAsync();
+            var persisted = await verification.AudiobookFiles.SingleAsync(
+                candidate => candidate.Id == file.Id);
+            Assert.Equal(originalPhysicalIdentity, persisted.PhysicalObjectIdentity);
+            if (replacementSucceeded)
+            {
+                Assert.Null(persisted.DurationSeconds);
+                Assert.Null(persisted.Format);
+                Assert.Equal("replacement audio", await File.ReadAllTextAsync(audioPath));
+            }
+            else
+            {
+                Assert.Equal(321, persisted.DurationSeconds);
+                Assert.Equal("metadata-from-original", persisted.Format);
+                Assert.Equal("original audio", await File.ReadAllTextAsync(audioPath));
+            }
+        }
+
+        [Fact]
+        public async Task RunCycleAsync_PartialMetadataRefresh_PreservesExistingValidFields()
+        {
+            var metadataService = new Mock<IMetadataService>();
+            metadataService.Setup(service => service.ExtractFileMetadataAsync(It.IsAny<MetadataFileSource>()))
+                .ReturnsAsync(new AudioMetadata
+                {
+                    Duration = TimeSpan.FromSeconds(222),
+                    Format = "refreshed-format",
+                    SampleRate = 48000
+                });
+            Init(builder => builder.WithSingleton(metadataService.Object));
+
+            var audioPath = await FileService.GetFileAsync(
+                FileService.GetTempDirectory("metadata-rescan-partial"),
+                "book.m4b",
+                "audio");
+            var audiobook = await _audiobookRepository.AddAsync(new AudiobookBuilder()
+                .WithTitle("Partial Metadata")
+                .WithBasePath(Path.GetDirectoryName(audioPath)!)
+                .Build());
+            var pending = AudiobookFile.CreateUnresolved(audioPath);
+            pending.AudiobookId = audiobook.Id;
+            pending.DurationSeconds = 111;
+            pending.Format = "existing-format";
+            pending.Codec = "existing-codec";
+            pending.Bitrate = 64000;
+            pending.SampleRate = null;
+            pending.Channels = 2;
+            var file = await _audiobookFileRepository.AddAsync(pending);
+
+            var processor = new MetadataRescanProcessor(
+                _provider.GetRequiredService<IServiceScopeFactory>(),
+                _provider.GetRequiredService<IAudiobookOperationCoordinator>(),
+                NullLogger<MetadataRescanProcessor>.Instance);
+            await processor.RunCycleAsync(CancellationToken.None);
+
+            using var verificationScope = _provider.CreateScope();
+            var verificationRepository = verificationScope.ServiceProvider
+                .GetRequiredService<IAudiobookFileRepository>();
+            var persisted = await verificationRepository.GetByIdAsync(file.Id);
+            Assert.NotNull(persisted);
+            Assert.Equal(222, persisted.DurationSeconds);
+            Assert.Equal("refreshed-format", persisted.Format);
+            Assert.Equal(48000, persisted.SampleRate);
+            Assert.Equal("existing-codec", persisted.Codec);
+            Assert.Equal(64000, persisted.Bitrate);
+            Assert.Equal(2, persisted.Channels);
+            Assert.False(string.IsNullOrWhiteSpace(
+                persisted.PhysicalObjectIdentity));
         }
 
         [Theory]

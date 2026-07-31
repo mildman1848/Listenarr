@@ -44,6 +44,13 @@ namespace Listenarr.Domain.Audiobooks
         public PathIdentityState PathIdentityState { get; private set; } = PathIdentityState.Unavailable;
         public string? PathIdentityReason { get; private set; }
 
+        [JsonIgnore]
+        public string? PhysicalObjectIdentity { get; private set; }
+        [JsonIgnore]
+        public int PhysicalIdentityVersion { get; private set; } = 1;
+        [JsonIgnore]
+        public DateTime? PhysicalIdentityObservedAtUtc { get; private set; }
+
         public static AudiobookFile CreateUnresolved(string? path = null)
         {
             var file = new AudiobookFile();
@@ -100,6 +107,30 @@ namespace Listenarr.Domain.Audiobooks
             PathIdentityVersion = state.Version;
             PathIdentityState = state.State;
             PathIdentityReason = state.Reason;
+        }
+
+        public void ApplyPhysicalObjectIdentity(
+            string objectIdentity,
+            DateTime observedAtUtc)
+        {
+            ArgumentException.ThrowIfNullOrWhiteSpace(objectIdentity);
+            if (observedAtUtc.Kind != DateTimeKind.Utc)
+            {
+                throw new ArgumentException(
+                    "Physical identity observation time must be UTC.",
+                    nameof(observedAtUtc));
+            }
+
+            PhysicalObjectIdentity = objectIdentity;
+            PhysicalIdentityVersion = 1;
+            PhysicalIdentityObservedAtUtc = observedAtUtc;
+        }
+
+        public void ClearPhysicalObjectIdentity()
+        {
+            PhysicalObjectIdentity = null;
+            PhysicalIdentityVersion = 1;
+            PhysicalIdentityObservedAtUtc = null;
         }
 
         public void PreparePathIdentityReconciliation(string reason)

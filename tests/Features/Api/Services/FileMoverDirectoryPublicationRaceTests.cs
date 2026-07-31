@@ -53,7 +53,7 @@ public sealed class FileMoverDirectoryPublicationRaceTests : BaseTests
         Assert.True(File.Exists(Path.Join(source, "book.m4b")));
     }
 
-    [Fact]
+    [LinuxFact]
     public async Task CopyDirectoryAsync_NestedStagingDirectoryReplacedBeforeFileCopy_DoesNotWriteThroughLink()
     {
         var root = FileService.GetTempDirectory("directory-copy-nested-staging-race");
@@ -64,10 +64,9 @@ public sealed class FileMoverDirectoryPublicationRaceTests : BaseTests
         var probe = Path.Join(root, "link-probe");
         Directory.CreateDirectory(sourceNested);
         await File.WriteAllTextAsync(Path.Join(sourceNested, "book.m4b"), "source-audio");
-        if (!TryCreateDirectoryLink(probe, external))
-        {
-            return;
-        }
+        Assert.True(
+            TryCreateDirectoryLink(probe, external),
+            "The required directory link could not be created.");
         Directory.Delete(probe);
 
         string? stagingRoot = null;
@@ -114,7 +113,7 @@ public sealed class FileMoverDirectoryPublicationRaceTests : BaseTests
         }
     }
 
-    [Fact]
+    [LinuxFact]
     public async Task CopyDirectoryAsync_StagingRootReplacedBeforePublication_IsBlocked()
     {
         var root = FileService.GetTempDirectory("directory-copy-publication-race");
@@ -124,10 +123,9 @@ public sealed class FileMoverDirectoryPublicationRaceTests : BaseTests
         var probe = Path.Join(root, "link-probe");
         Directory.CreateDirectory(source);
         await File.WriteAllTextAsync(Path.Join(source, "book.m4b"), "source-audio");
-        if (!TryCreateDirectoryLink(probe, external))
-        {
-            return;
-        }
+        Assert.True(
+            TryCreateDirectoryLink(probe, external),
+            "The required directory link could not be created.");
         Directory.Delete(probe);
 
         string? stagingRoot = null;

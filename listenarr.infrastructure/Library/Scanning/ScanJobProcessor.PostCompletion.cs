@@ -57,7 +57,7 @@ public partial class ScanJobProcessor
                 jobId = job.Id.ToString(),
                 audiobookId = job.AudiobookId,
                 status,
-                error,
+                error = ScanJobPublicError.FromInternal(error),
                 failedAt = _timeProvider.GetUtcNow().UtcDateTime
             }, cancellationToken);
         }

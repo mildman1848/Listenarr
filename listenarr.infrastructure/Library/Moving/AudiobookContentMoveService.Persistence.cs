@@ -46,6 +46,19 @@ internal sealed partial class AudiobookContentMoveService
             cleanupState,
             cancellationToken);
 
+    private Task UpdateCleanupProtectionVersionAsync(
+        Guid jobId,
+        MoveLeaseToken leaseToken,
+        string relativePath,
+        int cleanupProtectionVersion,
+        CancellationToken cancellationToken) =>
+        executionStore.UpdateCleanupProtectionVersionAsync(
+            jobId,
+            leaseToken,
+            relativePath,
+            cleanupProtectionVersion,
+            cancellationToken);
+
     private Task UpdateCopyStateAsync(
         Guid jobId,
         MoveLeaseToken leaseToken,

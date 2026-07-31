@@ -806,7 +806,8 @@ const previewRelative = ref<string>('')
 const estimatedFullPath = computed(() => {
   let root = ''
   if (selectedRootId.value === 0) {
-    root = (customRootPath.value || '').trim()
+    const customPath = customRootPath.value || ''
+    root = customPath.trim().length > 0 ? customPath : ''
   } else if (selectedRootId.value && selectedRootId.value > 0) {
     const found = rootStore.folders.find((f) => f.id === selectedRootId.value)
     root = found?.path || ''
@@ -815,7 +816,8 @@ const estimatedFullPath = computed(() => {
     root = defaultRoot?.path || configStore.applicationSettings?.outputPath || ''
   }
   if (selectedRootId.value === 0) return root
-  const rel = (options.value.relativePath || '').trim()
+  const relativePath = options.value.relativePath || ''
+  const rel = relativePath.trim().length > 0 ? relativePath : ''
   if (!root) return rel
   if (!rel) return root
   const sep = root.includes('\\') ? '\\' : '/'
@@ -1251,13 +1253,14 @@ const addToLibrary = async () => {
 
   isAdding.value = true
   try {
-    const destination = estimatedFullPath.value.trim() || undefined
+    const estimatedDestination = estimatedFullPath.value
+    const destination = estimatedDestination.trim().length > 0 ? estimatedDestination : undefined
     const metadataToSend = buildMetadataPayload()
     const result = await apiService.addToLibrary(metadataToSend, {
       monitored: options.value.monitored,
       qualityProfileId: options.value.qualityProfileId || undefined,
       autoSearch: options.value.autoSearch,
-      destinationPath: destination || undefined,
+      destinationPath: destination,
     })
     toast.success('Added', `"${metadataToSend.title}" has been added to your library!`)
     emit('added', result.audiobook)

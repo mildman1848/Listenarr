@@ -93,8 +93,7 @@ public partial class RenameService
                 cancellationToken);
             if (destinationIdentity.State != PathIdentityState.Valid)
             {
-                item.Error = destinationIdentity.Reason
-                    ?? "Destination filesystem identity is unavailable.";
+                item.Error = "Destination filesystem identity is unavailable.";
                 return item;
             }
 
@@ -150,7 +149,7 @@ public partial class RenameService
                 "Failed to organize file {FileId} for audiobook {AudiobookId}",
                 fileOperation.FileId,
                 audiobook.Id);
-            item.Error = exception.Message;
+            item.Error = "File organize operation failed.";
         }
 
         return item;

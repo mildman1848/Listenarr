@@ -1,3 +1,4 @@
+using Listenarr.Tests.Common;
 using Microsoft.EntityFrameworkCore;
 
 namespace Listenarr.Tests.Features.Infrastructure.Library.Moving;
@@ -148,13 +149,9 @@ public partial class AudiobookContentMoveServiceTests
         Assert.True(File.Exists(Path.Join(target, "book.m4b")));
     }
 
-    [Fact]
+    [WindowsFact]
     public async Task MoveContentsAsync_ReplacesExistingHiddenRecoveryMarkerAtomicallyOnWindows()
     {
-        if (!OperatingSystem.IsWindows())
-        {
-            return;
-        }
 
         var source = FileService.GetTempDirectory("content-move-hidden-marker-src");
         var sourceFile = await FileService.GetFileAsync(source, "book.m4b", "verified audio");

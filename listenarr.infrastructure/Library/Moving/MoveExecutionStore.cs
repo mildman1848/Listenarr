@@ -34,6 +34,13 @@ internal interface IMoveExecutionStore
         MoveJobEntryCleanupState cleanupState,
         CancellationToken cancellationToken);
 
+    Task UpdateCleanupProtectionVersionAsync(
+        Guid jobId,
+        MoveLeaseToken leaseToken,
+        string relativePath,
+        int cleanupProtectionVersion,
+        CancellationToken cancellationToken);
+
     Task UpdateCopyStateAsync(
         Guid jobId,
         MoveLeaseToken leaseToken,

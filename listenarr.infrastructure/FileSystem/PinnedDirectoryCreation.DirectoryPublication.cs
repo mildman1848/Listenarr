@@ -33,7 +33,8 @@ internal sealed partial class PinnedDirectoryCreation
                 directoryHandle,
                 parentPath,
                 childName,
-                created: true);
+                created: true,
+                parentFollowsVisibleFinalLink: false);
             if (publication.VisiblePathMatches())
             {
                 return publication;
@@ -55,7 +56,7 @@ internal sealed partial class PinnedDirectoryCreation
         using var parentAnchor = new PinnedDirectoryAnchor(
             DuplicateSafeHandle(_parentHandle),
             _parentPath,
-            followVisibleFinalLink: false);
+            _parentFollowsVisibleFinalLink);
         return PublishCreatedDirectoryTo(parentAnchor, finalName);
     }
 
@@ -242,7 +243,8 @@ internal sealed partial class PinnedDirectoryCreation
                 DuplicateSafeHandle(_directoryHandle),
                 destinationParent.FullPath,
                 finalName,
-                created: true);
+                created: true,
+                destinationParent.FollowsVisibleFinalLink);
             if (relocated.VisiblePathMatches())
             {
                 return relocated;

@@ -253,6 +253,11 @@ namespace Listenarr.Tests.Features.Api.Features.Library
         [Fact]
         public async Task AddToLibrary_AtomicCommitFailure_PersistsNeitherAudiobookNorHistory()
         {
+            imageCacheServiceMock
+                .Setup(service => service.DownloadAndCacheImageAsync(
+                    imageUrl1,
+                    "B000TEST01"))
+                .ReturnsAsync("config/cache/images/temp/B000TEST01.jpg");
             var commitStore = new Mock<ILibraryAddCommitStore>();
             commitStore
                 .Setup(store => store.CommitAsync(
@@ -270,6 +275,8 @@ namespace Listenarr.Tests.Features.Api.Features.Library
                     Metadata = new AudibleBookMetadata
                     {
                         Title = "Atomic Commit Failure",
+                        Asin = "B000TEST01",
+                        ImageUrl = imageUrl1,
                         Authors = []
                     },
                     Monitored = true
@@ -277,6 +284,16 @@ namespace Listenarr.Tests.Features.Api.Features.Library
 
             Assert.Empty(await _audiobookRepository.GetAllAsync());
             Assert.Equal(0, await _historyRepository.CountAsync());
+            imageCacheServiceMock.Verify(
+                service => service.DownloadAndCacheImageAsync(
+                    imageUrl1,
+                    "B000TEST01"),
+                Times.Once);
+            imageCacheServiceMock.Verify(
+                service => service.MoveToLibraryStorageAsync(
+                    "B000TEST01",
+                    It.IsAny<string?>()),
+                Times.Never);
         }
 
         [Fact]

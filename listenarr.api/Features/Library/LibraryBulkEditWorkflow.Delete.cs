@@ -90,20 +90,34 @@ namespace Listenarr.Api.Features.Library
                     return new BulkDeleteOutcome(false, 0, $"Audiobook with ID {id} not found");
                 }
 
-                var deletedImages = await DeleteCachedImageAsync(audiobook);
-                await _historyRepository.AddAsync(new History
-                {
-                    AudiobookId = audiobook.Id,
-                    AudiobookTitle = audiobook.Title ?? "Unknown Title",
-                    EventType = "Deleted",
-                    Message = $"Audiobook '{audiobook.Title}' deleted via bulk operation",
-                    Source = "BulkDelete",
-                    Timestamp = DateTime.UtcNow
-                });
-
                 if (!await repository.DeleteByIdAsync(id))
                 {
-                    return new BulkDeleteOutcome(false, deletedImages, $"Failed to delete audiobook with ID {id}");
+                    return new BulkDeleteOutcome(
+                        false,
+                        0,
+                        $"Failed to delete audiobook with ID {id}");
+                }
+
+                var deletedImages = await DeleteCachedImageAsync(audiobook);
+                try
+                {
+                    await _historyRepository.AddAsync(new History
+                    {
+                        AudiobookId = audiobook.Id,
+                        AudiobookTitle = audiobook.Title ?? "Unknown Title",
+                        EventType = "Deleted",
+                        Message = $"Audiobook '{audiobook.Title}' deleted via bulk operation",
+                        Source = "BulkDelete",
+                        Timestamp = DateTime.UtcNow
+                    });
+                }
+                catch (Exception historyException) when (historyException is not (
+                    OperationCanceledException or OutOfMemoryException or StackOverflowException))
+                {
+                    _logger.LogWarning(
+                        historyException,
+                        "Audiobook {AudiobookId} was deleted, but its bulk-delete history event could not be recorded",
+                        id);
                 }
 
                 _logger.LogInformation(
@@ -116,8 +130,11 @@ namespace Listenarr.Api.Features.Library
                 && ex is not OutOfMemoryException
                 && ex is not StackOverflowException)
             {
-                _logger.LogError(ex, "Error during bulk delete for ID {Id}: {Message}", id, ex.Message);
-                return new BulkDeleteOutcome(false, 0, $"Error deleting audiobook with ID {id}: {ex.Message}");
+                _logger.LogError(ex, "Error during bulk delete for ID {Id}", id);
+                return new BulkDeleteOutcome(
+                    false,
+                    0,
+                    $"Error deleting audiobook with ID {id}");
             }
         }
 

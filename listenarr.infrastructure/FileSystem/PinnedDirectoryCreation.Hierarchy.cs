@@ -115,6 +115,9 @@ internal sealed partial class PinnedDirectoryCreation
 
         internal string FullPath { get; }
 
+        internal bool FollowsVisibleFinalLink =>
+            _followVisibleFinalLink;
+
         internal string GetDirectoryObjectIdentity()
         {
             ThrowIfDisposed();
@@ -244,7 +247,8 @@ internal sealed partial class PinnedDirectoryCreation
                 _handle,
                 FullPath,
                 childName,
-                requireDirectoryDeleteAccess);
+                requireDirectoryDeleteAccess,
+                _followVisibleFinalLink);
         }
 
         internal async Task CopyNewFileFromAsync(

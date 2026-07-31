@@ -15,6 +15,18 @@ internal sealed partial class EfLibraryDirectoryOwnershipStore(
         boundaryAuthorizer
         ?? new LibraryDirectoryOwnershipBoundaryAuthorizer(dbContextFactory);
 
+    internal Action? AfterInsideOwnershipMarkerPublicationForTest
+    {
+        get;
+        set;
+    }
+
+    internal Action? AfterOwnershipMarkerPublicationForTest
+    {
+        get;
+        set;
+    }
+
     public async Task<LibraryDirectoryOwnership> RecordCreatedAsync(
         LibraryDirectoryOwnershipClaim claim,
         CancellationToken cancellationToken = default)
@@ -147,7 +159,8 @@ internal sealed partial class EfLibraryDirectoryOwnershipStore(
             var comparison = Compare(candidate, canonicalPath, claim.Semantics);
             if (comparison == OwnershipComparison.Compatible
                 && candidate.State is LibraryDirectoryOwnershipState.Owned
-                    or LibraryDirectoryOwnershipState.Retained)
+                    or LibraryDirectoryOwnershipState.Retained
+                    or LibraryDirectoryOwnershipState.Unavailable)
             {
                 compatible.Add(candidate);
             }
@@ -170,18 +183,20 @@ internal sealed partial class EfLibraryDirectoryOwnershipStore(
                 existing,
                 managedRootFolderId,
                 directoryObjectIdentity);
+            cancellationToken.ThrowIfCancellationRequested();
             await PinnedLibraryDirectoryOwnershipMarker.EnsureAsync(
                 existing,
                 markerCreation,
-                cancellationToken);
+                CancellationToken.None);
             ValidatePinnedOwnership(existing, markerCreation);
             existing.State = LibraryDirectoryOwnershipState.Owned;
             existing.StateReason = null;
+            existing.DirectoryObjectIdentityUnavailableReason = null;
             existing.UpdatedAt = now;
-            await db.SaveChangesAsync(cancellationToken);
+            await db.SaveChangesAsync(CancellationToken.None);
             if (transaction != null)
             {
-                await transaction.CommitAsync(cancellationToken);
+                await transaction.CommitAsync(CancellationToken.None);
             }
             CleanupRetiredSiblingMarkers(
                 retiredCandidates,
@@ -213,7 +228,8 @@ internal sealed partial class EfLibraryDirectoryOwnershipStore(
             await db.SaveChangesAsync(cancellationToken);
             if (transaction != null)
             {
-                await transaction.CommitAsync(cancellationToken);
+                cancellationToken.ThrowIfCancellationRequested();
+                await transaction.CommitAsync(CancellationToken.None);
             }
             throw new InvalidOperationException(
                 "The created library directory conflicts with an existing durable ownership claim.");
@@ -224,51 +240,28 @@ internal sealed partial class EfLibraryDirectoryOwnershipStore(
             canonicalPath,
             lookupKey,
             ownershipKey,
-            LibraryDirectoryOwnershipState.Owned,
-            reason: null,
+            LibraryDirectoryOwnershipState.Unavailable,
+            "Durable ownership marker publication is pending.",
             managedRootFolderId,
             directoryObjectIdentity,
             now);
+        ownership.DirectoryObjectIdentityUnavailableReason =
+            "Durable ownership marker publication is pending.";
         db.LibraryDirectoryOwnerships.Add(ownership);
         try
         {
             await db.SaveChangesAsync(cancellationToken);
-            try
-            {
-                await PinnedLibraryDirectoryOwnershipMarker.EnsureAsync(
-                    ownership,
-                    markerCreation,
-                    cancellationToken);
-            }
-            catch
-            {
-                if (transaction != null)
-                {
-                    await transaction.RollbackAsync(CancellationToken.None);
-                }
-                else
-                {
-                    db.LibraryDirectoryOwnerships.Remove(ownership);
-                    await db.SaveChangesAsync(CancellationToken.None);
-                }
-                throw;
-            }
-
+            cancellationToken.ThrowIfCancellationRequested();
             if (transaction != null)
             {
-                await transaction.CommitAsync(cancellationToken);
+                await transaction.CommitAsync(CancellationToken.None);
             }
-            CleanupRetiredSiblingMarkers(
-                retiredCandidates,
-                canonicalPath,
-                claim.Semantics);
-            return ownership;
         }
         catch (UniqueConstraintViolationException)
         {
             if (transaction != null)
             {
-                await transaction.RollbackAsync(cancellationToken);
+                await transaction.RollbackAsync(CancellationToken.None);
             }
             if (pinnedCreation != null)
             {
@@ -278,18 +271,27 @@ internal sealed partial class EfLibraryDirectoryOwnershipStore(
 
             await using var retryDb = await dbContextFactory.CreateDbContextAsync(cancellationToken);
             var concurrent = await retryDb.LibraryDirectoryOwnerships
-                .AsNoTracking()
                 .SingleOrDefaultAsync(
                     candidate => candidate.PathOwnershipKey == ownershipKey,
                     cancellationToken);
             if (concurrent != null
                 && Compare(concurrent, canonicalPath, claim.Semantics) == OwnershipComparison.Compatible)
             {
+                EnsureAuthorizedPhysicalIdentity(
+                    concurrent,
+                    managedRootFolderId,
+                    directoryObjectIdentity);
+                cancellationToken.ThrowIfCancellationRequested();
                 await PinnedLibraryDirectoryOwnershipMarker.EnsureAsync(
                     concurrent,
                     markerCreation,
-                    cancellationToken);
+                    CancellationToken.None);
                 ValidatePinnedOwnership(concurrent, markerCreation);
+                concurrent.State = LibraryDirectoryOwnershipState.Owned;
+                concurrent.StateReason = null;
+                concurrent.DirectoryObjectIdentityUnavailableReason = null;
+                concurrent.UpdatedAt = timeProvider.GetUtcNow().UtcDateTime;
+                await retryDb.SaveChangesAsync(CancellationToken.None);
                 CleanupRetiredSiblingMarkers(
                     retiredCandidates,
                     canonicalPath,
@@ -298,6 +300,48 @@ internal sealed partial class EfLibraryDirectoryOwnershipStore(
             }
             throw;
         }
+
+        try
+        {
+            await PinnedLibraryDirectoryOwnershipMarker.EnsureAsync(
+                ownership,
+                markerCreation,
+                CancellationToken.None,
+                AfterInsideOwnershipMarkerPublicationForTest);
+            AfterOwnershipMarkerPublicationForTest?.Invoke();
+            ValidatePinnedOwnership(ownership, markerCreation);
+        }
+        catch (Exception exception) when (exception is not (
+            OutOfMemoryException or StackOverflowException))
+        {
+            ownership.State = LibraryDirectoryOwnershipState.Unavailable;
+            ownership.StateReason =
+                "Durable ownership marker publication requires recovery.";
+            ownership.DirectoryObjectIdentityUnavailableReason =
+                exception.Message;
+            ownership.UpdatedAt = timeProvider.GetUtcNow().UtcDateTime;
+            try
+            {
+                await db.SaveChangesAsync(CancellationToken.None);
+            }
+            catch
+            {
+                // The committed pending row already preserves the ownership token.
+                // Do not replace the original publication failure.
+            }
+            throw;
+        }
+
+        ownership.State = LibraryDirectoryOwnershipState.Owned;
+        ownership.StateReason = null;
+        ownership.DirectoryObjectIdentityUnavailableReason = null;
+        ownership.UpdatedAt = timeProvider.GetUtcNow().UtcDateTime;
+        await db.SaveChangesAsync(CancellationToken.None);
+        CleanupRetiredSiblingMarkers(
+            retiredCandidates,
+            canonicalPath,
+            claim.Semantics);
+        return ownership;
     }
 
     private static void ValidatePinnedOwnership(
@@ -305,11 +349,7 @@ internal sealed partial class EfLibraryDirectoryOwnershipStore(
         PinnedDirectoryCreation creation)
     {
         using var directory = creation.OpenCreatedDirectoryAnchor();
-        var parentPath = Path.GetDirectoryName(ownership.CanonicalPath)
-            ?? throw new InvalidOperationException(
-                "The durable ownership path has no parent directory.");
-        using var parent = PinnedDirectoryCreation.OpenPinnedDirectoryNoFollow(
-            parentPath);
+        using var parent = creation.OpenParentDirectoryAnchor();
         LibraryDirectoryOwnershipMarker.Validate(
             ownership,
             directory,
@@ -390,8 +430,10 @@ internal sealed partial class EfLibraryDirectoryOwnershipStore(
                 ownership.DirectoryObjectIdentity,
                 directoryObjectIdentity,
                 StringComparison.Ordinal)
-            || !string.IsNullOrWhiteSpace(
-                ownership.DirectoryObjectIdentityUnavailableReason))
+            || (ownership.State !=
+                    LibraryDirectoryOwnershipState.Unavailable
+                && !string.IsNullOrWhiteSpace(
+                    ownership.DirectoryObjectIdentityUnavailableReason)))
         {
             throw new InvalidOperationException(
                 "The existing ownership claim lacks matching managed-root and physical-directory authorization.");

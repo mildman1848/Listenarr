@@ -13,10 +13,49 @@ import { apiService } from '@/services/api'
 import { useRootFoldersStore } from '@/stores/rootFolders'
 import type { RootFolderPathChangeResult } from '@/types'
 
-describe('root folder relocation reauthorization store action', () => {
+describe('root folder relocation store actions', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     setActivePinia(createPinia())
+  })
+
+  it('sends the exact current path as the server relocation precondition', async () => {
+    const current = {
+      id: 3,
+      name: 'Library',
+      path: '/srv/Old',
+      isDefault: false,
+      caseSensitivityMode: 'Auto' as const,
+    }
+    const updated = { ...current, path: '/srv/New' }
+    vi.mocked(apiService.changeRootFolderPath).mockResolvedValueOnce({
+      relocationId: 'relocation-1',
+      rootFolderId: 3,
+      currentPath: current.path,
+      targetPath: updated.path,
+      status: 'Pending',
+      totalJobs: 1,
+      completedJobs: 0,
+      targetIdentityEnrollmentState: 'Authorized',
+    })
+    vi.mocked(apiService.getRootFolders).mockResolvedValueOnce([updated])
+    const store = useRootFoldersStore()
+    store.folders = [current]
+
+    await store.update(3, updated, {
+      expectedCurrentPath: current.path,
+      pathChangeConfirmed: true,
+      moveFiles: true,
+      deleteEmptySource: true,
+    })
+
+    expect(apiService.changeRootFolderPath).toHaveBeenCalledWith(
+      3,
+      expect.objectContaining({
+        targetPath: updated.path,
+        expectedCurrentPath: current.path,
+      }),
+    )
   })
 
   it('passes the exact confirmed target path and reloads root folders', async () => {

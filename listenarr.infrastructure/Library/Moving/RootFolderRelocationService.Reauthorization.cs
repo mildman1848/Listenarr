@@ -5,6 +5,12 @@ namespace Listenarr.Infrastructure.Library.Moving;
 
 public sealed partial class RootFolderRelocationService
 {
+    internal Action? AfterLegacyTargetAuthorizationCommitForTest
+    {
+        get;
+        set;
+    }
+
     public async Task<RootFolderPathChangeResult> ReauthorizeLegacyTargetAsync(
         Guid relocationId,
         string confirmedTargetPath,
@@ -19,7 +25,10 @@ public sealed partial class RootFolderRelocationService
                         relocationId,
                         confirmedTargetPath,
                         lockedToken);
-                    return await RetryCoreAsync(relocationId, lockedToken);
+                    AfterLegacyTargetAuthorizationCommitForTest?.Invoke();
+                    return await RetryCoreAsync(
+                        relocationId,
+                        CancellationToken.None);
                 },
                 token),
             cancellationToken);

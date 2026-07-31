@@ -1,3 +1,5 @@
+using Listenarr.Application.Common;
+
 namespace Listenarr.Application.Audiobooks.Jobs;
 
 public sealed class AudiobookOperationCoordinator : IAudiobookOperationCoordinator, IDisposable
@@ -10,7 +12,8 @@ public sealed class AudiobookOperationCoordinator : IAudiobookOperationCoordinat
 
     private readonly object _sync = new();
     private readonly Dictionary<int, Entry> _entries = [];
-    private readonly AsyncLocal<Dictionary<int, int>?> _held = new();
+    private readonly AsyncLocal<
+        ReentrantOperationFrame<IReadOnlyDictionary<int, Entry>>?> _held = new();
     private bool _disposed;
 
     public Task ExecuteExclusiveAsync(
@@ -52,17 +55,17 @@ public sealed class AudiobookOperationCoordinator : IAudiobookOperationCoordinat
             .Distinct()
             .OrderBy(id => id)
             .ToArray();
-        if (orderedIds.Length == 0)
+        var parent = _held.Value;
+        if (orderedIds.Length == 0 && parent == null)
         {
             return await operation(cancellationToken);
         }
 
-        var held = _held.Value;
-        if (held is { Count: > 0 })
+        if (parent is { State.Count: > 0 })
         {
-            var highestHeldId = held.Keys.Max();
+            var highestHeldId = parent.State.Keys.Max();
             var lowerUnheldId = orderedIds
-                .Where(id => !held.ContainsKey(id) && id < highestHeldId)
+                .Where(id => !parent.State.ContainsKey(id) && id < highestHeldId)
                 .Select(id => (int?)id)
                 .FirstOrDefault();
             if (lowerUnheldId.HasValue)
@@ -72,16 +75,32 @@ public sealed class AudiobookOperationCoordinator : IAudiobookOperationCoordinat
             }
         }
 
+        var enteredParent = false;
+        var acquiredParentGate = false;
         var acquired = new List<(int Id, Entry Entry)>();
-        var reentered = new List<(int Id, int PreviousDepth)>();
+        ReentrantOperationFrame<IReadOnlyDictionary<int, Entry>>? frame = null;
         try
         {
+            if (parent != null)
+            {
+                await parent.ChildGate.WaitAsync(cancellationToken);
+                acquiredParentGate = true;
+                if (!parent.Lifetime.TryEnter())
+                {
+                    throw new InvalidOperationException(
+                        "An audiobook operation escaped its owning scope.");
+                }
+
+                enteredParent = true;
+            }
+
+            var held = parent == null
+                ? new Dictionary<int, Entry>()
+                : new Dictionary<int, Entry>(parent.State);
             foreach (var audiobookId in orderedIds)
             {
-                if (held != null && held.TryGetValue(audiobookId, out var depth))
+                if (held.ContainsKey(audiobookId))
                 {
-                    held[audiobookId] = depth + 1;
-                    reentered.Add((audiobookId, depth));
                     continue;
                 }
 
@@ -97,31 +116,36 @@ public sealed class AudiobookOperationCoordinator : IAudiobookOperationCoordinat
                 }
 
                 acquired.Add((audiobookId, entry));
-                held ??= [];
-                _held.Value = held;
-                held[audiobookId] = 1;
+                held.Add(audiobookId, entry);
             }
 
+            frame = new ReentrantOperationFrame<IReadOnlyDictionary<int, Entry>>(
+                held);
+            _held.Value = frame;
             return await operation(cancellationToken);
         }
         finally
         {
-            for (var index = reentered.Count - 1; index >= 0; index--)
+            if (frame != null)
             {
-                var (audiobookId, previousDepth) = reentered[index];
-                held![audiobookId] = previousDepth;
+                await frame.Lifetime.CloseAsync();
+                _held.Value = parent;
             }
 
             for (var index = acquired.Count - 1; index >= 0; index--)
             {
                 var (audiobookId, entry) = acquired[index];
-                held!.Remove(audiobookId);
                 ReleaseReference(audiobookId, entry, releaseGate: true);
             }
 
-            if (held is { Count: 0 })
+            if (enteredParent)
             {
-                _held.Value = null;
+                parent!.Lifetime.Exit();
+            }
+
+            if (acquiredParentGate)
+            {
+                parent!.ChildGate.Release();
             }
         }
     }

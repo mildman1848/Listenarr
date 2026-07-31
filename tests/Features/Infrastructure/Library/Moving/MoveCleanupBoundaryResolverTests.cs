@@ -110,13 +110,9 @@ public sealed class MoveCleanupBoundaryResolverTests : BaseTests
         Assert.Equal(persistedBoundary, result.Boundary);
     }
 
-    [Fact]
+    [WindowsFact]
     public async Task ResolveAsync_CrossRootWindowsMove_UsesSourceVolumeAnchor()
     {
-        if (!OperatingSystem.IsWindows())
-        {
-            return;
-        }
 
         var driveRoot = Path.GetPathRoot(FileService.GetTempPath())!;
         var sourceAnchor = Path.Join(driveRoot, "Listenarr Downloads");
@@ -144,13 +140,9 @@ public sealed class MoveCleanupBoundaryResolverTests : BaseTests
         Assert.Equal(sourceAnchor, result.Boundary);
     }
 
-    [Fact]
+    [LinuxFact]
     public async Task ResolveAsync_UnixConfiguredSourceRoot_PreservesRootAcrossCrossRootMove()
     {
-        if (OperatingSystem.IsWindows())
-        {
-            return;
-        }
 
         var sourceRoot = Path.Join(
             Path.GetTempPath(),
@@ -174,13 +166,9 @@ public sealed class MoveCleanupBoundaryResolverTests : BaseTests
         Assert.Equal(Path.GetFullPath(sourceRoot), result.Boundary);
     }
 
-    [Fact]
+    [LinuxFact]
     public async Task ResolveAsync_UnixCustomSiblingMove_UsesCommonSeriesAncestor()
     {
-        if (OperatingSystem.IsWindows())
-        {
-            return;
-        }
 
         var series = Path.Join(
             Path.GetTempPath(),
@@ -200,13 +188,9 @@ public sealed class MoveCleanupBoundaryResolverTests : BaseTests
         Assert.Equal(Path.GetFullPath(series), result.Boundary);
     }
 
-    [Fact]
+    [LinuxFact]
     public async Task ResolveAsync_CommonAncestorUsesTargetFilesystemSemantics()
     {
-        if (OperatingSystem.IsWindows())
-        {
-            return;
-        }
 
         var parent = FileService.GetTempDirectory("move-boundary-endpoint-semantics");
         var sourceRoot = Path.Join(parent, "Library");
@@ -229,13 +213,9 @@ public sealed class MoveCleanupBoundaryResolverTests : BaseTests
         Assert.Equal(sourceRoot, result.Boundary);
     }
 
-    [Fact]
+    [LinuxFact]
     public async Task ResolveAsync_UnavailableTargetIdentityDoesNotUseSourceSemanticsForCommonAncestor()
     {
-        if (OperatingSystem.IsWindows())
-        {
-            return;
-        }
 
         var parent = FileService.GetTempDirectory("move-boundary-target-unavailable");
         var source = Path.Join(parent, "Old Title", "test");
@@ -263,13 +243,9 @@ public sealed class MoveCleanupBoundaryResolverTests : BaseTests
         Assert.Contains("target probe failed", result.Reason, StringComparison.Ordinal);
     }
 
-    [Fact]
+    [LinuxFact]
     public async Task ResolveAsync_UnixCrossRootWithoutConfiguredRoot_DoesNotUseFilesystemRoot()
     {
-        if (OperatingSystem.IsWindows())
-        {
-            return;
-        }
 
         var source = "/listenarr-downloads/Author/Series/Old Title/test";
         var target = "/listenarr-library/Author/Series/New Title/test";
@@ -284,13 +260,9 @@ public sealed class MoveCleanupBoundaryResolverTests : BaseTests
         Assert.Contains("No configured source root", result.Reason, StringComparison.Ordinal);
     }
 
-    [Fact]
+    [LinuxFact]
     public async Task ResolveAsync_InsensitiveConfiguredRootWithPersistedLogicalCase_UsesPhysicalAlias()
     {
-        if (OperatingSystem.IsWindows())
-        {
-            return;
-        }
 
         var parent = FileService.GetTempDirectory("move-boundary-case-alias");
         var physicalRoot = Path.Join(parent, "library");
@@ -467,13 +439,9 @@ public sealed class MoveCleanupBoundaryResolverTests : BaseTests
         Assert.Contains("nested probe failed", result.Reason, StringComparison.Ordinal);
     }
 
-    [Fact]
+    [WindowsFact]
     public async Task ResolveAsync_UncConfiguredSourceRoot_TakesPrecedence()
     {
-        if (!OperatingSystem.IsWindows())
-        {
-            return;
-        }
 
         const string sourceRoot = @"\\server\downloads\Listenarr Downloads";
         const string source = @"\\server\downloads\Listenarr Downloads\Author\Series\Old Title\test";
@@ -492,13 +460,9 @@ public sealed class MoveCleanupBoundaryResolverTests : BaseTests
         Assert.Equal(sourceRoot, result.Boundary);
     }
 
-    [Fact]
+    [WindowsFact]
     public async Task ResolveAsync_UncSameShareSiblingMove_UsesCommonSeriesAncestor()
     {
-        if (!OperatingSystem.IsWindows())
-        {
-            return;
-        }
 
         const string series = @"\\server\share\Listenarr Downloads\Matt Dinniman\Dungeon Crawler Carl";
         const string source = @"\\server\share\Listenarr Downloads\Matt Dinniman\Dungeon Crawler Carl\A Parade of Horribles (20262)\test";
@@ -514,13 +478,9 @@ public sealed class MoveCleanupBoundaryResolverTests : BaseTests
         Assert.Equal(series, result.Boundary);
     }
 
-    [Fact]
+    [WindowsFact]
     public async Task ResolveAsync_UncCrossShareMove_UsesTopLevelSourceAnchor()
     {
-        if (!OperatingSystem.IsWindows())
-        {
-            return;
-        }
 
         const string sourceAnchor = @"\\server\downloads\Listenarr Downloads";
         const string source = @"\\server\downloads\Listenarr Downloads\Author\Series\Old Title\test";

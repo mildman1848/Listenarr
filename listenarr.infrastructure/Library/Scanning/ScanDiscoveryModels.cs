@@ -8,7 +8,8 @@ internal enum ScanDiscoveryIssueKind
     LinkSkipped,
     AttributionConflict,
     MetadataUnavailable,
-    OutsideStableIdentifierBoundary
+    OutsideStableIdentifierBoundary,
+    DirectoryGenerationChanged
 }
 
 internal sealed record ScanDiscoveryIssue(
@@ -21,13 +22,16 @@ internal sealed record ScanDiscoveryResult(
     IReadOnlyList<string> AttributedFiles,
     IReadOnlyDictionary<string, string> ProvenBookBoundaries,
     IReadOnlyList<string> EnumeratedDirectories,
+    IReadOnlyDictionary<string, string> DirectoryObjectIdentities,
+    IReadOnlyDictionary<string, string> FileObjectIdentities,
     string? SelectedStableIdentifierBoundary,
     bool HasStableIdentifierBoundaryConflict,
     IReadOnlyList<ScanDiscoveryIssue> Issues)
 {
     public bool IsComplete => Issues.All(issue =>
         issue.Kind is not (ScanDiscoveryIssueKind.EnumerationFailure
-            or ScanDiscoveryIssueKind.LinkSkipped));
+            or ScanDiscoveryIssueKind.LinkSkipped
+            or ScanDiscoveryIssueKind.DirectoryGenerationChanged));
 
     public bool HasAttributionConflict => Issues.Any(issue =>
         issue.Kind == ScanDiscoveryIssueKind.AttributionConflict);

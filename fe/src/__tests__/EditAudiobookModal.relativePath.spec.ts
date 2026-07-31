@@ -369,6 +369,39 @@ describe('EditAudiobookModal relative path calculation', () => {
     )
   })
 
+  it('preserves exact Unix whitespace when switching the stored path to Custom', async () => {
+    vi.mocked(apiService.getRootFolders).mockResolvedValueOnce([
+      {
+        id: 8,
+        name: 'Unix root',
+        path: '/library',
+        pathSyntax: 'Unix',
+        isDefault: true,
+        resolvedCaseSensitivity: 'Sensitive',
+      },
+    ])
+    const exactPath = '/library/Author/Title '
+    const wrapper = mount(EditAudiobookModal, {
+      props: {
+        isOpen: true,
+        audiobook: {
+          ...audiobook,
+          basePath: exactPath,
+        },
+      },
+      attachTo: document.body,
+      global: {
+        plugins: [(await import('pinia')).createPinia()],
+      },
+    })
+
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    ;(wrapper.vm as unknown).selectedRootId = 0
+    await nextTick()
+
+    expect((wrapper.vm as unknown).customRootPath).toBe(exactPath)
+  })
+
   it('does not duplicate relative part when saving a Custom path', async () => {
     const wrapper = mount(EditAudiobookModal, {
       props: {

@@ -262,7 +262,8 @@ namespace Listenarr.Infrastructure.Persistence.Repositories
             await ctx.SaveChangesAsync(ct);
             if (transaction != null)
             {
-                await transaction.CommitAsync(ct);
+                ct.ThrowIfCancellationRequested();
+                await transaction.CommitAsync(CancellationToken.None);
             }
         }
 

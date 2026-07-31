@@ -159,6 +159,7 @@ public sealed class MoveJobEntryConfiguration : IEntityTypeConfiguration<MoveJob
         builder.Property(entry => entry.EntryType).HasConversion<string>().HasMaxLength(16);
         builder.Property(entry => entry.CopyState).HasConversion<string>().HasMaxLength(16);
         builder.Property(entry => entry.CleanupState).HasConversion<string>().HasMaxLength(16);
+        builder.Property(entry => entry.CleanupProtectionVersion).HasDefaultValue(0);
         builder.HasIndex(entry => new { entry.MoveJobId, entry.RelativePath }).IsUnique();
     }
 }

@@ -25,9 +25,8 @@ public sealed class AudiobookScanServiceMetadataBoundaryTests : BaseTests
         var upperFile = Path.Join(upperDirectory, "part-a.m4b");
         var lowerFile = Path.Join(lowerDirectory, "part-b.m4b");
         var metadata = new Mock<IMetadataService>(MockBehavior.Strict);
-        metadata.Setup(service => service.ExtractFileMetadataAsync(upperFile))
-            .ReturnsAsync(MatchingMetadata());
-        metadata.Setup(service => service.ExtractFileMetadataAsync(lowerFile))
+        metadata.Setup(service => service.ExtractFileMetadataAsync(
+                It.IsAny<string>()))
             .ReturnsAsync(MatchingMetadata());
         Init(services => services.WithSingleton<IMetadataService>(metadata.Object));
         Directory.CreateDirectory(upperDirectory);
@@ -43,22 +42,21 @@ public sealed class AudiobookScanServiceMetadataBoundaryTests : BaseTests
                 .WithTitle("Expected Title")
                 .WithAuthor("Expected Author")
                 .Build());
-        var resolution = await _provider
-            .GetRequiredService<IFileSystemSemanticsResolver>()
-            .ResolveAsync(root);
-        Assert.Equal(FileSystemCaseSensitivity.Sensitive, resolution.Semantics.CaseSensitivity);
-        var identity = PathIdentitySnapshot.FromResolution(
-            resolution.Semantics,
-            FileSystemCaseSensitivityMode.Auto,
-            FileService.GetTempPath(),
-            root);
+        var authorization = await _provider
+            .GetRequiredService<IScanPathAuthorizationService>()
+            .AuthorizeAsync(root);
+        Assert.True(authorization.IsAuthorized, authorization.Error);
+        Assert.Equal(
+            FileSystemCaseSensitivity.Sensitive,
+            authorization.Identity!.Value.CaseSensitivity);
 
         var result = await _provider
             .GetRequiredService<IAudiobookScanService>()
             .ScanAsync(new AudiobookScanCommand(
                 audiobook.Id,
                 root,
-                identity));
+                authorization.Identity.Value,
+                authorization.PhysicalIdentity!.Value));
 
         Assert.Empty(result.AttributedFiles);
         Assert.Empty(await _audiobookFileRepository.GetByAudiobookIdAsync(audiobook.Id));

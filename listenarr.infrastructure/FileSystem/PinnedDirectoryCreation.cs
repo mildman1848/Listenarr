@@ -14,6 +14,8 @@ internal sealed partial class PinnedDirectoryCreation : IDisposable
     private const int AtRemovedirLinux = 0x200;
     private const int AtRemovedirMac = 0x80;
     private const uint RenameNoReplace = 1;
+    private const uint RenameExchange = 2;
+    private const uint RenameSwapMac = 2;
     private const uint RenameExclusiveMac = 4;
 
     private const uint FileListDirectory = 0x0001;
@@ -22,6 +24,8 @@ internal sealed partial class PinnedDirectoryCreation : IDisposable
     private const uint GenericRead = 0x80000000;
     private const uint GenericWrite = 0x40000000;
     private const uint DeleteAccess = 0x00010000;
+    private const uint FileShareRead = 0x00000001;
+    private const uint FileShareReadWrite = 0x00000003;
     private const uint FileShareAll = 0x00000007;
     private const uint OpenExisting = 3;
     private const uint FileFlagBackupSemantics = 0x02000000;
@@ -40,6 +44,7 @@ internal sealed partial class PinnedDirectoryCreation : IDisposable
     private readonly SafeFileHandle? _directoryHandle;
     private readonly string _parentPath;
     private readonly string _childName;
+    private readonly bool _parentFollowsVisibleFinalLink;
     private bool _disposed;
 
     private PinnedDirectoryCreation(
@@ -47,12 +52,15 @@ internal sealed partial class PinnedDirectoryCreation : IDisposable
         SafeFileHandle? directoryHandle,
         string parentPath,
         string childName,
-        bool created)
+        bool created,
+        bool parentFollowsVisibleFinalLink)
     {
         _parentHandle = parentHandle;
         _directoryHandle = directoryHandle;
         _parentPath = parentPath;
         _childName = childName;
+        _parentFollowsVisibleFinalLink =
+            parentFollowsVisibleFinalLink;
         Created = created;
     }
 
@@ -180,7 +188,8 @@ internal sealed partial class PinnedDirectoryCreation : IDisposable
                     directoryHandle: null,
                     parentPath,
                     childName,
-                    created: false);
+                    created: false,
+                    parentFollowsVisibleFinalLink: false);
             }
             if (status < 0)
             {
@@ -192,7 +201,8 @@ internal sealed partial class PinnedDirectoryCreation : IDisposable
                 new SafeFileHandle(rawHandle, ownsHandle: true),
                 parentPath,
                 childName,
-                created: true);
+                created: true,
+                parentFollowsVisibleFinalLink: false);
         }
         catch
         {
@@ -239,7 +249,8 @@ internal sealed partial class PinnedDirectoryCreation : IDisposable
                         directoryHandle: null,
                         parentPath,
                         childName,
-                        created: false);
+                        created: false,
+                        parentFollowsVisibleFinalLink: false);
                 }
 
                 throw new Win32Exception(
@@ -253,7 +264,8 @@ internal sealed partial class PinnedDirectoryCreation : IDisposable
                 directoryHandle,
                 parentPath,
                 childName,
-                created: true);
+                created: true,
+                parentFollowsVisibleFinalLink: false);
         }
         catch
         {

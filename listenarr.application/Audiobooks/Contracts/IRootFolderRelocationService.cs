@@ -8,7 +8,8 @@ public sealed record RootFolderPathChangeCommand(
     bool DeleteEmptySource,
     string DesiredName,
     bool DesiredIsDefault,
-    FileSystemCaseSensitivityMode TargetCaseSensitivityMode);
+    FileSystemCaseSensitivityMode TargetCaseSensitivityMode,
+    string? ExpectedCurrentPath = null);
 
 public sealed record RootFolderPathChangeResult(
     Guid? RelocationId,

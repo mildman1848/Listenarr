@@ -1,9 +1,13 @@
 using System.Threading.Channels;
+using Listenarr.Tests.Common;
 using Microsoft.Extensions.Logging.Abstractions;
 
 namespace Listenarr.Tests.Features.Infrastructure.Library.Moving;
 
-public sealed class MoveBackgroundServiceTests
+[Trait("Area", "Library")]
+[Trait("Name", "MoveBackgroundServiceTests")]
+[Trait("Category", "Infrastructure")]
+public sealed class MoveBackgroundServiceTests : BaseTests
 {
     [Fact]
     public async Task LeaseLoss_DoesNotRewriteJobAsFailed()

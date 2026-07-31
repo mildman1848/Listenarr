@@ -56,6 +56,32 @@ namespace Listenarr.Tests.Features.Infrastructure.Library.Scanning
         }
 
         [Fact]
+        public async Task ProcessJobAsync_PathlessAuthoritativeScan_RemovesVerifiedMissingTrackedFile()
+        {
+            var basePath = FileService.GetTempDirectory("scan-processor-pathless-authoritative");
+            var missingPath = Path.Join(basePath, "Missing Book.m4b");
+            var audiobook = await _audiobookRepository.AddAsync(new AudiobookBuilder()
+                .WithTitle("Missing Book")
+                .WithBasePath(basePath)
+                .Build());
+            await _audiobookFileRepository.AddAsync(new AudiobookFileBuilder()
+                .WithAudiobook(audiobook)
+                .WithPath(missingPath)
+                .Build());
+            var (queue, job) = await CreateQueuedScanJobAsync(audiobook);
+            Assert.Null(job.Path);
+            Assert.True(job.IsAuthoritativeScope);
+
+            await _provider.GetRequiredService<IScanJobProcessor>()
+                .ProcessJobAsync(job, CancellationToken.None);
+
+            Assert.True(queue.TryGetJob(job.Id, out var updatedJob));
+            Assert.Equal("Completed", updatedJob!.Status);
+            Assert.Empty(
+                await _audiobookFileRepository.GetByAudiobookIdAsync(audiobook.Id));
+        }
+
+        [Fact]
         public async Task ProcessJobAsync_ExplicitQueuedPath_IsNotOverriddenByStoredBasePath()
         {
             var storedBasePath = FileService.GetTempDirectory("scan-processor-stored-base");
@@ -70,19 +96,16 @@ namespace Listenarr.Tests.Features.Infrastructure.Library.Scanning
                 .Build());
             var queue = Assert.IsType<ScanQueueService>(
                 _provider.GetRequiredService<IScanQueueService>());
-            var resolution = await _provider
-                .GetRequiredService<IFileSystemSemanticsResolver>()
-                .ResolveAsync(requestedPath);
-            Assert.Equal(PathIdentityState.Valid, resolution.State);
-            var identity = PathIdentitySnapshot.FromResolution(
-                resolution.Semantics,
-                FileSystemCaseSensitivityMode.Auto,
-                FileService.GetTempPath(),
-                requestedPath);
+            var authorization = await _provider
+                .GetRequiredService<IScanPathAuthorizationService>()
+                .AuthorizeAsync(requestedPath);
+            Assert.True(authorization.IsAuthorized, authorization.Error);
             var jobId = await queue.EnqueueScanAsync(new ScanEnqueueCommand(
                 audiobook,
                 requestedPath,
-                identity));
+                authorization.Identity,
+                authorization.PhysicalIdentity,
+                AuthorizationMode: ScanAuthorizationMode.PreauthorizedPath));
             Assert.True(queue.Reader.TryRead(out var job));
             Assert.Equal(jobId, job.Id);
 
@@ -115,21 +138,18 @@ namespace Listenarr.Tests.Features.Infrastructure.Library.Scanning
                 new AudiobookBuilder()
                     .WithTitle("Book")
                     .Build());
-            var semantics = await _provider
-                .GetRequiredService<IFileSystemSemanticsResolver>()
-                .ResolveAsync(originalRoot);
-            Assert.Equal(PathIdentityState.Valid, semantics.State);
-            var identity = PathIdentitySnapshot.FromResolution(
-                semantics.Semantics,
-                FileSystemCaseSensitivityMode.Auto,
-                originalRoot,
-                bookPath);
+            var authorization = await _provider
+                .GetRequiredService<IScanPathAuthorizationService>()
+                .AuthorizeAsync(bookPath);
+            Assert.True(authorization.IsAuthorized, authorization.Error);
             var queue = Assert.IsType<ScanQueueService>(
                 _provider.GetRequiredService<IScanQueueService>());
             var jobId = await queue.EnqueueScanAsync(new ScanEnqueueCommand(
                 audiobook,
                 bookPath,
-                identity));
+                authorization.Identity,
+                authorization.PhysicalIdentity,
+                AuthorizationMode: ScanAuthorizationMode.PreauthorizedPath));
             Assert.True(queue.Reader.TryRead(out var job));
             Assert.Equal(jobId, job.Id);
             await _applicationSettingsRepository.SaveAsync(
@@ -150,13 +170,9 @@ namespace Listenarr.Tests.Features.Infrastructure.Library.Scanning
                 await _audiobookFileRepository.GetByAudiobookIdAsync(audiobook.Id));
         }
 
-        [Fact]
+        [LinuxFact]
         public async Task ProcessJobAsync_LinkedChildDirectory_DoesNotImportOutsideFiles()
         {
-            if (OperatingSystem.IsWindows())
-            {
-                return;
-            }
 
             var basePath = FileService.GetTempDirectory("scan-processor-link-root");
             var outsidePath = FileService.GetTempDirectory("scan-processor-link-outside");
@@ -179,13 +195,9 @@ namespace Listenarr.Tests.Features.Infrastructure.Library.Scanning
             Assert.Equal(basePath, persistedAudiobook!.BasePath);
         }
 
-        [Fact]
+        [LinuxFact]
         public async Task ProcessJobAsync_LinkedScanRoot_FailsWithoutDeletingTrackedFiles()
         {
-            if (OperatingSystem.IsWindows())
-            {
-                return;
-            }
 
             var actualRoot = FileService.GetTempDirectory("scan-processor-linked-root-target");
             var linkParent = FileService.GetTempDirectory("scan-processor-linked-root-parent");
@@ -504,7 +516,10 @@ namespace Listenarr.Tests.Features.Infrastructure.Library.Scanning
                     It.IsAny<CancellationToken>()))
                 .ReturnsAsync(ScanPathAuthorizationResult.Authorized(
                     basePath,
-                    pathIdentity));
+                    pathIdentity,
+                    new ScanPathPhysicalIdentity(
+                        "processor-test-boundary",
+                        "processor-test-root")));
             await using var services = new ServiceCollection()
                 .AddSingleton(audiobookRepository.Object)
                 .AddSingleton(fileRepository.Object)

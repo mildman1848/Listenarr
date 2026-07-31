@@ -922,6 +922,7 @@ class ApiService {
       desiredName: string
       desiredIsDefault: boolean
       targetCaseSensitivityMode: 'Auto' | 'Sensitive' | 'Insensitive'
+      expectedCurrentPath: string
     },
   ): Promise<import('@/types').RootFolderPathChangeResult> {
     return this.request<import('@/types').RootFolderPathChangeResult>(
@@ -1272,17 +1273,20 @@ class ApiService {
     id: number,
     destinationPath: string,
     options?: { sourcePath?: string; moveFiles?: boolean; deleteEmptySource?: boolean },
-  ): Promise<{ message: string; jobId?: string }> {
+  ): Promise<{ message: string; jobId?: string; target?: string }> {
     const body: Record<string, unknown> = { destinationPath }
     if (options?.sourcePath) (body as Record<string, unknown>).sourcePath = options.sourcePath
     if (options?.moveFiles !== undefined)
       (body as Record<string, unknown>).moveFiles = options.moveFiles
     if (options?.deleteEmptySource !== undefined)
       (body as Record<string, unknown>).deleteEmptySource = options.deleteEmptySource
-    return this.request<{ message: string; jobId?: string }>(`/library/${id}/move`, {
-      method: 'POST',
-      body: JSON.stringify(body),
-    })
+    return this.request<{ message: string; jobId?: string; target?: string }>(
+      `/library/${id}/move`,
+      {
+        method: 'POST',
+        body: JSON.stringify(body),
+      },
+    )
   }
 
   async getMoveJobStatus(jobId: string): Promise<{
@@ -1296,8 +1300,14 @@ class ApiService {
       id: string
       audiobookId?: number
       status: string
+      phase?: string
       requestedPath?: string
       error?: string
+      attemptCount?: number
+      enqueuedAt?: string
+      updatedAt?: string
+      nextAttemptAt?: string
+      canRetry?: boolean
     }>('/library/move/' + encodeURIComponent(jobId))
 
     return {

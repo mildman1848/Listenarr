@@ -1,4 +1,5 @@
 using Listenarr.Api.Dtos.ManualImport;
+using Listenarr.Application.Common;
 using Listenarr.Domain.Common;
 
 namespace Listenarr.Api.Features.Downloads;
@@ -50,75 +51,80 @@ public partial class ManualImportController
                 continue;
             }
 
-            await _audiobookOperationCoordinator.ExecuteExclusiveAsync(
-                group.Key,
-                async operationToken =>
-                {
-                    operationToken.ThrowIfCancellationRequested();
-                    var audiobook = await _audiobookRepository.GetByIdAsync(group.Key);
-                    if (audiobook == null)
+            try
+            {
+                await _audiobookOperationCoordinator.ExecuteExclusiveAsync(
+                    group.Key,
+                    async operationToken =>
                     {
-                        _logger.LogWarning(
-                            "Audiobook {AudiobookId} disappeared before its focused manual-import scan could be queued",
+                        operationToken.ThrowIfCancellationRequested();
+                        var audiobook = await _audiobookRepository.GetByIdAsync(
                             group.Key);
-                        return;
-                    }
+                        if (audiobook == null)
+                        {
+                            _logger.LogWarning(
+                                "Audiobook {AudiobookId} disappeared before its focused manual-import scan could be queued",
+                                group.Key);
+                            return;
+                        }
 
-                    var authorization = await _scanPathAuthorizationService.AuthorizeAsync(
-                        scanPath,
-                        operationToken);
-                    if (!authorization.IsAuthorized)
-                    {
-                        _logger.LogWarning(
-                            "Skipped focused scan for audiobook {AudiobookId}: {Reason}",
-                            group.Key,
-                            authorization.Error);
-                        return;
-                    }
+                        var authorization =
+                            await _scanPathAuthorizationService.AuthorizeAsync(
+                                scanPath,
+                                operationToken);
+                        if (!authorization.IsAuthorized)
+                        {
+                            _logger.LogWarning(
+                                "Skipped focused scan for audiobook {AudiobookId}: {Reason}",
+                                group.Key,
+                                LogRedaction.SanitizeText(
+                                    authorization.Error));
+                            return;
+                        }
 
-                    await PersistAudiobookBasePathAsync(
-                        audiobook,
-                        authorization.Path);
+                        await PersistAudiobookBasePathAsync(
+                            audiobook,
+                            authorization.Path);
 
-                    try
-                    {
                         var scanJobId = await _scanQueueService.EnqueueScanAsync(
                             new ScanEnqueueCommand(
                                 audiobook,
                                 authorization.Path,
                                 authorization.Identity,
-                                IsAuthoritativeScope: false));
+                                authorization.PhysicalIdentity,
+                                IsAuthoritativeScope: false,
+                                AuthorizationMode:
+                                    ScanAuthorizationMode.PreauthorizedPath));
                         _logger.LogInformation(
                             "Enqueued focused scan {ScanJobId} for audiobook {AudiobookId} (path: {Path}) after manual import batch of {FileCount} file(s)",
                             scanJobId,
                             group.Key,
-                            scanPath,
+                            LogRedaction.SanitizeFilePath(scanPath),
                             group.Count());
-                    }
-                    catch (ObjectDisposedException ex)
-                    {
-                        _logger.LogWarning(ex, "Failed to enqueue scan for audiobook {AudiobookId} after manual import", group.Key);
-                    }
-                    catch (InvalidOperationException ex)
-                    {
-                        _logger.LogWarning(ex, "Failed to enqueue scan for audiobook {AudiobookId} after manual import", group.Key);
-                    }
-                    catch (OperationCanceledException ex) when (!operationToken.IsCancellationRequested)
-                    {
-                        _logger.LogWarning(ex, "Failed to enqueue scan for audiobook {AudiobookId} after manual import", group.Key);
-                    }
-                },
-                cancellationToken);
+                    },
+                    cancellationToken);
+            }
+            catch (Exception exception) when (
+                WorkerExceptionClassifier.IsNonFatal(exception))
+            {
+                _logger.LogWarning(
+                    exception,
+                    "Manual import completed for audiobook {AudiobookId}, but its focused scan could not be queued",
+                    group.Key);
+            }
         }
     }
 
-    private async Task PersistAudiobookBasePathAsync(Audiobook audiobook, string? basePath)
+    private async Task PersistAudiobookBasePathAsync(
+        Audiobook audiobook,
+        string? basePath)
     {
         if (string.IsNullOrWhiteSpace(basePath))
         {
             return;
         }
 
+        var previousBasePath = audiobook.BasePath;
         try
         {
             basePath = FileUtils.NormalizeStoredPath(basePath);
@@ -127,22 +133,37 @@ public partial class ManualImportController
                 basePath = Path.GetDirectoryName(basePath);
             }
 
-            if (!string.IsNullOrWhiteSpace(basePath)
-                && !string.Equals(audiobook.BasePath, basePath, StringComparison.Ordinal))
+            if (string.IsNullOrWhiteSpace(basePath)
+                || string.Equals(
+                    audiobook.BasePath,
+                    basePath,
+                    StringComparison.Ordinal))
             {
-                audiobook.BasePath = basePath;
-                await _audiobookRepository.UpdateAsync(audiobook);
-                _logger.LogInformation(
-                    "Updated audiobook {AudiobookId} BasePath to {BasePath}",
-                    audiobook.Id,
-                    basePath);
+                return;
             }
+
+            audiobook.BasePath = basePath;
+            if (!await _audiobookRepository.UpdateAsync(audiobook))
+            {
+                audiobook.BasePath = previousBasePath;
+                _logger.LogWarning(
+                    "Manual import completed for audiobook {AudiobookId}, but BasePath persistence reported no update",
+                    audiobook.Id);
+                return;
+            }
+
+            _logger.LogInformation(
+                "Updated audiobook {AudiobookId} BasePath to {BasePath}",
+                audiobook.Id,
+                LogRedaction.SanitizeFilePath(basePath));
         }
-        catch (Exception ex) when (ex is not OperationCanceledException
-            && ex is not OutOfMemoryException
-            && ex is not StackOverflowException)
+        catch (Exception ex) when (WorkerExceptionClassifier.IsNonFatal(ex))
         {
-            _logger.LogWarning(ex, "Failed to persist {BasePath} for audiobook {AudiobookId}", basePath, audiobook.Id);
+            audiobook.BasePath = previousBasePath;
+            _logger.LogWarning(
+                ex,
+                "Failed to persist manual-import BasePath for audiobook {AudiobookId}",
+                audiobook.Id);
         }
     }
 }

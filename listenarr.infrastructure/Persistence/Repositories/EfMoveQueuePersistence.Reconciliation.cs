@@ -250,7 +250,8 @@ public sealed partial class EfMoveQueuePersistence
             await db.SaveChangesAsync(cancellationToken);
             if (transaction != null)
             {
-                await transaction.CommitAsync(cancellationToken);
+                cancellationToken.ThrowIfCancellationRequested();
+                await transaction.CommitAsync(CancellationToken.None);
             }
         }
         catch (Exception exception) when (exception is DbException or DbUpdateException)

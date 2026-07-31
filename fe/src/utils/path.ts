@@ -31,7 +31,8 @@ export interface DestinationPathValidationOptions {
   requireAbsolute?: boolean
 }
 
-const WINDOWS_RESERVED_DEVICE_PATTERN = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/i
+const WINDOWS_RESERVED_DEVICE_PATTERN =
+  /^(con|prn|aux|nul|com(?:[1-9]|[¹²³])|lpt(?:[1-9]|[¹²³]))$/iu
 
 export function toForward(s: string | null | undefined): string {
   return (s || '').replace(/\\/g, '/')

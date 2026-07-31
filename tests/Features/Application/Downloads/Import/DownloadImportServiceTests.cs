@@ -282,6 +282,254 @@ namespace Listenarr.Tests.Features.Application.Downloads.Import
         }
 
         [Fact]
+        public async Task Import_WithMove_WhenRegistrationFails_RetainsSourceForRetry()
+        {
+            var actualMover = new FileMover(
+                Microsoft.Extensions.Logging.Abstractions.NullLogger<FileMover>.Instance,
+                semanticsResolver: new FileSystemSemanticsResolver());
+            var mover = new Mock<IFileMover>(MockBehavior.Strict);
+            mover.Setup(candidate => candidate.PrepareActionForRegistrationAsync(
+                    FileAction.Move,
+                    It.IsAny<string>(),
+                    It.IsAny<string>(),
+                    It.IsAny<Guid?>()))
+                .Returns<FileAction, string, string, Guid?>((action, source, destination, operationId) =>
+                    actualMover.PrepareActionForRegistrationAsync(
+                        action,
+                        source,
+                        destination,
+                        operationId));
+            var fileService = new Mock<IAudiobookFileService>(MockBehavior.Strict);
+            fileService.Setup(candidate => candidate.CheckAudiobookFileOwnershipAsync(
+                    It.IsAny<Audiobook>(),
+                    It.IsAny<string>(),
+                    It.IsAny<string?>(),
+                    It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new AudiobookFileOwnershipCheckResult(
+                    AudiobookFileOwnershipCheckOutcome.Available));
+            fileService.Setup(candidate => candidate.EnsureAudiobookFileAsync(
+                    It.IsAny<Audiobook>(),
+                    It.IsAny<IAudiobookFileRegistrationLease>(),
+                    "download",
+                    It.IsAny<CancellationToken>()))
+                .ReturnsAsync(false);
+            Init(builder => builder
+                .WithSingleton<IFileMover>(mover.Object)
+                .WithSingleton<IAudiobookFileService>(fileService.Object));
+            await AddAuthorizedRootAsync(FileService.GetTempPath());
+
+            var basePath = FileService.GetTempDirectory("registration-failure-library");
+            var sourcePath = FileService.GetTempDirectory("registration-failure-source");
+            var source = await FileService.GetFileAsync(sourcePath, "audio.mp3", "audio");
+            var destination = Path.Join(basePath, "audio.mp3");
+            var audiobook = await _audiobookRepository.AddAsync(new AudiobookBuilder()
+                .WithBasePath(basePath)
+                .Build());
+            await _applicationSettingsRepository.SaveAsync(new ApplicationSettingsBuilder()
+                .WithMoveFileOnCompleted()
+                .WithoutMetadataProcessing()
+                .Build());
+
+            var result = Assert.Single(await _provider
+                .GetRequiredService<IDownloadImportService>()
+                .ImportDownloadFilesAsync(audiobook, [source]));
+
+            Assert.False(result.Success);
+            Assert.True(File.Exists(source));
+            Assert.Equal("audio", await File.ReadAllTextAsync(source));
+            Assert.True(File.Exists(destination));
+            mover.Verify(candidate => candidate.CompletePreparedMoveAsync(
+                    It.IsAny<string>(),
+                    It.IsAny<string>(),
+                    It.IsAny<IAudiobookFileRegistrationLease>(),
+                    It.IsAny<Guid?>()),
+                Times.Never);
+        }
+
+        [Fact]
+        public async Task Import_WithMove_WhenCleanupFails_RetryCompletesSamePublication()
+        {
+            var actualMover = new FileMover(
+                Microsoft.Extensions.Logging.Abstractions.NullLogger<FileMover>.Instance,
+                semanticsResolver: new FileSystemSemanticsResolver());
+            var cleanupAttempts = 0;
+            var mover = new Mock<IFileMover>(MockBehavior.Strict);
+            mover.Setup(candidate => candidate.PrepareActionForRegistrationAsync(
+                    FileAction.Move,
+                    It.IsAny<string>(),
+                    It.IsAny<string>(),
+                    It.IsAny<Guid?>()))
+                .Returns<FileAction, string, string, Guid?>((action, source, destination, operationId) =>
+                    actualMover.PrepareActionForRegistrationAsync(
+                        action,
+                        source,
+                        destination,
+                        operationId));
+            mover.Setup(candidate => candidate.CompletePreparedMoveAsync(
+                    It.IsAny<string>(),
+                    It.IsAny<string>(),
+                    It.IsAny<IAudiobookFileRegistrationLease>(),
+                    It.IsAny<Guid?>()))
+                .Returns<string, string, IAudiobookFileRegistrationLease, Guid?>(
+                    async (source, destination, lease, operationId) =>
+                    {
+                        cleanupAttempts++;
+                        if (cleanupAttempts == 1)
+                        {
+                            return false;
+                        }
+
+                        return await actualMover.CompletePreparedMoveAsync(
+                            source,
+                            destination,
+                            lease,
+                            operationId);
+                    });
+
+            var registered = false;
+            var registrationWrites = 0;
+            AudiobookFile? registeredFile = null;
+            var fileService = new Mock<IAudiobookFileService>(MockBehavior.Strict);
+            fileService.Setup(candidate => candidate.CheckAudiobookFileOwnershipAsync(
+                    It.IsAny<Audiobook>(),
+                    It.IsAny<string>(),
+                    It.IsAny<string?>(),
+                    It.IsAny<CancellationToken>()))
+                .Returns<Audiobook, string, string?, CancellationToken>(
+                    (audiobook, destination, _, _) =>
+                    {
+                        var outcome = registered
+                            ? AudiobookFileOwnershipCheckOutcome.AlreadyOwnedByAudiobook
+                            : AudiobookFileOwnershipCheckOutcome.Available;
+                        return Task.FromResult(new AudiobookFileOwnershipCheckResult(
+                            outcome,
+                            registeredFile));
+                    });
+            fileService.Setup(candidate => candidate.RegisterPublishedGenerationAsync(
+                    It.IsAny<Audiobook>(),
+                    It.IsAny<AudiobookFileOwnershipCheckResult>(),
+                    It.IsAny<IAudiobookFileRegistrationLease>(),
+                    "download",
+                    It.IsAny<CancellationToken>()))
+                .Returns<Audiobook, AudiobookFileOwnershipCheckResult, IAudiobookFileRegistrationLease, string?, CancellationToken>(
+                    (audiobook, ownership, lease, _, _) =>
+                    {
+                        if (ownership.Outcome
+                            == AudiobookFileOwnershipCheckOutcome.Available)
+                        {
+                            registrationWrites++;
+                            registered = true;
+                            registeredFile = AudiobookFile.CreateUnresolved(
+                                lease.PublicPath);
+                            registeredFile.AudiobookId = audiobook.Id;
+                            registeredFile.ApplyPhysicalObjectIdentity(
+                                lease.PhysicalObjectIdentity,
+                                DateTime.UtcNow);
+                        }
+
+                        return Task.FromResult(true);
+                    });
+            Init(builder => builder
+                .WithSingleton<IFileMover>(mover.Object)
+                .WithSingleton<IAudiobookFileService>(fileService.Object));
+            await AddAuthorizedRootAsync(FileService.GetTempPath());
+
+            var basePath = FileService.GetTempDirectory("cleanup-retry-library");
+            var sourcePath = FileService.GetTempDirectory("cleanup-retry-source");
+            var source = await FileService.GetFileAsync(sourcePath, "audio.mp3", "audio");
+            var destination = Path.Join(basePath, "audio.mp3");
+            var audiobook = await _audiobookRepository.AddAsync(new AudiobookBuilder()
+                .WithBasePath(basePath)
+                .Build());
+            await _applicationSettingsRepository.SaveAsync(new ApplicationSettingsBuilder()
+                .WithMoveFileOnCompleted()
+                .WithoutMetadataProcessing()
+                .Build());
+            var service = _provider.GetRequiredService<IDownloadImportService>();
+
+            var first = Assert.Single(await service.ImportDownloadFilesAsync(
+                audiobook,
+                [source]));
+            var second = Assert.Single(await service.ImportDownloadFilesAsync(
+                audiobook,
+                [source]));
+
+            Assert.False(first.Success);
+            Assert.True(second.Success);
+            Assert.Equal(2, cleanupAttempts);
+            Assert.False(File.Exists(source));
+            Assert.Equal("audio", await File.ReadAllTextAsync(destination));
+            Assert.Empty(Directory.GetFiles(basePath, "audio (1).mp3"));
+            Assert.Equal(1, registrationWrites);
+            fileService.Verify(candidate => candidate.RegisterPublishedGenerationAsync(
+                    It.IsAny<Audiobook>(),
+                    It.IsAny<AudiobookFileOwnershipCheckResult>(),
+                    It.IsAny<IAudiobookFileRegistrationLease>(),
+                    "download",
+                    It.IsAny<CancellationToken>()),
+                Times.Exactly(2));
+        }
+
+        [Fact]
+        public async Task Import_WithHardlink_WhenPublicationIsInterrupted_RetryRegistersSameDestination()
+        {
+            var publicationAttempts = 0;
+            var mover = new FileMover(
+                Microsoft.Extensions.Logging.Abstractions.NullLogger<FileMover>.Instance,
+                semanticsResolver: new FileSystemSemanticsResolver())
+            {
+                AfterRegistrationDestinationPublishedForTestAsync = () =>
+                {
+                    publicationAttempts++;
+                    if (publicationAttempts == 1)
+                    {
+                        throw new InvalidOperationException("simulated crash");
+                    }
+
+                    return Task.CompletedTask;
+                }
+            };
+            Init(builder => builder.WithSingleton<IFileMover>(mover));
+            await AddAuthorizedRootAsync(FileService.GetTempPath());
+
+            var basePath = FileService.GetTempDirectory("hardlink-retry-library");
+            var sourcePath = FileService.GetTempDirectory("hardlink-retry-source");
+            var source = await FileService.GetFileAsync(
+                sourcePath,
+                "audio.mp3",
+                "audio");
+            var destination = Path.Join(basePath, "audio.mp3");
+            var audiobook = await _audiobookRepository.AddAsync(
+                new AudiobookBuilder()
+                    .WithBasePath(basePath)
+                    .Build());
+            await _applicationSettingsRepository.SaveAsync(
+                new ApplicationSettingsBuilder()
+                    .WithHardlinkFileOnCompleted()
+                    .WithoutMetadataProcessing()
+                    .Build());
+            var service = _provider.GetRequiredService<IDownloadImportService>();
+
+            var first = Assert.Single(await service.ImportDownloadFilesAsync(
+                audiobook,
+                [source]));
+            var second = Assert.Single(await service.ImportDownloadFilesAsync(
+                audiobook,
+                [source]));
+
+            Assert.False(first.Success);
+            Assert.True(second.Success);
+            Assert.True(File.Exists(source));
+            Assert.Equal("audio", await File.ReadAllTextAsync(destination));
+            Assert.Empty(
+                Directory.EnumerateDirectories(
+                    basePath,
+                    ".listenarr-registration-publication-*.state"));
+            Assert.Single(
+                (await _audiobookRepository.GetByIdAsync(audiobook.Id))!.Files!);
+        }
+
+        [Fact]
         public async Task Import_WitCopy()
         {
             await _applicationSettingsRepository.SaveAsync(new ApplicationSettingsBuilder()
@@ -655,29 +903,161 @@ namespace Listenarr.Tests.Features.Application.Downloads.Import
         }
 
         [Fact]
-        public async Task ImportDownloadFilesAsync_FailedMove_DoesNotReserveDestinationForLaterFiles()
+        public async Task Import_WithMove_WhenCleanupDetectsStalePublication_RollsBackPhysicalClaim()
+        {
+            var actualMover = new FileMover(
+                Microsoft.Extensions.Logging.Abstractions.NullLogger<FileMover>.Instance,
+                semanticsResolver: new FileSystemSemanticsResolver());
+            ControllableRegistrationLease? controlledLease = null;
+            var mover = new Mock<IFileMover>(MockBehavior.Strict);
+            mover.Setup(candidate => candidate.PrepareActionForRegistrationAsync(
+                    FileAction.Move,
+                    It.IsAny<string>(),
+                    It.IsAny<string>(),
+                    It.IsAny<Guid?>()))
+                .Returns<FileAction, string, string, Guid?>(async (
+                    action,
+                    source,
+                    destination,
+                    operationId) =>
+                {
+                    var inner = await actualMover
+                        .PrepareActionForRegistrationAsync(
+                            action,
+                            source,
+                            destination,
+                            operationId);
+                    controlledLease = inner == null
+                        ? null
+                        : new ControllableRegistrationLease(inner);
+                    return controlledLease;
+                });
+            mover.Setup(candidate => candidate.CompletePreparedMoveAsync(
+                    It.IsAny<string>(),
+                    It.IsAny<string>(),
+                    It.IsAny<IAudiobookFileRegistrationLease>(),
+                    It.IsAny<Guid?>()))
+                .ReturnsAsync(() =>
+                {
+                    Assert.NotNull(controlledLease);
+                    controlledLease.IsCurrent = false;
+                    return false;
+                });
+
+            var registered = false;
+            AudiobookFile? registeredFile = null;
+            var fileService = new Mock<IAudiobookFileService>(MockBehavior.Strict);
+            fileService.Setup(candidate => candidate.CheckAudiobookFileOwnershipAsync(
+                    It.IsAny<Audiobook>(),
+                    It.IsAny<string>(),
+                    It.IsAny<string?>(),
+                    It.IsAny<CancellationToken>()))
+                .Returns<Audiobook, string, string?, CancellationToken>((
+                    audiobook,
+                    destination,
+                    _,
+                    _) => Task.FromResult(
+                    registered
+                        ? new AudiobookFileOwnershipCheckResult(
+                            AudiobookFileOwnershipCheckOutcome
+                                .AlreadyOwnedByAudiobook,
+                            registeredFile)
+                        : new AudiobookFileOwnershipCheckResult(
+                            AudiobookFileOwnershipCheckOutcome.Available)));
+            fileService.Setup(candidate => candidate.RegisterPublishedGenerationAsync(
+                    It.IsAny<Audiobook>(),
+                    It.IsAny<AudiobookFileOwnershipCheckResult>(),
+                    It.IsAny<IAudiobookFileRegistrationLease>(),
+                    "download",
+                    It.IsAny<CancellationToken>()))
+                .Returns<Audiobook, AudiobookFileOwnershipCheckResult, IAudiobookFileRegistrationLease, string?, CancellationToken>((
+                    audiobook,
+                    _,
+                    lease,
+                    _,
+                    _) =>
+                {
+                    registered = true;
+                    registeredFile = AudiobookFile.CreateUnresolved(
+                        lease.PublicPath);
+                    registeredFile.Id = 41;
+                    registeredFile.AudiobookId = audiobook.Id;
+                    registeredFile.ApplyPhysicalObjectIdentity(
+                        lease.PhysicalObjectIdentity,
+                        DateTime.UtcNow);
+                    return Task.FromResult(true);
+                });
+            fileService.Setup(candidate => candidate.RollbackPublishedGenerationIfStaleAsync(
+                    It.IsAny<Audiobook>(),
+                    It.IsAny<IAudiobookFileRegistrationLease>()))
+                .Returns<Audiobook, IAudiobookFileRegistrationLease>((_, _) =>
+                {
+                    registered = false;
+                    return Task.CompletedTask;
+                });
+            Init(builder => builder
+                .WithSingleton<IFileMover>(mover.Object)
+                .WithSingleton<IAudiobookFileService>(fileService.Object));
+            await AddAuthorizedRootAsync(FileService.GetTempPath());
+
+            var basePath = FileService.GetTempDirectory(
+                "stale-cleanup-library");
+            var sourcePath = FileService.GetTempDirectory(
+                "stale-cleanup-source");
+            var source = await FileService.GetFileAsync(
+                sourcePath,
+                "audio.mp3",
+                "audio");
+            var audiobook = await _audiobookRepository.AddAsync(
+                new AudiobookBuilder().WithBasePath(basePath).Build());
+            await _applicationSettingsRepository.SaveAsync(
+                new ApplicationSettingsBuilder()
+                    .WithMoveFileOnCompleted()
+                    .WithoutMetadataProcessing()
+                    .Build());
+
+            var result = Assert.Single(await _provider
+                .GetRequiredService<IDownloadImportService>()
+                .ImportDownloadFilesAsync(audiobook, [source]));
+
+            Assert.False(result.Success);
+            Assert.False(registered);
+            Assert.True(File.Exists(source));
+            fileService.Verify(candidate =>
+                candidate.RollbackPublishedGenerationIfStaleAsync(
+                    It.Is<Audiobook>(book => book.Id == audiobook.Id),
+                    controlledLease!),
+                Times.Once);
+        }
+
+        [Fact]
+        public async Task ImportDownloadFilesAsync_FailedPublication_DoesNotReserveDestinationForLaterFiles()
         {
             var attemptedDestinations = new List<string>();
             var callCount = 0;
+            var actualMover = new FileMover(
+                Microsoft.Extensions.Logging.Abstractions.NullLogger<FileMover>.Instance,
+                semanticsResolver: new FileSystemSemanticsResolver());
             var fileMover = new Mock<IFileMover>();
-            fileMover.Setup(mover => mover.PerformActionOn(
+            fileMover.Setup(mover => mover.PrepareActionForRegistrationAsync(
                     FileAction.Copy,
                     It.IsAny<string>(),
                     It.IsAny<string>(),
                     It.IsAny<Guid?>()))
-                .Returns<FileAction, string, string?, Guid?>((_, source, destination, _) =>
+                .Returns<FileAction, string, string, Guid?>(async (action, source, destination, operationId) =>
                 {
-                    Assert.NotNull(destination);
-                    attemptedDestinations.Add(destination!);
+                    attemptedDestinations.Add(destination);
                     callCount++;
                     if (callCount == 1)
                     {
-                        return Task.FromResult(false);
+                        return null;
                     }
 
-                    Directory.CreateDirectory(Path.GetDirectoryName(destination!)!);
-                    File.Copy(source, destination!, overwrite: false);
-                    return Task.FromResult(true);
+                    return await actualMover.PrepareActionForRegistrationAsync(
+                        action,
+                        source,
+                        destination,
+                        operationId);
                 });
             Init(builder => builder.WithSingleton<IFileMover>(fileMover.Object));
             await AddAuthorizedRootAsync(FileService.GetTempPath());
@@ -743,6 +1123,32 @@ namespace Listenarr.Tests.Features.Application.Downloads.Import
             var importedFiles = Directory.EnumerateFiles(outputDirectory, "*.*", SearchOption.AllDirectories)
                 .ToList();
             Assert.Empty(importedFiles);
+        }
+
+        private sealed class ControllableRegistrationLease(
+            IAudiobookFileRegistrationLease inner) :
+            IAudiobookFileRegistrationLease
+        {
+            public bool IsCurrent { get; set; } = true;
+            public string PublicPath => inner.PublicPath;
+            public string MetadataPath => inner.MetadataPath;
+            public string PhysicalObjectIdentity =>
+                inner.PhysicalObjectIdentity;
+            public string? SourcePhysicalObjectIdentity =>
+                inner.SourcePhysicalObjectIdentity;
+
+            public bool MatchesCurrentPublication() =>
+                IsCurrent && inner.MatchesCurrentPublication();
+
+            public bool CompletePublication() =>
+                inner.CompletePublication();
+
+            public Task<bool> MatchesContentAsync(
+                Stream candidateStream,
+                CancellationToken cancellationToken = default) =>
+                inner.MatchesContentAsync(candidateStream, cancellationToken);
+
+            public void Dispose() => inner.Dispose();
         }
 
         private sealed class RecordingSemanticsResolver(

@@ -107,6 +107,25 @@ public sealed class AudiobookOperationCoordinatorTests : BaseTests
     }
 
     [Fact]
+    public async Task NestedHigherKeyAcquisition_RemainsAllowedInCanonicalOrder()
+    {
+        using var coordinator = new AudiobookOperationCoordinator();
+        var nestedEntered = false;
+
+        await coordinator.ExecuteExclusiveAsync(
+            1,
+            _ => coordinator.ExecuteExclusiveAsync(
+                [1, 2],
+                _ =>
+                {
+                    nestedEntered = true;
+                    return Task.CompletedTask;
+                }));
+
+        Assert.True(nestedEntered);
+    }
+
+    [Fact]
     public async Task DifferentAudiobooks_CanRunConcurrently()
     {
         using var coordinator = new AudiobookOperationCoordinator();
@@ -164,6 +183,133 @@ public sealed class AudiobookOperationCoordinatorTests : BaseTests
             });
 
         Assert.Equal(2, nestedCount);
+    }
+
+    [Fact]
+    public async Task ParallelNestedSameAudiobookOperations_AreSerialized()
+    {
+        using var coordinator = new AudiobookOperationCoordinator();
+        var firstEntered = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseFirst = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var secondEntered = false;
+
+        await coordinator.ExecuteExclusiveAsync(
+            42,
+            async _ =>
+            {
+                var first = coordinator.ExecuteExclusiveAsync(
+                    42,
+                    async _ =>
+                    {
+                        firstEntered.TrySetResult();
+                        await releaseFirst.Task;
+                    });
+                await firstEntered.Task;
+                var second = coordinator.ExecuteExclusiveAsync(
+                    42,
+                    _ =>
+                    {
+                        secondEntered = true;
+                        return Task.CompletedTask;
+                    });
+
+                await Task.Delay(50);
+                Assert.False(secondEntered);
+                releaseFirst.TrySetResult();
+                await Task.WhenAll(first, second);
+            });
+
+        Assert.True(secondEntered);
+    }
+
+    [Fact]
+    public async Task EscapedNestedHigherKeyOperation_HoldsInheritedLowerKey()
+    {
+        using var coordinator = new AudiobookOperationCoordinator();
+        var nestedEntered = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseNested = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        Task? nested = null;
+
+        var outer = coordinator.ExecuteExclusiveAsync(
+            1,
+            async _ =>
+            {
+                nested = coordinator.ExecuteExclusiveAsync(
+                    2,
+                    async _ =>
+                    {
+                        nestedEntered.TrySetResult();
+                        await releaseNested.Task;
+                    });
+                await nestedEntered.Task;
+            });
+        await nestedEntered.Task;
+        await Task.Yield();
+
+        Assert.False(outer.IsCompleted);
+        var lowerKeyEntered = false;
+        var independent = coordinator.ExecuteExclusiveAsync(
+            1,
+            _ =>
+            {
+                lowerKeyEntered = true;
+                return Task.CompletedTask;
+            });
+        await Task.Delay(50);
+        Assert.False(lowerKeyEntered);
+
+        releaseNested.TrySetResult();
+        Assert.NotNull(nested);
+        await Task.WhenAll(nested, outer, independent);
+        Assert.True(lowerKeyEntered);
+    }
+
+    [Fact]
+    public async Task EscapedNestedOperation_HoldsGateUntilNestedScopeCompletes()
+    {
+        using var coordinator = new AudiobookOperationCoordinator();
+        var nestedEntered = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseNested = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        Task? nested = null;
+
+        var outer = coordinator.ExecuteExclusiveAsync(
+            42,
+            async _ =>
+            {
+                nested = coordinator.ExecuteExclusiveAsync(
+                    42,
+                    async _ =>
+                    {
+                        nestedEntered.TrySetResult();
+                        await releaseNested.Task;
+                    });
+                await nestedEntered.Task;
+            });
+        await nestedEntered.Task;
+        await Task.Yield();
+
+        Assert.False(outer.IsCompleted);
+        var independentEntered = false;
+        var independent = coordinator.ExecuteExclusiveAsync(
+            42,
+            _ =>
+            {
+                independentEntered = true;
+                return Task.CompletedTask;
+            });
+        await Task.Delay(50);
+        Assert.False(independentEntered);
+
+        releaseNested.TrySetResult();
+        Assert.NotNull(nested);
+        await Task.WhenAll(nested, outer, independent);
+        Assert.True(independentEntered);
     }
 
     [Fact]

@@ -162,6 +162,7 @@ public partial class MoveJobProcessorTests
         var target = Path.Join(
             FileService.GetTempPath(),
             $"move-processor-scan-handoff-dst-{Guid.NewGuid():N}");
+        await AddAuthorizedRootAsync(FileService.GetTempPath());
         var audiobook = await _audiobookRepository.AddAsync(new Audiobook
         {
             Title = "Scan Handoff Retry",
@@ -199,6 +200,7 @@ public partial class MoveJobProcessorTests
         Assert.True(scanQueue.Reader.TryRead(out var recoveredScan));
         Assert.Equal($"move:{job.Id:N}", recoveredScan.CorrelationId);
         Assert.NotNull(recoveredScan.MoveScanHandoffId);
+        Assert.True(recoveredScan.PhysicalIdentity.HasValue);
     }
 
     private sealed class ReplaceLeaseBeforeCompletionHistory(

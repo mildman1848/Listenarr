@@ -302,7 +302,8 @@ public sealed partial class EfMoveScanHandoffStore
             await db.SaveChangesAsync(cancellationToken);
             if (transaction != null)
             {
-                await transaction.CommitAsync(cancellationToken);
+                cancellationToken.ThrowIfCancellationRequested();
+                await transaction.CommitAsync(CancellationToken.None);
             }
 
             return new MoveScanAttemptResult(

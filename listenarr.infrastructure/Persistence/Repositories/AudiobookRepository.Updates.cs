@@ -59,6 +59,49 @@ public partial class AudiobookRepository
         return true;
     }
 
+    public async Task<bool> TryUpdateImageUrlAsync(
+        int audiobookId,
+        string? expectedImageUrl,
+        string? newImageUrl,
+        CancellationToken ct = default)
+    {
+        if (_db.Database.IsRelational())
+        {
+            var affected = await _db.Audiobooks
+                .Where(audiobook => audiobook.Id == audiobookId
+                    && audiobook.ImageUrl == expectedImageUrl)
+                .ExecuteUpdateAsync(
+                    updates => updates.SetProperty(
+                        audiobook => audiobook.ImageUrl,
+                        newImageUrl),
+                    ct);
+            if (affected != 1)
+            {
+                return false;
+            }
+
+            SynchronizeTrackedImageUrl(audiobookId, newImageUrl);
+            return true;
+        }
+
+        var existing = await _db.Audiobooks
+            .FirstOrDefaultAsync(
+                audiobook => audiobook.Id == audiobookId,
+                ct);
+        if (existing == null
+            || !string.Equals(
+                existing.ImageUrl,
+                expectedImageUrl,
+                StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        existing.ImageUrl = newImageUrl;
+        await _db.SaveChangesAsync(ct);
+        return true;
+    }
+
     public async Task<bool> UpdateAsync(Audiobook audiobook)
     {
         ArgumentNullException.ThrowIfNull(audiobook);
@@ -92,6 +135,23 @@ public partial class AudiobookRepository
         // completed move from another DbContext.
         await _db.SaveChangesAsync();
         return true;
+    }
+
+    private void SynchronizeTrackedImageUrl(
+        int audiobookId,
+        string? newImageUrl)
+    {
+        var trackedEntry = _db.ChangeTracker.Entries<Audiobook>()
+            .FirstOrDefault(entry => entry.Entity.Id == audiobookId);
+        if (trackedEntry == null)
+        {
+            return;
+        }
+
+        var property = trackedEntry.Property(audiobook => audiobook.ImageUrl);
+        property.CurrentValue = newImageUrl;
+        property.OriginalValue = newImageUrl;
+        property.IsModified = false;
     }
 
     private void SynchronizeTrackedBasePath(int audiobookId, string newBasePath)

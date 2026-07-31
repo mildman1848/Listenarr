@@ -16,7 +16,7 @@ public sealed class RootFolderRelocationsController(IRootFolderRelocationService
         var result = await relocationService.GetAsync(id, cancellationToken);
         return result == null
             ? NotFound(new { message = "Root folder relocation not found" })
-            : Ok(result);
+            : Ok(RootFolderRelocationPublicProjection.Sanitize(result));
     }
 
     [HttpPost("{id:guid}/retry")]
@@ -24,15 +24,19 @@ public sealed class RootFolderRelocationsController(IRootFolderRelocationService
     {
         try
         {
-            return Ok(await relocationService.RetryAsync(id, cancellationToken));
+            return Ok(RootFolderRelocationPublicProjection.Sanitize(
+                await relocationService.RetryAsync(id, cancellationToken)));
         }
-        catch (KeyNotFoundException exception)
+        catch (KeyNotFoundException)
         {
-            return NotFound(new { message = exception.Message });
+            return NotFound(new { message = "Root folder relocation not found" });
         }
-        catch (InvalidOperationException exception)
+        catch (InvalidOperationException)
         {
-            return Conflict(new { message = exception.Message });
+            return Conflict(new
+            {
+                message = "The relocation cannot be retried in its current state."
+            });
         }
     }
 
@@ -44,22 +48,29 @@ public sealed class RootFolderRelocationsController(IRootFolderRelocationService
     {
         try
         {
-            return Ok(await relocationService.ReauthorizeLegacyTargetAsync(
-                id,
-                request.ConfirmedTargetPath,
-                cancellationToken));
+            return Ok(RootFolderRelocationPublicProjection.Sanitize(
+                await relocationService.ReauthorizeLegacyTargetAsync(
+                    id,
+                    request.ConfirmedTargetPath,
+                    cancellationToken)));
         }
-        catch (KeyNotFoundException exception)
+        catch (KeyNotFoundException)
         {
-            return NotFound(new { message = exception.Message });
+            return NotFound(new { message = "Root folder relocation not found" });
         }
-        catch (InvalidOperationException exception)
+        catch (InvalidOperationException)
         {
-            return Conflict(new { message = exception.Message });
+            return Conflict(new
+            {
+                message = "The relocation target cannot be reauthorized in its current state."
+            });
         }
-        catch (ArgumentException exception)
+        catch (ArgumentException)
         {
-            return BadRequest(new { message = exception.Message });
+            return BadRequest(new
+            {
+                message = "The confirmed relocation target is invalid."
+            });
         }
     }
 }

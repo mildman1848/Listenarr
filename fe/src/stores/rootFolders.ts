@@ -100,6 +100,7 @@ export const useRootFoldersStore = defineStore('rootFolders', () => {
         desiredName: payload.name,
         desiredIsDefault: payload.isDefault === true,
         targetCaseSensitivityMode: requestedMode,
+        expectedCurrentPath: current.path,
       })
     } else {
       // PATCH intentionally preserves the canonical stored path. Equivalent

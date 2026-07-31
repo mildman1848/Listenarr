@@ -162,6 +162,100 @@ namespace Listenarr.Tests.Features.Api
         }
 
         [Fact]
+        public async Task RescanMetadata_PublishesImageOnlyAfterMetadataCommit()
+        {
+            const string asin = "B0IMGORDER";
+            const string sourceImage = "https://example.test/cover.jpg";
+            var metadataMock = new Mock<IAudiobookMetadataService>();
+            metadataMock.Setup(service => service.GetMetadataAsync(
+                    asin,
+                    "us",
+                    false))
+                .ReturnsAsync(new
+                {
+                    metadata = new AudibleBookResponse
+                    {
+                        Asin = asin,
+                        Title = "Committed Before Image",
+                        ImageUrl = sourceImage
+                    },
+                    source = "Audible"
+                });
+            Microsoft.AspNetCore.Mvc.Testing.WebApplicationFactory<Program>?
+                configuredFactory = null;
+            var imageCache = new Mock<IImageCacheService>();
+            imageCache.Setup(service => service.MoveToLibraryStorageAsync(
+                    asin,
+                    sourceImage))
+                .Returns(async () =>
+                {
+                    using var scope = configuredFactory!.Services.CreateScope();
+                    var db = scope.ServiceProvider
+                        .GetRequiredService<ListenArrDbContext>();
+                    var persisted = await db.Audiobooks.AsNoTracking()
+                        .SingleAsync(candidate => candidate.Asin == asin);
+                    Assert.Equal("Committed Before Image", persisted.Title);
+                    Assert.Equal(sourceImage, persisted.ImageUrl);
+                    return "library-images/committed-cover.jpg";
+                });
+            configuredFactory = _factory.WithWebHostBuilder(builder =>
+            {
+                builder.ConfigureServices(services =>
+                {
+                    services.RemoveAll<IAudiobookMetadataService>();
+                    services.AddSingleton(metadataMock.Object);
+                    services.RemoveAll<IImageCacheService>();
+                    services.AddSingleton(imageCache.Object);
+                });
+            });
+
+            int audiobookId;
+            using (var scope = configuredFactory.Services.CreateScope())
+            {
+                var db = scope.ServiceProvider
+                    .GetRequiredService<ListenArrDbContext>();
+                var audiobook = new Audiobook
+                {
+                    Title = "Before Image Rescan",
+                    Asin = asin,
+                    ExternalIdentifiers =
+                    [
+                        new AudiobookExternalIdentifier
+                        {
+                            Type = AudiobookExternalIdentifierType.Asin,
+                            ValueRaw = asin,
+                            ValueNormalized = asin,
+                            Region = "us",
+                            IsPrimary = true,
+                            Source = AudiobookExternalIdentifierSource.Manual
+                        }
+                    ]
+                };
+                db.Audiobooks.Add(audiobook);
+                await db.SaveChangesAsync();
+                audiobookId = audiobook.Id;
+            }
+
+            var response = await PostRescanAsync(
+                configuredFactory.CreateClient(),
+                audiobookId);
+
+            response.EnsureSuccessStatusCode();
+            using var verificationScope =
+                configuredFactory.Services.CreateScope();
+            var verification = verificationScope.ServiceProvider
+                .GetRequiredService<ListenArrDbContext>();
+            var updated = await verification.Audiobooks.AsNoTracking()
+                .SingleAsync(candidate => candidate.Id == audiobookId);
+            Assert.Equal(
+                "/library-images/committed-cover.jpg",
+                updated.ImageUrl);
+            imageCache.Verify(service => service.MoveToLibraryStorageAsync(
+                asin,
+                sourceImage), Times.Once);
+        }
+
+        [Fact]
         public async Task RescanMetadata_BasePathChangesDuringProviderLookup_PreservesCurrentPath()
         {
             var lookupStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);

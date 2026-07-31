@@ -1,4 +1,3 @@
-using System.Data.Common;
 using Listenarr.Domain.Common;
 using Listenarr.Infrastructure.Persistence;
 using Microsoft.EntityFrameworkCore;
@@ -247,6 +246,66 @@ internal sealed partial class EfMoveExecutionStore(
             },
             cancellationToken);
 
+    public Task UpdateCleanupProtectionVersionAsync(
+        Guid jobId,
+        MoveLeaseToken leaseToken,
+        string relativePath,
+        int cleanupProtectionVersion,
+        CancellationToken cancellationToken) =>
+        ExecuteAsync(
+            "persist move source cleanup protection version",
+            async () =>
+            {
+                EnsureLeaseTokenProvided(jobId, leaseToken);
+                if (cleanupProtectionVersion < 0)
+                {
+                    throw new ArgumentOutOfRangeException(
+                        nameof(cleanupProtectionVersion));
+                }
+
+                var nowUtc = timeProvider.GetUtcNow().UtcDateTime;
+                await using var db = await dbContextFactory.CreateDbContextAsync(cancellationToken);
+                if (!db.Database.IsRelational())
+                {
+                    var entry = await db.MoveJobEntries.SingleOrDefaultAsync(
+                        candidate => candidate.MoveJobId == jobId
+                            && candidate.RelativePath == relativePath
+                            && candidate.MoveJob.Status == MoveJobStatus.Running
+                            && candidate.MoveJob.LeaseOwner == leaseToken.Owner
+                            && candidate.MoveJob.LeaseGeneration == leaseToken.Generation
+                            && candidate.MoveJob.LeaseExpiresAt != null
+                            && candidate.MoveJob.LeaseExpiresAt > nowUtc,
+                        cancellationToken);
+                    if (entry == null)
+                    {
+                        throw new MoveLeaseLostException(jobId, leaseToken.Generation);
+                    }
+
+                    entry.CleanupProtectionVersion = cleanupProtectionVersion;
+                    await db.SaveChangesAsync(cancellationToken);
+                    return;
+                }
+
+                var affected = await db.MoveJobEntries
+                    .Where(entry => entry.MoveJobId == jobId
+                        && entry.RelativePath == relativePath
+                        && entry.MoveJob.Status == MoveJobStatus.Running
+                        && entry.MoveJob.LeaseOwner == leaseToken.Owner
+                        && entry.MoveJob.LeaseGeneration == leaseToken.Generation
+                        && entry.MoveJob.LeaseExpiresAt != null
+                        && entry.MoveJob.LeaseExpiresAt > nowUtc)
+                    .ExecuteUpdateAsync(
+                        updates => updates.SetProperty(
+                            entry => entry.CleanupProtectionVersion,
+                            cleanupProtectionVersion),
+                        cancellationToken);
+                if (affected != 1)
+                {
+                    throw new MoveLeaseLostException(jobId, leaseToken.Generation);
+                }
+            },
+            cancellationToken);
+
     public Task UpdateCopyStateAsync(
         Guid jobId,
         MoveLeaseToken leaseToken,
@@ -355,109 +414,4 @@ internal sealed partial class EfMoveExecutionStore(
             },
             cancellationToken);
 
-    private static void EnsureEquivalentIdentity(
-        string persisted,
-        string current,
-        FileSystemPathSemantics semantics,
-        string mismatchMessage,
-        string invalidMessage)
-    {
-        try
-        {
-            if (!FileSystemPathIdentity.AreEquivalent(persisted, current, semantics))
-            {
-                throw new MoveNeedsAttentionException(mismatchMessage);
-            }
-        }
-        catch (MoveNeedsAttentionException)
-        {
-            throw;
-        }
-        catch (Exception exception) when (exception is
-            ArgumentException or InvalidOperationException or NotSupportedException or PathTooLongException)
-        {
-            throw new MoveNeedsAttentionException(invalidMessage);
-        }
-    }
-
-    private static async Task<bool> IsLeaseActiveAsync(
-        ListenArrDbContext db,
-        Guid jobId,
-        MoveLeaseToken leaseToken,
-        DateTime nowUtc,
-        CancellationToken cancellationToken) =>
-        await db.MoveJobs.AnyAsync(
-            job => job.Id == jobId
-                && job.Status == MoveJobStatus.Running
-                && job.LeaseOwner == leaseToken.Owner
-                && job.LeaseGeneration == leaseToken.Generation
-                && job.LeaseExpiresAt != null
-                && job.LeaseExpiresAt > nowUtc,
-            cancellationToken);
-
-    private static void EnsureLeaseTokenProvided(Guid jobId, MoveLeaseToken leaseToken)
-    {
-        if (string.IsNullOrWhiteSpace(leaseToken.Owner) || leaseToken.Generation <= 0)
-        {
-            throw new MoveLeaseLostException(jobId, leaseToken.Generation);
-        }
-    }
-
-    private static async Task ExecuteAsync(
-        string operation,
-        Func<Task> action,
-        CancellationToken cancellationToken)
-    {
-        try
-        {
-            await action();
-        }
-        catch (Exception exception) when (ShouldTranslate(exception, cancellationToken))
-        {
-            throw new PersistenceException($"Failed to {operation}.", exception);
-        }
-    }
-
-    private static async Task<T> ExecuteAsync<T>(
-        string operation,
-        Func<Task<T>> action,
-        CancellationToken cancellationToken)
-    {
-        try
-        {
-            return await action();
-        }
-        catch (Exception exception) when (ShouldTranslate(exception, cancellationToken))
-        {
-            throw new PersistenceException($"Failed to {operation}.", exception);
-        }
-    }
-
-    private static bool ShouldTranslate(Exception exception, CancellationToken cancellationToken)
-    {
-        if (exception is PersistenceException
-            or MoveLeaseLostException
-            or MoveNeedsAttentionException)
-        {
-            return false;
-        }
-
-        if (exception is OperationCanceledException && cancellationToken.IsCancellationRequested)
-        {
-            return false;
-        }
-
-        return ContainsProviderFailure(exception);
-    }
-
-    private static bool ContainsProviderFailure(Exception exception)
-    {
-        if (exception is DbException or DbUpdateException or DbUpdateConcurrencyException)
-        {
-            return true;
-        }
-
-        return exception.InnerException != null
-            && ContainsProviderFailure(exception.InnerException);
-    }
 }

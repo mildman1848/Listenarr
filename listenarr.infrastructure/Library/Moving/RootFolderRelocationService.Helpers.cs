@@ -6,6 +6,21 @@ namespace Listenarr.Infrastructure.Library.Moving;
 
 public sealed partial class RootFolderRelocationService
 {
+    private static void ValidateExpectedCurrentPath(
+        RootFolderPathChangeCommand command,
+        RootFolder root)
+    {
+        if (!string.IsNullOrWhiteSpace(command.ExpectedCurrentPath)
+            && !string.Equals(
+                root.Path,
+                command.ExpectedCurrentPath,
+                StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException(
+                "The root folder path changed after the relocation was confirmed.");
+        }
+    }
+
     private static string MapTargetPath(
         string sourceRoot,
         string targetRoot,
@@ -433,7 +448,7 @@ public sealed partial class RootFolderRelocationService
         {
             await hubBroadcaster.BroadcastAsync(
                 "RootFolderRelocationUpdate",
-                result,
+                RootFolderRelocationPublicProjection.Sanitize(result),
                 cancellationToken);
         }
         catch (OperationCanceledException exception)

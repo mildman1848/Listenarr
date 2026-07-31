@@ -17,6 +17,8 @@
  */
 using System.Security.AccessControl;
 using System.Security.Principal;
+using System.Text.Json;
+using Listenarr.Tests.Common;
 
 namespace Listenarr.Tests.Features.Domain.Utils
 {
@@ -133,15 +135,11 @@ namespace Listenarr.Tests.Features.Domain.Utils
             }
         }
 
-        [Fact]
+        [WindowsFact]
+        [System.Runtime.Versioning.SupportedOSPlatform("windows")]
         [Trait("Category", "Integration")]
         public void GetUniqueDestinationPath_WriteDeniedByAcl_OnWindows()
         {
-            if (!OperatingSystem.IsWindows())
-            {
-                // Not applicable on non-Windows platforms in this test
-                return;
-            }
 
             var dir = Path.Join(Path.GetTempPath(), "fu-acl-" + Guid.NewGuid());
             Directory.CreateDirectory(dir);
@@ -221,13 +219,9 @@ namespace Listenarr.Tests.Features.Domain.Utils
             try { Directory.Delete(dir, true); } catch (IOException ex) { System.Diagnostics.Debug.WriteLine(ex.Message); } catch (UnauthorizedAccessException ex) { System.Diagnostics.Debug.WriteLine(ex.Message); }
         }
 
-        [Fact]
+        [WindowsFact]
         public void NormalizeStoredPath_ExpandsResolvedShortSegments_WhenResolverProvided()
         {
-            if (!OperatingSystem.IsWindows())
-            {
-                return;
-            }
 
             string ResolveLongPath(string candidatePath)
             {
@@ -248,13 +242,9 @@ namespace Listenarr.Tests.Features.Domain.Utils
                 normalized);
         }
 
-        [Fact]
+        [WindowsFact]
         public void NormalizeStoredPath_PreservesUnresolvedTail_WhenResolverProvided()
         {
-            if (!OperatingSystem.IsWindows())
-            {
-                return;
-            }
 
             string ResolveLongPath(string candidatePath)
             {
@@ -274,13 +264,9 @@ namespace Listenarr.Tests.Features.Domain.Utils
                 normalized);
         }
 
-        [Fact]
+        [WindowsFact]
         public void NormalizeStoredPath_DoesNotDropPrefix_WhenMalformedDriveSegmentAppears()
         {
-            if (!OperatingSystem.IsWindows())
-            {
-                return;
-            }
 
             var normalized = FileUtils.NormalizeStoredPath(
                 @"C:\Books\D:\Files\Track 01.mp3",
@@ -301,6 +287,10 @@ namespace Listenarr.Tests.Features.Domain.Utils
         [InlineData(@"C:\media\folder \book.m4b", true)]
         [InlineData(@"C:\Books\NUL", true)]
         [InlineData(@"C:\Books\COM1.txt", true)]
+        [InlineData(@"C:\Books\COM¹.txt", true)]
+        [InlineData(@"C:\Books\com²", true)]
+        [InlineData(@"C:\Books\LPT³.folder", true)]
+        [InlineData(@"C:\Books\COM⁴.txt", false)]
         [InlineData(@"C:\Books\Bad|Name", true)]
         [InlineData(@"C:\Books\..\Other", false)]
         [InlineData(@"C:\Books\\Author", false)]
@@ -308,6 +298,41 @@ namespace Listenarr.Tests.Features.Domain.Utils
         public void IsPathInvalidForOs_UsesSharedWindowsSegmentRules(string path, bool expected)
         {
             Assert.Equal(expected, FileUtils.IsPathInvalidForOs(path, isWindows: true));
+        }
+
+        [Fact]
+        public void IsPathInvalidForOs_MatchesSharedWindowsReservedDeviceFixture()
+        {
+            using var fixture = JsonDocument.Parse(
+                File.ReadAllText(
+                    Path.Join(
+                        TestUtils.FindRepositoryRoot(),
+                        "test-fixtures",
+                        "windows-reserved-device-names.json")));
+
+            foreach (var name in fixture.RootElement
+                .GetProperty("reserved")
+                .EnumerateArray()
+                .Select(value => value.GetString()!))
+            {
+                Assert.True(
+                    FileUtils.IsPathInvalidForOs(
+                        $@"C:\Books\{name}.folder",
+                        isWindows: true),
+                    name);
+            }
+
+            foreach (var name in fixture.RootElement
+                .GetProperty("nonReserved")
+                .EnumerateArray()
+                .Select(value => value.GetString()!))
+            {
+                Assert.False(
+                    FileUtils.IsPathInvalidForOs(
+                        $@"C:\Books\{name}.folder",
+                        isWindows: true),
+                    name);
+            }
         }
 
         [Theory]
@@ -380,52 +405,36 @@ namespace Listenarr.Tests.Features.Domain.Utils
             Assert.Contains(" Title .m4b", result);
         }
 
-        [Fact]
+        [LinuxFact]
         public void CombineWithOptionalBase_PreservesUnixFilesystemRootBase()
         {
-            if (OperatingSystem.IsWindows())
-            {
-                return;
-            }
 
             var result = FileUtils.CombineWithOptionalBase("/", "Author/Book.m4b");
 
             Assert.Equal("/Author/Book.m4b", result);
         }
 
-        [Fact]
+        [WindowsFact]
         public void CombineWithOptionalBase_PreservesWindowsDriveRootBase()
         {
-            if (!OperatingSystem.IsWindows())
-            {
-                return;
-            }
 
             var result = FileUtils.CombineWithOptionalBase(@"C:\", @"Books\Title.m4b");
 
             Assert.Equal(@"C:\Books\Title.m4b", result);
         }
 
-        [Fact]
+        [WindowsFact]
         public void CombineWithOptionalBase_PreservesUncShareRootBase()
         {
-            if (!OperatingSystem.IsWindows())
-            {
-                return;
-            }
 
             var result = FileUtils.CombineWithOptionalBase(@"\\server\share", @"Books\Title.m4b");
 
             Assert.Equal(@"\\server\share\Books\Title.m4b", result);
         }
 
-        [Fact]
+        [LinuxFact]
         public void NormalizeStoredPath_DoesNotTrimPathWhitespace_OnNonWindows()
         {
-            if (OperatingSystem.IsWindows())
-            {
-                return;
-            }
 
             var root = Path.Join(Path.GetTempPath(), "listenarr-path-whitespace-" + Guid.NewGuid().ToString("N"));
             var whitespaceSegment = " Book Folder ";
@@ -465,13 +474,9 @@ namespace Listenarr.Tests.Features.Domain.Utils
             Assert.Throws<ArgumentException>(() => FileUtils.CombineRelativePath("", "config"));
         }
 
-        [Fact]
+        [WindowsFact]
         public void CombineRelativePath_RejectsWindowsRootedSegments()
         {
-            if (!OperatingSystem.IsWindows())
-            {
-                return;
-            }
 
             Assert.Throws<ArgumentException>(() => FileUtils.CombineRelativePath("root", @"C:\escape"));
         }
@@ -599,6 +604,10 @@ namespace Listenarr.Tests.Features.Domain.Utils
         [InlineData(@"C:\Books\Author.", false)]
         [InlineData(@"C:\Books\NUL", false)]
         [InlineData(@"C:\Books\COM1.txt", false)]
+        [InlineData(@"C:\Books\COM¹.txt", false)]
+        [InlineData(@"C:\Books\com²", false)]
+        [InlineData(@"C:\Books\LPT³.folder", false)]
+        [InlineData(@"C:\Books\COM⁴.txt", true)]
         [InlineData(@"C:\Books\Bad|Name", false)]
         public void TryNormalizeUserProvidedDirectoryPathForOs_UsesWindowsRules(string path, bool expected)
         {
@@ -625,6 +634,8 @@ namespace Listenarr.Tests.Features.Domain.Utils
         [InlineData(@"\\.\share\Books", "current")]
         [InlineData(@"\\server\NUL\Books", "reserved")]
         [InlineData(@"\\NUL\share\Books", "reserved")]
+        [InlineData(@"\\server\COM¹\Books", "reserved")]
+        [InlineData(@"\\LPT³\share\Books", "reserved")]
         [InlineData(@"\\server\share.\Books", "space or period")]
         [InlineData(@"\\server.\share\Books", "space or period")]
         [InlineData(@"\\server|name\share\Books", "invalid")]

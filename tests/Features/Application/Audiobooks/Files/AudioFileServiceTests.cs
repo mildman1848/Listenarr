@@ -20,8 +20,19 @@ namespace Listenarr.Tests.Features.Application.Audiobooks.Files
         public override async Task InitializeAsync()
         {
             var metadataMock = new Mock<IMetadataService>();
+            var metadata = new AudioMetadata
+            {
+                Duration = TimeSpan.FromSeconds(1234),
+                Format = "m4b",
+                BitRate = 64000,
+                SampleRate = 32000,
+                Channels = 1
+            };
             metadataMock.Setup(m => m.ExtractFileMetadataAsync(It.IsAny<string>()))
-                .ReturnsAsync(new AudioMetadata { Duration = TimeSpan.FromSeconds(1234), Format = "m4b", BitRate = 64000, SampleRate = 32000, Channels = 1 });
+                .ReturnsAsync(metadata);
+            metadataMock.Setup(m => m.ExtractFileMetadataAsync(
+                    It.IsAny<MetadataFileSource>()))
+                .ReturnsAsync(metadata);
             _services.AddSingleton(metadataMock.Object);
             Init();
             await _audiobookRepository.AddAsync(_audiobook);
@@ -117,13 +128,9 @@ namespace Listenarr.Tests.Features.Application.Audiobooks.Files
             Assert.Empty(await _audiobookFileRepository.GetByAudiobookIdAsync(_audiobook.Id));
         }
 
-        [Fact]
+        [LinuxFact]
         public async Task CheckAudiobookFileOwnershipAsync_BrokenSymlinkDestination_FailsClosed()
         {
-            if (OperatingSystem.IsWindows())
-            {
-                return;
-            }
 
             var plannedBasePath = FileService.GetTempDirectory("audio-file-broken-link-base");
             var plannedFilePath = Path.Join(plannedBasePath, "planned.m4b");
@@ -313,13 +320,9 @@ namespace Listenarr.Tests.Features.Application.Audiobooks.Files
             Assert.Equal(expectedOutcome, result.Outcome);
         }
 
-        [Fact]
+        [LinuxFact]
         public async Task EnsureAudiobookFileAsync_CaseInsensitiveAliasSymlinkToSibling_FailsClosed()
         {
-            if (OperatingSystem.IsWindows())
-            {
-                return;
-            }
 
             var (audiobook, candidate) = await CreateCaseInsensitiveAliasSymlinkEscapeAsync("ensure");
 
@@ -329,13 +332,9 @@ namespace Listenarr.Tests.Features.Application.Audiobooks.Files
             Assert.False(created);
         }
 
-        [Fact]
+        [LinuxFact]
         public async Task CheckAudiobookFileOwnershipAsync_CaseInsensitiveAliasSymlinkToSibling_FailsClosed()
         {
-            if (OperatingSystem.IsWindows())
-            {
-                return;
-            }
 
             var (audiobook, candidate) = await CreateCaseInsensitiveAliasSymlinkEscapeAsync("ownership");
 
@@ -345,13 +344,9 @@ namespace Listenarr.Tests.Features.Application.Audiobooks.Files
             Assert.Equal(AudiobookFileOwnershipCheckOutcome.IdentityUnavailable, result.Outcome);
         }
 
-        [Fact]
+        [LinuxFact]
         public async Task EnsureAudiobookFileAsync_CaseInsensitiveAliasRootSymlinkToSibling_FailsClosed()
         {
-            if (OperatingSystem.IsWindows())
-            {
-                return;
-            }
 
             var (audiobook, candidate) = await CreateCaseInsensitiveAliasRootSymlinkEscapeAsync("ensure-root");
 
@@ -361,13 +356,9 @@ namespace Listenarr.Tests.Features.Application.Audiobooks.Files
             Assert.False(created);
         }
 
-        [Fact]
+        [LinuxFact]
         public async Task CheckAudiobookFileOwnershipAsync_CaseInsensitiveAliasRootSymlinkToSibling_FailsClosed()
         {
-            if (OperatingSystem.IsWindows())
-            {
-                return;
-            }
 
             var (audiobook, candidate) = await CreateCaseInsensitiveAliasRootSymlinkEscapeAsync("ownership-root");
 
@@ -441,10 +432,9 @@ namespace Listenarr.Tests.Features.Application.Audiobooks.Files
             Assert.True(created);
         }
 
-        [Fact]
+        [LinuxFact]
         public async Task EnsureAudiobookFileAsync_SymlinkedDirectoryEscapesBasePath_FailsClosed()
         {
-            if (OperatingSystem.IsWindows()) return;
             var basePath = FileService.GetTempDirectory("audio-file-link-base");
             var outside = FileService.GetTempDirectory("audio-file-link-outside");
             await File.WriteAllTextAsync(Path.Join(outside, "outside.m4b"), "audio");
@@ -541,6 +531,84 @@ namespace Listenarr.Tests.Features.Application.Audiobooks.Files
         }
 
         [Fact]
+        public async Task EnsureAudiobookFileAsync_RequestCanceledAfterClaim_RollsBackExactGeneration()
+        {
+            var testFile = await FileService.GetTempFileAsync(
+                $"physical-generation-canceled-rollback-{Guid.NewGuid():N}.m4b");
+            _audiobook.BasePath = Path.GetDirectoryName(testFile);
+            await _audiobookRepository.UpdateAsync(_audiobook);
+            using var cancellation = new CancellationTokenSource();
+            using var registrationLease = new SequencedRegistrationLease(
+                testFile,
+                "canceled-physical-generation",
+                [true, true, false],
+                publicationCheck =>
+                {
+                    if (publicationCheck == 3)
+                    {
+                        cancellation.Cancel();
+                    }
+                });
+
+            var created = await _provider
+                .GetRequiredService<IAudiobookFileService>()
+                .EnsureAudiobookFileAsync(
+                    _audiobook,
+                    registrationLease,
+                    "canceled-import",
+                    cancellation.Token);
+
+            Assert.False(created);
+            Assert.Empty(await _audiobookFileRepository
+                .GetByAudiobookIdAsync(_audiobook.Id));
+        }
+
+        [Fact]
+        public async Task RefreshPhysicalGenerationAsync_PublicationChangesAfterDatabaseUpdate_RestoresPredecessor()
+        {
+            var testFile = await FileService.GetTempFileAsync(
+                $"physical-generation-rollback-{Guid.NewGuid():N}.m4b");
+            _audiobook.BasePath = Path.GetDirectoryName(testFile);
+            await _audiobookRepository.UpdateAsync(_audiobook);
+            var service = _provider.GetRequiredService<IAudiobookFileService>();
+            using (var initialLease =
+                PinnedAudiobookFileRegistrationLease.Open(testFile))
+            {
+                Assert.True(await service.EnsureAudiobookFileAsync(
+                    _audiobook,
+                    initialLease,
+                    "initial"));
+            }
+
+            var predecessor = Assert.Single(
+                await _audiobookFileRepository.GetByAudiobookIdAsync(
+                    _audiobook.Id));
+            var predecessorIdentity = predecessor.PhysicalObjectIdentity;
+            Assert.False(string.IsNullOrWhiteSpace(predecessorIdentity));
+            using var replacementLease = new SequencedRegistrationLease(
+                testFile,
+                "replacement-physical-identity",
+                [true, true, true, false]);
+
+            var refreshed = await service.RefreshPhysicalGenerationAsync(
+                _audiobook,
+                predecessor.Id,
+                predecessorIdentity,
+                replacementLease,
+                "replacement");
+
+            Assert.False(refreshed);
+            var persisted = Assert.Single(
+                await _audiobookFileRepository.GetByAudiobookIdAsync(
+                    _audiobook.Id));
+            Assert.Equal(predecessor.Id, persisted.Id);
+            Assert.Equal(predecessorIdentity, persisted.PhysicalObjectIdentity);
+            Assert.Equal(predecessor.Format, persisted.Format);
+            Assert.Equal(predecessor.DurationSeconds, persisted.DurationSeconds);
+            Assert.Equal(predecessor.Source, persisted.Source);
+        }
+
+        [Fact]
         public async Task EnsureAudiobookFileAsync_PersistsMetadataFromMetadataService()
         {
             var testFile = await FileService.GetTempFileAsync($"meta-int-{Guid.NewGuid()}.m4b");
@@ -553,6 +621,57 @@ namespace Listenarr.Tests.Features.Application.Audiobooks.Files
             Assert.Equal(64000, file.Bitrate);
             Assert.Equal(32000, file.SampleRate);
             Assert.Equal(1, file.Channels);
+        }
+
+        private sealed class SequencedRegistrationLease(
+            string path,
+            string physicalObjectIdentity,
+            IEnumerable<bool> publicationMatches,
+            Action<int>? onPublicationCheck = null) :
+            IAudiobookFileRegistrationLease
+        {
+            private readonly Queue<bool> _publicationMatches =
+                new(publicationMatches);
+            private int _publicationChecks;
+
+            public string PublicPath { get; } = path;
+            public string MetadataPath { get; } = path;
+            public string PhysicalObjectIdentity { get; } =
+                physicalObjectIdentity;
+            public string? SourcePhysicalObjectIdentity => null;
+
+            public bool MatchesCurrentPublication()
+            {
+                var publicationCheck = Interlocked.Increment(
+                    ref _publicationChecks);
+                onPublicationCheck?.Invoke(publicationCheck);
+                return _publicationMatches.Count == 0
+                    ? false
+                    : _publicationMatches.Dequeue();
+            }
+
+            public bool CompletePublication() => true;
+
+            public async Task<bool> MatchesContentAsync(
+                Stream candidateStream,
+                CancellationToken cancellationToken = default)
+            {
+                await using var publishedStream = File.OpenRead(PublicPath);
+                if (candidateStream.CanSeek)
+                {
+                    candidateStream.Position = 0;
+                }
+
+                var candidateHash = await System.Security.Cryptography.SHA256
+                    .HashDataAsync(candidateStream, cancellationToken);
+                var publishedHash = await System.Security.Cryptography.SHA256
+                    .HashDataAsync(publishedStream, cancellationToken);
+                return candidateHash.AsSpan().SequenceEqual(publishedHash);
+            }
+
+            public void Dispose()
+            {
+            }
         }
     }
 }

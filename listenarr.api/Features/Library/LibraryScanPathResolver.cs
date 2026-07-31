@@ -59,14 +59,15 @@ public sealed class LibraryScanPathResolver(
             logger.LogWarning(
                 "Rejected scan path for audiobook {AudiobookId}: {Reason}",
                 audiobook.Id,
-                authorization.Error);
+                LogRedaction.SanitizeText(authorization.Error));
             return LibraryScanPathResolution.Failure(
                 MapFailure(authorization, explicitRequest));
         }
 
         return LibraryScanPathResolution.Success(
             authorization.Path!,
-            authorization.Identity!.Value);
+            authorization.Identity!.Value,
+            authorization.PhysicalIdentity!.Value);
     }
 
     private static IActionResult MapFailure(
@@ -91,12 +92,18 @@ public sealed class LibraryScanPathResolver(
                 "No root folders configured; cannot accept explicit scan path",
             ScanPathAuthorizationFailure.ConfigurationUnavailable =>
                 "Failed to determine a safe scan path",
-            _ => authorization.Error ?? "Scan path authorization failed"
+            ScanPathAuthorizationFailure.IdentityUnavailable =>
+                "Scan path identity could not be established safely",
+            ScanPathAuthorizationFailure.InvalidPath =>
+                "Scan path is invalid",
+            ScanPathAuthorizationFailure.NoConfiguredRoots =>
+                "No configured scan path is available",
+            _ => "Scan path authorization failed"
         };
         var payload = new
         {
             message,
-            reason = authorization.Error
+            reason = authorization.Failure.ToString()
         };
         return statusCode == StatusCodes.Status400BadRequest
             ? new BadRequestObjectResult(payload)
@@ -110,13 +117,15 @@ public sealed class LibraryScanPathResolver(
 public sealed record LibraryScanPathResolution(
     string? ScanRoot,
     PathIdentitySnapshot? PathIdentity,
+    ScanPathPhysicalIdentity? PhysicalIdentity,
     IActionResult? ErrorResult)
 {
     public static LibraryScanPathResolution Success(
         string scanRoot,
-        PathIdentitySnapshot pathIdentity) =>
-        new(scanRoot, pathIdentity, null);
+        PathIdentitySnapshot pathIdentity,
+        ScanPathPhysicalIdentity physicalIdentity) =>
+        new(scanRoot, pathIdentity, physicalIdentity, null);
 
     public static LibraryScanPathResolution Failure(IActionResult errorResult) =>
-        new(null, null, errorResult);
+        new(null, null, null, errorResult);
 }

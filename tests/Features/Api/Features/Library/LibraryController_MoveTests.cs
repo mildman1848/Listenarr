@@ -15,6 +15,7 @@
  * You should have received a copy of the GNU Affero General Public License
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
+using System.Text.Json;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using Listenarr.Tests.Builders;
@@ -27,6 +28,93 @@ namespace Listenarr.Tests.Features.Api.Features.Library
     [Trait("Category", "LibraryController")]
     public class LibraryController_MoveTests : BaseTests
     {
+        [Fact]
+        public async Task GetMoveJobStatus_ReturnsPublicContractWithoutWorkerInternals()
+        {
+            var jobId = Guid.NewGuid();
+            var job = new MoveJob
+            {
+                Id = jobId,
+                AudiobookId = 42,
+                RequestedPath = "/library/Author/Title",
+                SourcePath = "/incoming/Author/Title",
+                Status = MoveJobStatus.Failed,
+                Phase = MoveJobPhase.CleaningSource,
+                Error = "C:\\machine\\private\\recovery failed for worker secret",
+                FailureKind = MoveFailureKind.Verification,
+                AttemptCount = 3,
+                EnqueuedAt = new DateTime(2026, 7, 28, 12, 0, 0, DateTimeKind.Utc),
+                UpdatedAt = new DateTime(2026, 7, 28, 12, 5, 0, DateTimeKind.Utc),
+                NextAttemptAt = new DateTime(2026, 7, 28, 12, 10, 0, DateTimeKind.Utc),
+                ActiveDeduplicationKey = "dedupe-secret",
+                IdentityKeyVersion = 4,
+                LeaseOwner = "machine:123:secret",
+                LeaseExpiresAt = DateTime.UtcNow.AddMinutes(5),
+                LeaseGeneration = 9,
+                SourceIdentityBoundary = "/incoming",
+                TargetIdentityBoundary = "/library",
+                SourceCleanupBoundary = "/incoming/Author",
+                RelocationId = Guid.NewGuid(),
+                Entries =
+                [
+                    new MoveJobEntry
+                    {
+                        RelativePath = "private-file.m4b",
+                        Sha256 = "private-hash"
+                    }
+                ],
+                CreatedDirectories =
+                [
+                    new MoveJobCreatedDirectory
+                    {
+                        Path = "/library/private-recovery"
+                    }
+                ]
+            };
+            var moveQueue = new Mock<IMoveQueueService>(MockBehavior.Strict);
+            moveQueue.Setup(service => service.GetJobAsync(
+                    jobId,
+                    It.IsAny<CancellationToken>()))
+                .ReturnsAsync(job);
+            Init(services => services.WithSingleton(moveQueue.Object));
+
+            var result = await _provider.GetRequiredService<LibraryController>()
+                .GetMoveJobStatus(jobId.ToString("D"), CancellationToken.None);
+
+            var ok = Assert.IsType<OkObjectResult>(result);
+            Assert.IsNotType<MoveJob>(ok.Value);
+            var json = JsonSerializer.Serialize(ok.Value);
+            Assert.Contains(nameof(MoveJob.Id), json, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains(nameof(MoveJob.AudiobookId), json, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains(nameof(MoveJob.RequestedPath), json, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains(nameof(MoveJob.Status), json, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains(nameof(MoveJob.Phase), json, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains("The moved files could not be verified", json, StringComparison.Ordinal);
+            foreach (var forbidden in new[]
+            {
+                nameof(MoveJob.ActiveDeduplicationKey),
+                nameof(MoveJob.IdentityKeyVersion),
+                nameof(MoveJob.LeaseOwner),
+                nameof(MoveJob.LeaseExpiresAt),
+                nameof(MoveJob.LeaseGeneration),
+                nameof(MoveJob.SourcePath),
+                nameof(MoveJob.SourceIdentityBoundary),
+                nameof(MoveJob.TargetIdentityBoundary),
+                nameof(MoveJob.SourceCleanupBoundary),
+                nameof(MoveJob.RelocationId),
+                nameof(MoveJob.Relocation),
+                nameof(MoveJob.Entries),
+                nameof(MoveJob.CreatedDirectories),
+                nameof(MoveJob.ScanHandoff),
+                "worker secret",
+                "private-hash",
+                "private-recovery"
+            })
+            {
+                Assert.DoesNotContain(forbidden, json, StringComparison.OrdinalIgnoreCase);
+            }
+        }
+
         [Fact]
         [Trait("Method", "EnqueueMove")]
         [Trait("Scenario", "ReturnsConflict_WhenTrackedSourceDoesNotExist")]
@@ -1199,15 +1287,11 @@ namespace Listenarr.Tests.Features.Api.Features.Library
             Assert.Contains("leading whitespace", badObj.Value?.ToString() ?? string.Empty, StringComparison.OrdinalIgnoreCase);
         }
 
-        [Fact]
+        [LinuxFact]
         [Trait("Method", "EnqueueMove")]
         [Trait("Scenario", "AllowsCaseOnlyDestinationDifference_OnCaseSensitiveHosts")]
         public async Task MoveAudiobook_AllowsCaseOnlyDestinationDifference_OnCaseSensitiveHosts()
         {
-            if (OperatingSystem.IsWindows())
-            {
-                return;
-            }
 
             var mockMoveQueue = new Mock<IMoveQueueService>();
             var expectedId = Guid.NewGuid();

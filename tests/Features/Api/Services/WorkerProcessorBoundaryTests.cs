@@ -84,6 +84,14 @@ namespace Listenarr.Tests.Features.Api.Services
             fileRepository
                 .Setup(r => r.GetByIdAsync(file.Id, It.IsAny<CancellationToken>()))
                 .ReturnsAsync(file);
+            fileRepository
+                .Setup(r => r.DeletePhysicalGenerationAsync(
+                    file.Id,
+                    file.AudiobookId,
+                    file.Path,
+                    file.PhysicalObjectIdentity,
+                    It.IsAny<CancellationToken>()))
+                .ReturnsAsync(true);
             var audiobookRepository = new Mock<IAudiobookRepository>();
             audiobookRepository
                 .Setup(r => r.GetByIdAsync(file.AudiobookId))
@@ -104,7 +112,12 @@ namespace Listenarr.Tests.Features.Api.Services
 
             await processor.RunCycleAsync(CancellationToken.None);
 
-            fileRepository.Verify(r => r.DeleteAsync(file.Id, It.IsAny<CancellationToken>()), Times.Once);
+            fileRepository.Verify(r => r.DeletePhysicalGenerationAsync(
+                file.Id,
+                file.AudiobookId,
+                file.Path,
+                file.PhysicalObjectIdentity,
+                It.IsAny<CancellationToken>()), Times.Once);
             metadataService.Verify(s => s.ExtractFileMetadataAsync(It.IsAny<string>()), Times.Never);
         }
 

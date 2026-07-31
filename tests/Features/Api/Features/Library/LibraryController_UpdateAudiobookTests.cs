@@ -150,6 +150,39 @@ namespace Listenarr.Tests.Features.Api.Features.Library
         }
 
         [Fact]
+        public async Task UpdateAudiobook_RepositoryReportsMissing_ReturnsNotFound()
+        {
+            var audiobook = new Audiobook
+            {
+                Id = 7001,
+                Title = "Original"
+            };
+            var repository = new Mock<IAudiobookRepository>(
+                MockBehavior.Strict);
+            repository.Setup(service => service.GetByIdAsync(audiobook.Id))
+                .ReturnsAsync(audiobook);
+            repository.Setup(service => service.UpdateAsync(
+                    It.Is<Audiobook>(candidate =>
+                        candidate.Id == audiobook.Id
+                        && candidate.Title == "Updated")))
+                .ReturnsAsync(false);
+            Init(services => services.WithSingleton(repository.Object));
+
+            var result = await _provider
+                .GetRequiredService<LibraryController>()
+                .UpdateAudiobook(
+                    audiobook.Id,
+                    new AudiobookUpdateRequest { Title = "Updated" });
+
+            Assert.IsType<NotFoundObjectResult>(result);
+            repository.Verify(service => service.GetByIdAsync(audiobook.Id),
+                Times.Exactly(2));
+            repository.Verify(service => service.UpdateAsync(
+                It.Is<Audiobook>(candidate => candidate.Id == audiobook.Id)),
+                Times.Once);
+        }
+
+        [Fact]
         [Trait("Method", "UpdateAudiobook")]
         [Trait("Scenario", "OmittedBooleansRemainUnchanged")]
         public async Task UpdateAudiobook_OmittedBooleansRemainUnchanged()
@@ -268,6 +301,42 @@ namespace Listenarr.Tests.Features.Api.Features.Library
             Assert.Equal(Path.Join(targetPath, "cover.jpg"), updated.ImageUrl);
             Assert.Contains(updated.Files!, file => file.Path == Path.Join(targetPath, "book.m4b"));
             Assert.DoesNotContain(updated.Files!, file => file.Path == staleFilePath);
+        }
+
+        [Fact]
+        [Trait("Method", "UpdateAudiobook")]
+        [Trait("Scenario", "LegacyBasePathCompatibilityPreservesExplicitExternalImageUpdate")]
+        public async Task UpdateAudiobook_LegacyBasePathChange_AppliesExplicitExternalImageUrl()
+        {
+            var rootPath = FileService.GetTempDirectory("listenarr-update-image-url-root");
+            await _rootFolderRepository.AddAsync(new RootFolderBuilder()
+                .WithName("Image URL Root")
+                .WithPath(rootPath)
+                .WithIsDefault()
+                .Build());
+
+            var sourcePath = FileService.GetTempDirectory("listenarr-update-image-url-source");
+            var targetPath = Path.Join(rootPath, "Author", "Title");
+            var audiobook = await _audiobookRepository.AddAsync(new Audiobook
+            {
+                Title = "External Image Update",
+                BasePath = sourcePath,
+                ImageUrl = Path.Join(sourcePath, "cover.jpg")
+            });
+            const string replacementImageUrl = "https://cdn.example.test/replacement.jpg";
+            var controller = _provider.GetRequiredService<LibraryController>();
+
+            var result = await controller.UpdateAudiobook(audiobook.Id, new AudiobookUpdateRequest
+            {
+                BasePath = targetPath,
+                ImageUrl = replacementImageUrl
+            });
+
+            Assert.IsType<OkObjectResult>(result);
+            var updated = await GetFreshAudiobookAsync(audiobook.Id);
+            Assert.NotNull(updated);
+            Assert.Equal(FileUtils.NormalizeStoredPath(targetPath), updated.BasePath);
+            Assert.Equal(replacementImageUrl, updated.ImageUrl);
         }
 
         [Fact]

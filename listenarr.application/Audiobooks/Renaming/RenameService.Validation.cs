@@ -167,7 +167,7 @@ public partial class RenameService
             if (destinationIdentity.State != PathIdentityState.Valid
                 || string.IsNullOrWhiteSpace(destinationIdentity.OwnershipKey))
             {
-                item.Error = destinationIdentity.Reason ?? "Destination filesystem identity is unavailable.";
+                item.Error = "Destination filesystem identity is unavailable.";
                 result.RenamedFiles.Add(item);
                 result.Error = item.Error;
                 return result;
@@ -195,8 +195,8 @@ public partial class RenameService
                     AudiobookFileOwnershipCheckOutcome.AlreadyOwnedByAudiobook =>
                         "Target file is already owned by another file record for this audiobook.",
                     AudiobookFileOwnershipCheckOutcome.IdentityConflict =>
-                        ownership.Reason ?? "Target file identity conflicts with legacy ownership data.",
-                    _ => ownership.Reason ?? "Target file identity is unavailable."
+                        "Target file identity conflicts with existing ownership data.",
+                    _ => "Target file identity is unavailable."
                 };
                 result.RenamedFiles.Add(item);
                 result.Error = item.Error;
@@ -289,7 +289,7 @@ public partial class RenameService
         catch (Exception exception) when (exception is
             ArgumentException or NotSupportedException or PathTooLongException or System.Security.SecurityException)
         {
-            error = $"{missingOrInvalidError} {exception.Message}";
+            error = missingOrInvalidError;
             return string.Empty;
         }
     }

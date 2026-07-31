@@ -53,8 +53,22 @@ public partial class ScanQueueService
                 return null;
             }
 
+            if (!original.PhysicalIdentity.HasValue)
+            {
+                await _handoffStore.ReleaseClaimAsync(
+                    claim.HandoffId,
+                    claim.LeaseOwner,
+                    claim.LeaseGeneration,
+                    "The original scan job has no physical scan-root identity.",
+                    now);
+                return null;
+            }
+
             var audiobook = new Audiobook { Id = original.AudiobookId };
-            var newJobId = await EnqueueMoveHandoffScanAsync(audiobook, claim);
+            var newJobId = await EnqueueMoveHandoffScanAsync(
+                audiobook,
+                claim,
+                original.PhysicalIdentity.Value);
             if (!newJobId.HasValue)
             {
                 await _handoffStore.ReleaseClaimAsync(
@@ -68,18 +82,15 @@ public partial class ScanQueueService
             return newJobId;
         }
 
-        var replacement = new ScanJob
-        {
-            AudiobookId = original.AudiobookId,
-            Path = original.Path,
-            PathIdentity = original.PathIdentity,
-            CorrelationId = original.CorrelationId,
-            DownloadId = original.DownloadId,
-            IsAuthoritativeScope = original.IsAuthoritativeScope
-        };
-        return await EnqueueJobAsync(
-            replacement,
-            allowUncorrelatedPathDedupe: string.IsNullOrWhiteSpace(replacement.CorrelationId));
+        return await EnqueueScanAsync(new ScanEnqueueCommand(
+            new Audiobook { Id = original.AudiobookId },
+            original.Path,
+            original.PathIdentity,
+            original.PhysicalIdentity,
+            original.CorrelationId,
+            original.DownloadId,
+            original.IsAuthoritativeScope,
+            original.AuthorizationMode));
     }
 
     private async Task CompleteReservationAsync(
@@ -115,7 +126,9 @@ public partial class ScanQueueService
 
     private static bool PathsMatch(ScanJob left, ScanJob right)
     {
-        if (left.IsAuthoritativeScope != right.IsAuthoritativeScope)
+        if (left.IsAuthoritativeScope != right.IsAuthoritativeScope
+            || left.AuthorizationMode != right.AuthorizationMode
+            || left.PhysicalIdentity != right.PhysicalIdentity)
         {
             return false;
         }
@@ -169,6 +182,7 @@ public partial class ScanQueueService
         AudiobookId = job.AudiobookId,
         Path = job.Path,
         PathIdentity = job.PathIdentity,
+        PhysicalIdentity = job.PhysicalIdentity,
         EnqueuedAt = job.EnqueuedAt,
         Status = job.Status,
         Error = job.Error,
@@ -176,7 +190,8 @@ public partial class ScanQueueService
         DownloadId = job.DownloadId,
         MoveScanHandoffId = job.MoveScanHandoffId,
         MoveScanAttemptGeneration = job.MoveScanAttemptGeneration,
-        IsAuthoritativeScope = job.IsAuthoritativeScope
+        IsAuthoritativeScope = job.IsAuthoritativeScope,
+        AuthorizationMode = job.AuthorizationMode
     };
 
     private static bool IsActive(string status) =>

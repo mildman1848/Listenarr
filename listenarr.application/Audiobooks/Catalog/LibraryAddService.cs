@@ -191,7 +191,12 @@ namespace Listenarr.Application.Audiobooks.Catalog
             }
 
             // The audiobook and its Added history event are now durably committed.
-            // Notifications are post-commit and may not turn this success into an API failure.
+            // Permanent image publication and notifications are post-commit effects and may
+            // not turn this success into an API failure.
+            await TryPublishPreparedImagesAsync(
+                audiobook,
+                preparedImage,
+                preparedAuthorImages);
             await TrySendAddedNotificationAsync(audiobook);
 
             _logger.LogInformation(
@@ -246,12 +251,7 @@ namespace Listenarr.Application.Audiobooks.Catalog
                 return destinationFailure;
             }
 
-            audiobook.ImageUrl = await PublishLibraryImageAsync(preparedImage);
-            foreach (var authorImageKey in preparedAuthorImages)
-            {
-                await PublishAuthorImageAsync(authorImageKey);
-            }
-
+            audiobook.ImageUrl = preparedImage.FallbackImageUrl;
             cancellationToken.ThrowIfCancellationRequested();
             await _commitStore.CommitAsync(
                 audiobook,

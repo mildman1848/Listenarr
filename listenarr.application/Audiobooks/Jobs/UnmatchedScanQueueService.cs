@@ -42,6 +42,14 @@ namespace Listenarr.Application.Audiobooks.Jobs
         public string Format { get; set; } = string.Empty;
     }
 
+    public static class UnmatchedScanPublicError
+    {
+        public static string? FromInternal(string? error) =>
+            string.IsNullOrWhiteSpace(error)
+                ? null
+                : "The unmatched scan failed. Review the server logs for details.";
+    }
+
     public class UnmatchedScanJob
     {
         public Guid Id { get; set; } = Guid.NewGuid();

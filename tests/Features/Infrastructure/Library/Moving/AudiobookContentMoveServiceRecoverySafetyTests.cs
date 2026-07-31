@@ -266,10 +266,9 @@ public partial class AudiobookContentMoveServiceTests
         var request = await CreateLeasedMoveRequestAsync(source, target, jobId);
         await WriteRecoveryMarkerAsync(externalTarget, jobId, source, target, "atomic-rename-complete");
         Directory.Delete(source, recursive: true);
-        if (!TryCreateDirectoryLink(target, externalTarget))
-        {
-            return;
-        }
+        Assert.True(
+            TryCreateDirectoryLink(target, externalTarget),
+            "The required directory link could not be created.");
 
         try
         {

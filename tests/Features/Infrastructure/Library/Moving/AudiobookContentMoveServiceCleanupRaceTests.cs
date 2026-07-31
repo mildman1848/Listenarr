@@ -35,10 +35,9 @@ public partial class AudiobookContentMoveServiceTests
         var capabilityParent = FileService.GetTempDirectory("content-move-cleanup-race-capability");
         var capabilityTarget = FileService.GetTempDirectory("content-move-cleanup-race-capability-target");
         var capabilityLink = Path.Join(capabilityParent, "link");
-        if (!TryCreateDirectoryLink(capabilityLink, capabilityTarget))
-        {
-            return;
-        }
+        Assert.True(
+            TryCreateDirectoryLink(capabilityLink, capabilityTarget),
+            "The required directory link could not be created.");
 
         TryRemoveDirectoryLink(capabilityLink);
         var source = FileService.GetTempDirectory("content-move-cleanup-race-src");
@@ -88,10 +87,9 @@ public partial class AudiobookContentMoveServiceTests
         var capabilityParent = FileService.GetTempDirectory("content-move-nested-cleanup-race-capability");
         var capabilityTarget = FileService.GetTempDirectory("content-move-nested-cleanup-race-capability-target");
         var capabilityLink = Path.Join(capabilityParent, "link");
-        if (!TryCreateDirectoryLink(capabilityLink, capabilityTarget))
-        {
-            return;
-        }
+        Assert.True(
+            TryCreateDirectoryLink(capabilityLink, capabilityTarget),
+            "The required directory link could not be created.");
 
         TryRemoveDirectoryLink(capabilityLink);
         var source = FileService.GetTempDirectory("content-move-nested-cleanup-race-src");
@@ -278,6 +276,162 @@ public partial class AudiobookContentMoveServiceTests
     }
 
     [Fact]
+    public async Task MoveContentsAsync_TargetReplacedAtPinnedQuarantineDelete_PreservesRecoverableGeneration()
+    {
+        var source = FileService.GetTempDirectory("content-move-target-final-delete-src");
+        await FileService.GetFileAsync(source, "book.m4b", "verified audio");
+        var target = Path.Join(
+            FileService.GetTempPath(),
+            $"content-move-target-final-delete-dst-{Guid.NewGuid():N}");
+        var targetFile = Path.Join(target, "book.m4b");
+        var request = await CreateLeasedMoveRequestAsync(source, target);
+        var injector = new ReplaceTargetAtPinnedQuarantineDelete(targetFile);
+        var service = new AudiobookContentMoveService(
+            _provider.GetRequiredService<ILogger<AudiobookContentMoveService>>(),
+            _provider.GetRequiredService<IDbContextFactory<ListenArrDbContext>>(),
+            TimeProvider.System,
+            injector);
+
+        await Assert.ThrowsAsync<MoveNeedsAttentionException>(() =>
+            service.MoveContentsAsync(request, CancellationToken.None));
+
+        Assert.Equal(
+            injector.Replaced ? "replacement audio" : "verified audio",
+            await File.ReadAllTextAsync(targetFile));
+        var quarantineRoot = Path.Join(
+            Path.GetDirectoryName(source)!,
+            $".listenarr-quarantine-{request.JobId:N}");
+        var recoverableOriginals = Directory.Exists(quarantineRoot)
+            ? Directory.EnumerateFiles(
+                    quarantineRoot,
+                    "*",
+                    SearchOption.AllDirectories)
+                .Where(path => File.ReadAllText(path) == "verified audio")
+                .ToList()
+            : [];
+        Assert.NotEmpty(recoverableOriginals);
+    }
+
+    [Fact]
+    public async Task MoveContentsAsync_TargetReplacedAfterPinnedQuarantineDelete_PreservesRetention()
+    {
+        var source = FileService.GetTempDirectory("content-move-post-delete-race-src");
+        await FileService.GetFileAsync(source, "book.m4b", "verified audio");
+        var target = Path.Join(
+            FileService.GetTempPath(),
+            $"content-move-post-delete-race-dst-{Guid.NewGuid():N}");
+        var targetFile = Path.Join(target, "book.m4b");
+        var request = await CreateLeasedMoveRequestAsync(source, target);
+        var injector = new ReplaceTargetAfterPinnedQuarantineDelete(targetFile);
+        var service = new AudiobookContentMoveService(
+            _provider.GetRequiredService<ILogger<AudiobookContentMoveService>>(),
+            _provider.GetRequiredService<IDbContextFactory<ListenArrDbContext>>(),
+            TimeProvider.System,
+            injector);
+
+        var failure = await Record.ExceptionAsync(() =>
+            service.MoveContentsAsync(request, CancellationToken.None));
+
+        if (!injector.Replaced)
+        {
+            Assert.Null(failure);
+            Assert.Equal("verified audio", await File.ReadAllTextAsync(targetFile));
+            Assert.Empty(Directory.EnumerateFiles(
+                target,
+                ".listenarr-destination-retention-*.bin",
+                SearchOption.AllDirectories));
+            return;
+        }
+
+        Assert.IsType<MoveNeedsAttentionException>(failure);
+        Assert.Equal("replacement audio", await File.ReadAllTextAsync(targetFile));
+        var retention = Assert.Single(Directory.EnumerateFiles(
+            target,
+            ".listenarr-destination-retention-*.bin",
+            SearchOption.AllDirectories));
+        Assert.Equal("verified audio", await File.ReadAllTextAsync(retention));
+    }
+
+    [Fact]
+    public async Task MoveContentsAsync_InterruptedAfterPinnedQuarantineDelete_RecoversFromDestinationRetention()
+    {
+        var source = FileService.GetTempDirectory("content-move-retention-restart-src");
+        await FileService.GetFileAsync(source, "book.m4b", "restart audio");
+        var target = Path.Join(
+            FileService.GetTempPath(),
+            $"content-move-retention-restart-dst-{Guid.NewGuid():N}");
+        var request = await CreateLeasedMoveRequestAsync(source, target);
+        var interrupted = new AudiobookContentMoveService(
+            _provider.GetRequiredService<ILogger<AudiobookContentMoveService>>(),
+            _provider.GetRequiredService<IDbContextFactory<ListenArrDbContext>>(),
+            TimeProvider.System,
+            new StopAfterPinnedQuarantineDelete());
+
+        await Assert.ThrowsAsync<MoveNeedsAttentionException>(() =>
+            interrupted.MoveContentsAsync(request, CancellationToken.None));
+
+        var quarantineRoot = Path.Join(
+            Path.GetDirectoryName(source)!,
+            $".listenarr-quarantine-{request.JobId:N}");
+        Assert.False(File.Exists(Path.Join(quarantineRoot, "book.m4b")));
+        var initialRetention = Assert.Single(Directory.EnumerateFiles(
+            target,
+            ".listenarr-destination-retention-*.bin",
+            SearchOption.AllDirectories));
+        await using (var state = await _provider
+            .GetRequiredService<IDbContextFactory<ListenArrDbContext>>()
+            .CreateDbContextAsync())
+        {
+            var entry = await state.MoveJobEntries.SingleAsync(candidate =>
+                candidate.MoveJobId == request.JobId
+                && candidate.EntryType == MoveJobEntryType.File);
+            Assert.Equal(MoveJobEntryCleanupState.Quarantined, entry.CleanupState);
+            Assert.Equal(1, entry.CleanupProtectionVersion);
+        }
+
+        var recoveryService = new AudiobookContentMoveService(
+            _provider.GetRequiredService<ILogger<AudiobookContentMoveService>>(),
+            _provider.GetRequiredService<IDbContextFactory<ListenArrDbContext>>(),
+            TimeProvider.System);
+        var recoverable = await recoveryService.GetRecoverableMoveAsync(
+            request,
+            CancellationToken.None);
+        Assert.NotNull(recoverable);
+        Assert.False(recoverable!.SourceCleanupCompleted);
+        var result = await recoveryService.ResumeSourceCleanupAsync(
+            request,
+            recoverable!,
+            CancellationToken.None);
+
+        Assert.True(result.SourceCleanupCompleted);
+        await using (var state = await _provider
+            .GetRequiredService<IDbContextFactory<ListenArrDbContext>>()
+            .CreateDbContextAsync())
+        {
+            var entry = await state.MoveJobEntries.SingleAsync(candidate =>
+                candidate.MoveJobId == request.JobId
+                && candidate.EntryType == MoveJobEntryType.File);
+            Assert.Equal(MoveJobEntryCleanupState.Deleted, entry.CleanupState);
+        }
+        Assert.Equal(
+            "restart audio",
+            await File.ReadAllTextAsync(Path.Join(target, "book.m4b")));
+        var remainingFiles = Directory.EnumerateFiles(
+                target,
+                "*",
+                SearchOption.AllDirectories)
+            .Select(Path.GetFileName)
+            .ToArray();
+        Assert.False(
+            File.Exists(initialRetention),
+            string.Join(" | ", remainingFiles));
+        Assert.Empty(Directory.EnumerateFiles(
+            target,
+            ".listenarr-destination-retention-*.bin",
+            SearchOption.AllDirectories));
+    }
+
+    [Fact]
     public async Task MoveContentsAsync_TargetBytesChangeAtFinalRemoval_PreservesQuarantine()
     {
         var source = FileService.GetTempDirectory("content-move-target-final-race-src");
@@ -398,6 +552,73 @@ public partial class AudiobookContentMoveServiceTests
             File.Delete(targetFile);
             File.CreateSymbolicLink(targetFile, externalFile);
             _replaced = true;
+        }
+    }
+
+    private sealed class ReplaceTargetAtPinnedQuarantineDelete(
+        string targetFile) : IMoveFaultInjector
+    {
+        public bool Replaced { get; private set; }
+
+        public void OnSourceCleanupMutation(
+            Guid jobId,
+            SourceCleanupFaultPoint faultPoint)
+        {
+            if (Replaced
+                || faultPoint != SourceCleanupFaultPoint.BeforePinnedQuarantineDelete)
+            {
+                return;
+            }
+
+            File.Delete(targetFile);
+            File.WriteAllText(targetFile, "replacement audio");
+            Replaced = true;
+        }
+    }
+
+    private sealed class ReplaceTargetAfterPinnedQuarantineDelete(
+        string targetFile) : IMoveFaultInjector
+    {
+        public bool Replaced { get; private set; }
+
+        public void OnSourceCleanupMutation(
+            Guid jobId,
+            SourceCleanupFaultPoint faultPoint)
+        {
+            if (Replaced
+                || faultPoint != SourceCleanupFaultPoint.AfterPinnedQuarantineDelete)
+            {
+                return;
+            }
+
+            try
+            {
+                File.Delete(targetFile);
+                File.WriteAllText(targetFile, "replacement audio");
+                Replaced = true;
+            }
+            catch (IOException)
+            {
+                // Windows holds a non-delete-sharing handle through completion.
+            }
+            catch (UnauthorizedAccessException)
+            {
+                // Some Windows filesystems report sharing denial as access denied.
+            }
+        }
+    }
+
+    private sealed class StopAfterPinnedQuarantineDelete : IMoveFaultInjector
+    {
+        public void OnSourceCleanupMutation(
+            Guid jobId,
+            SourceCleanupFaultPoint faultPoint)
+        {
+            if (faultPoint == SourceCleanupFaultPoint.AfterPinnedQuarantineDelete)
+            {
+                throw new IOException(
+                    "Simulated interruption after pinned quarantine deletion.");
+            }
         }
     }
 

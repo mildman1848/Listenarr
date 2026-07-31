@@ -1213,10 +1213,10 @@ watch(
 
       if (prevRoot) {
         // Prefill the custom input with the precise destination (basePath if available)
-        const base =
-          (formData.value.basePath && formData.value.basePath.trim()) ||
-          baselineAudiobook.value?.basePath ||
-          prevRoot
+        const formBasePath = formData.value.basePath
+        const exactFormBasePath =
+          formBasePath && formBasePath.trim().length > 0 ? formBasePath : undefined
+        const base = exactFormBasePath || baselineAudiobook.value?.basePath || prevRoot
         customRootPath.value = base
 
         // Focus external custom input if it's visible
@@ -1920,13 +1920,21 @@ async function handleSave() {
         })
 
         if (userWantsMove) {
-          toast.info('Move queued', `Move job queued (${res.jobId}). Moving files in background.`)
+          const jobId = typeof res.jobId === 'string' ? res.jobId.trim() : ''
+          const resolvedTarget = typeof res.target === 'string' ? res.target.trim() : ''
+          if (!jobId || !resolvedTarget) {
+            throw new Error(
+              'The server did not return a durable move job ID and resolved destination.',
+            )
+          }
+
+          toast.info('Move queued', `Move job queued (${jobId}). Moving files in background.`)
 
           moveJobsStore.trackQueuedJob({
-            jobId: String(res.jobId),
+            jobId,
             audiobookId: audiobook.id,
             status: 'Queued',
-            target: combined || '',
+            target: resolvedTarget,
           })
         } else {
           toast.info('Destination updated', 'Destination changed without moving files.')
@@ -1945,8 +1953,8 @@ async function handleSave() {
         toast.error(
           'Move failed',
           relatedChangesSaved
-            ? 'Your metadata changes were saved, but the destination update was not queued.'
-            : 'Failed to update destination. Please try again.',
+            ? 'Your metadata changes were saved, but the destination update could not be confirmed.'
+            : 'The destination update could not be confirmed. Review the move queue before retrying.',
         )
         return
       }

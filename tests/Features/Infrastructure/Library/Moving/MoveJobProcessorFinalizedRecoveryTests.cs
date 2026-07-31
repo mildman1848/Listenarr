@@ -1,3 +1,4 @@
+using Listenarr.Tests.Common;
 using Microsoft.EntityFrameworkCore;
 
 namespace Listenarr.Tests.Features.Infrastructure.Library.Moving;
@@ -87,7 +88,7 @@ public partial class MoveJobProcessorTests
         Assert.Equal("preserve me", await File.ReadAllTextAsync(unownedFile));
     }
 
-    [Fact]
+    [LinuxFact]
     public async Task ProcessJobAsync_MarkerlessCopyWithLinkedTarget_RequiresAttention()
     {
         var state = await CreateMarkerlessFinalizedCopyStateAsync();
@@ -98,10 +99,9 @@ public partial class MoveJobProcessorTests
             "book.m4b",
             "verified audio");
         Directory.Delete(state.Target, recursive: true);
-        if (!TryCreateProcessorDirectoryLink(state.Target, externalTarget))
-        {
-            return;
-        }
+        Assert.True(
+            TryCreateProcessorDirectoryLink(state.Target, externalTarget),
+            "The required directory link could not be created.");
 
         try
         {

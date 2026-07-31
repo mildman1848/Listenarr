@@ -211,6 +211,36 @@ describe('move jobs store', () => {
     expect(toastMocks.info).toHaveBeenCalledTimes(1)
   })
 
+  it('ignores an unknown realtime status instead of regressing a running job', () => {
+    const store = useMoveJobsStore()
+    store.trackQueuedJob({ jobId: 'job-1', target: '/library/book' })
+    signalRMocks.callback?.({ jobId: 'job-1', status: 'Running', target: '/library/book' })
+
+    signalRMocks.callback?.({ jobId: 'job-1', status: 'Paused', target: '/library/book' })
+
+    expect(store.trackedById['job-1']?.status).toBe('Running')
+    expect(toastMocks.info).toHaveBeenCalledTimes(1)
+    expect(toastMocks.success).not.toHaveBeenCalled()
+    expect(toastMocks.error).not.toHaveBeenCalled()
+  })
+
+  it('ignores an unknown reconciliation status', async () => {
+    apiMocks.getMoveJobStatus.mockResolvedValue({
+      jobId: 'job-1',
+      status: 'Paused',
+      target: '/library/book',
+    })
+    const store = useMoveJobsStore()
+
+    store.trackQueuedJob({ jobId: 'job-1', target: '/library/book' })
+
+    await vi.waitFor(() => expect(apiMocks.getMoveJobStatus).toHaveBeenCalledWith('job-1'))
+    expect(store.trackedById['job-1']?.status).toBe('Queued')
+    expect(toastMocks.info).not.toHaveBeenCalled()
+    expect(toastMocks.success).not.toHaveBeenCalled()
+    expect(toastMocks.error).not.toHaveBeenCalled()
+  })
+
   it('keeps tracking when status reconciliation fails', async () => {
     apiMocks.getMoveJobStatus.mockRejectedValue(new Error('offline'))
     const store = useMoveJobsStore()

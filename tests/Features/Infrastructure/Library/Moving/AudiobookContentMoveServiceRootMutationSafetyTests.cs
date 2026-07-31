@@ -1,3 +1,5 @@
+using Listenarr.Tests.Common;
+
 namespace Listenarr.Tests.Features.Infrastructure.Library.Moving;
 
 public partial class AudiobookContentMoveServiceTests
@@ -10,10 +12,9 @@ public partial class AudiobookContentMoveServiceTests
         var externalTarget = FileService.GetTempDirectory("content-move-linked-target-external");
         var linkParent = FileService.GetTempDirectory("content-move-linked-target-parent");
         var targetLink = Path.Join(linkParent, "linked-target");
-        if (!TryCreateDirectoryLink(targetLink, externalTarget))
-        {
-            return;
-        }
+        Assert.True(
+            TryCreateDirectoryLink(targetLink, externalTarget),
+            "The required directory link could not be created.");
 
         try
         {
@@ -32,23 +33,18 @@ public partial class AudiobookContentMoveServiceTests
         }
     }
 
-    [Fact]
+    [WindowsFact]
     public async Task MoveContentsAsync_WindowsTargetJunction_DoesNotWriteExternalRecoveryMarker()
     {
-        if (!OperatingSystem.IsWindows())
-        {
-            return;
-        }
 
         var source = FileService.GetTempDirectory("content-move-target-junction-src");
         var sourceFile = await FileService.GetFileAsync(source, "book.m4b", "audio");
         var externalTarget = FileService.GetTempDirectory("content-move-target-junction-external");
         var linkParent = FileService.GetTempDirectory("content-move-target-junction-parent");
         var targetJunction = Path.Join(linkParent, "junction-target");
-        if (!TryCreateWindowsJunction(targetJunction, externalTarget))
-        {
-            return;
-        }
+        Assert.True(
+            TryCreateWindowsJunction(targetJunction, externalTarget),
+            "The required Windows junction could not be created.");
 
         try
         {
@@ -74,10 +70,9 @@ public partial class AudiobookContentMoveServiceTests
         var sourceFile = await FileService.GetFileAsync(externalSource, "book.m4b", "audio");
         var linkParent = FileService.GetTempDirectory("content-move-orphan-linked-source-parent");
         var sourceLink = Path.Join(linkParent, "linked-source");
-        if (!TryCreateDirectoryLink(sourceLink, externalSource))
-        {
-            return;
-        }
+        Assert.True(
+            TryCreateDirectoryLink(sourceLink, externalSource),
+            "The required directory link could not be created.");
 
         try
         {
@@ -111,10 +106,9 @@ public partial class AudiobookContentMoveServiceTests
         var externalTarget = FileService.GetTempDirectory("content-move-orphan-linked-target-external");
         var linkParent = FileService.GetTempDirectory("content-move-orphan-linked-target-parent");
         var targetLink = Path.Join(linkParent, "linked-target");
-        if (!TryCreateDirectoryLink(targetLink, externalTarget))
-        {
-            return;
-        }
+        Assert.True(
+            TryCreateDirectoryLink(targetLink, externalTarget),
+            "The required directory link could not be created.");
 
         try
         {

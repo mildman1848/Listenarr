@@ -93,7 +93,12 @@ namespace Listenarr.Infrastructure.Library.Scanning
 
             await hubContext.Clients.All.SendAsync(
                 "UnmatchedScanComplete",
-                new { jobId = jobId.ToString(), count = 0, error = ex.Message },
+                new
+                {
+                    jobId = jobId.ToString(),
+                    count = 0,
+                    error = UnmatchedScanPublicError.FromInternal(ex.Message)
+                },
                 stoppingToken);
         }
 

@@ -34,7 +34,7 @@ internal sealed partial class PinnedDirectoryCreation
             using var parent = new PinnedDirectoryAnchor(
                 DuplicateSafeHandle(_parentHandle),
                 _parentPath,
-                followVisibleFinalLink: false);
+                _parentFollowsVisibleFinalLink);
             using var retirementDirectory = parent.TryCreateChild(retirementDirectoryName);
             if (!retirementDirectory.Created
                 || !retirementDirectory.VisiblePathMatches())

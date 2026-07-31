@@ -46,10 +46,9 @@ public partial class AudiobookContentMoveServiceTests
         var external = FileService.GetTempDirectory("content-move-copy-parent-race-external");
         var probe = Path.Join(root, "link-probe");
         Directory.CreateDirectory(targetParent);
-        if (!TryCreateTempDirectoryLink(probe, external))
-        {
-            return;
-        }
+        Assert.True(
+            TryCreateTempDirectoryLink(probe, external),
+            "The required directory link could not be created.");
         Directory.Delete(probe);
 
         var source = FileService.GetTempDirectory("content-move-copy-parent-race-source");
@@ -106,10 +105,9 @@ public partial class AudiobookContentMoveServiceTests
         var displacedSource = source + ".original";
         var external = FileService.GetTempDirectory("content-move-direct-root-race-external");
         var probe = Path.Join(Path.GetDirectoryName(source)!, $"link-probe-{Guid.NewGuid():N}");
-        if (!TryCreateTempDirectoryLink(probe, external))
-        {
-            return;
-        }
+        Assert.True(
+            TryCreateTempDirectoryLink(probe, external),
+            "The required directory link could not be created.");
         Directory.Delete(probe);
 
         var sourceFile = await FileService.GetFileAsync(source, "book.m4b", "verified audio");

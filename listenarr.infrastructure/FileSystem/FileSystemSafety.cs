@@ -192,19 +192,7 @@ internal static partial class FileSystemSafety
                 return;
             }
 
-            if (!TryEnumerateTreeWithoutLinks(rootPath, out _, out var directories, out var reason))
-            {
-                System.Diagnostics.Debug.WriteLine(
-                    $"Blocked empty-directory cleanup for '{rootPath}': {reason}");
-                return;
-            }
-
-            foreach (var directory in directories.OrderByDescending(path => path.Length))
-            {
-                TryDeleteDirectoryIfEmpty(directory);
-            }
-
-            TryDeleteDirectoryIfEmpty(rootPath);
+            DeleteEmptyDirectoriesPinned(rootPath);
         }
         catch (Exception exception) when (exception is not (OperationCanceledException or OutOfMemoryException or StackOverflowException))
         {
@@ -331,24 +319,6 @@ internal static partial class FileSystemSafety
         catch (Exception exception) when (exception is not (OperationCanceledException or OutOfMemoryException or StackOverflowException))
         {
             return false;
-        }
-    }
-
-    private static void TryDeleteDirectoryIfEmpty(string path)
-    {
-        try
-        {
-            if (Directory.Exists(path)
-                && (File.GetAttributes(path) & FileAttributes.ReparsePoint) == 0
-                && !Directory.EnumerateFileSystemEntries(path).Any())
-            {
-                Directory.Delete(path, recursive: false);
-            }
-        }
-        catch (Exception exception) when (exception is not (OperationCanceledException or OutOfMemoryException or StackOverflowException))
-        {
-            System.Diagnostics.Debug.WriteLine(
-                $"Suppressed empty-directory delete failure for '{path}': {exception.Message}");
         }
     }
 

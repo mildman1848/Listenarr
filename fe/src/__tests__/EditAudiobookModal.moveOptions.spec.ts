@@ -48,7 +48,11 @@ vi.mock('@/services/api', () => ({
     checkVolume: vi.fn().mockResolvedValue({ sameVolume: true }),
     updateAudiobook: vi.fn().mockResolvedValue({ message: 'ok', audiobook: {} }),
     updateAudiobookIdentifiers: vi.fn().mockResolvedValue({ identifiers: [] }),
-    moveAudiobook: vi.fn().mockResolvedValue({ message: 'queued', jobId: 'job-1' }),
+    moveAudiobook: vi.fn().mockImplementation(async (_id: number, destination: string) => ({
+      message: 'queued',
+      jobId: 'job-1',
+      target: destination,
+    })),
   },
 }))
 
@@ -173,7 +177,7 @@ describe('EditAudiobookModal move options', () => {
     expect(apiService.moveAudiobook).toHaveBeenCalledTimes(1)
     expect(toastMocks.error).toHaveBeenCalledWith(
       'Move failed',
-      'Your metadata changes were saved, but the destination update was not queued.',
+      'Your metadata changes were saved, but the destination update could not be confirmed.',
     )
     expect(wrapper.emitted('saved')).toBeUndefined()
   })
@@ -452,6 +456,67 @@ describe('EditAudiobookModal move options', () => {
     expect(signalRMocks.onMoveJobUpdate).toHaveBeenCalledTimes(1)
     expect(wrapper.emitted('saved')).toHaveLength(1)
     expect(wrapper.emitted('close')).toHaveLength(1)
+  })
+
+  it('tracks the server-authoritative resolved move destination', async () => {
+    const { apiService } = await import('@/services/api')
+    vi.mocked(apiService.moveAudiobook).mockResolvedValueOnce({
+      message: 'queued',
+      jobId: 'job-canonical',
+      target: 'C:/root/Canonical Author/Canonical Book',
+    })
+    const wrapper = mount(EditAudiobookModal, {
+      props: { isOpen: true, audiobook },
+      attachTo: document.body,
+      global: { plugins: [(await import('pinia')).createPinia()] },
+    })
+
+    await new Promise((resolve) => setTimeout(resolve, 200))
+    ;(wrapper.vm as unknown).selectedRootId = 0
+    ;(wrapper.vm as unknown).customRootPath = 'C:\\root\\New Author\\New Book'
+    await wrapper.vm.$nextTick()
+
+    const savePromise = (wrapper.vm as unknown).handleSave()
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    const resolver = (wrapper.vm as unknown).moveConfirmResolver
+    if (resolver) resolver({ proceed: true, moveFiles: true, deleteEmptySource: true })
+    await savePromise
+
+    const { useMoveJobsStore } = await import('@/stores/moveJobs')
+    const moveJobsStore = useMoveJobsStore()
+    expect(moveJobsStore.trackedById['job-canonical']?.target).toBe(
+      'C:/root/Canonical Author/Canonical Book',
+    )
+  })
+
+  it('rejects an untrackable physical move response', async () => {
+    const { apiService } = await import('@/services/api')
+    vi.mocked(apiService.moveAudiobook).mockResolvedValueOnce({ message: 'queued' })
+    const wrapper = mount(EditAudiobookModal, {
+      props: { isOpen: true, audiobook },
+      attachTo: document.body,
+      global: { plugins: [(await import('pinia')).createPinia()] },
+    })
+
+    await new Promise((resolve) => setTimeout(resolve, 200))
+    ;(wrapper.vm as unknown).selectedRootId = 0
+    ;(wrapper.vm as unknown).customRootPath = 'C:\\root\\New Author\\New Book'
+    await wrapper.vm.$nextTick()
+
+    const savePromise = (wrapper.vm as unknown).handleSave()
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    const resolver = (wrapper.vm as unknown).moveConfirmResolver
+    if (resolver) resolver({ proceed: true, moveFiles: true, deleteEmptySource: true })
+    await savePromise
+
+    const { useMoveJobsStore } = await import('@/stores/moveJobs')
+    const moveJobsStore = useMoveJobsStore()
+    expect(Object.keys(moveJobsStore.trackedById)).not.toContain('undefined')
+    expect(wrapper.emitted('saved')).toBeUndefined()
+    expect(toastMocks.error).toHaveBeenCalledWith(
+      'Move failed',
+      'The destination update could not be confirmed. Review the move queue before retrying.',
+    )
   })
 
   it('Edition-only changes should persist through updateAudiobook', async () => {

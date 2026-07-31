@@ -125,6 +125,34 @@ internal sealed partial class AudiobookContentMoveService
             if (entry.CleanupState == MoveJobEntryCleanupState.Quarantined
                 && !File.Exists(quarantineFile))
             {
+                if (entry.CleanupProtectionVersion
+                        >= DestinationRetentionCleanupProtectionVersion)
+                {
+                    if (!await TryCompleteMissingQuarantineRetentionAsync(
+                            cleanupRequest,
+                            source,
+                            target,
+                            entry,
+                            targetSemantics,
+                            cancellationToken))
+                    {
+                        throw new MoveNeedsAttentionException(
+                            $"Source and quarantine files are absent without the persisted destination retention guard: {entry.RelativePath}");
+                    }
+                }
+                else
+                {
+                    // Compatibility for active jobs persisted before destination
+                    // retention was introduced. The source is already absent, so
+                    // the only safe convergence available is to reverify the exact
+                    // destination bytes before accepting the legacy transition.
+                    await VerifyPublishedManifestAsync(
+                        target,
+                        [entry],
+                        targetSemantics,
+                        cancellationToken);
+                }
+
                 await UpdateCleanupStateAsync(
                     jobId,
                     leaseToken,
@@ -208,8 +236,26 @@ internal sealed partial class AudiobookContentMoveService
             {
                 if (!File.Exists(sourceFile))
                 {
+                    if (entry.CleanupState == MoveJobEntryCleanupState.Quarantined
+                        && await TryCompleteMissingQuarantineRetentionAsync(
+                            cleanupRequest,
+                            source,
+                            target,
+                            entry,
+                            targetSemantics,
+                            cancellationToken))
+                    {
+                        await UpdateCleanupStateAsync(
+                            jobId,
+                            leaseToken,
+                            entry.RelativePath,
+                            MoveJobEntryCleanupState.Deleted,
+                            cancellationToken);
+                        continue;
+                    }
+
                     throw new MoveNeedsAttentionException(
-                        $"Source file disappeared before cleanup: {entry.RelativePath}");
+                        $"Source file disappeared before cleanup without durable target retention: {entry.RelativePath}");
                 }
 
                 await RevalidateSourceToQuarantineMoveAsync(

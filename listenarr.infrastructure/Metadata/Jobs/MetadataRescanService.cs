@@ -71,7 +71,6 @@ namespace Listenarr.Infrastructure.Metadata.Jobs
                     {
                         using var taskScope = scopeFactory.CreateScope();
                         var taskFileRepository = taskScope.ServiceProvider.GetRequiredService<IAudiobookFileRepository>();
-                        var taskMetadataService = taskScope.ServiceProvider.GetRequiredService<IMetadataService>();
 
                         var file = await taskFileRepository.GetByIdAsync(candidate.Id, cancellationToken);
                         if (file == null)
@@ -95,16 +94,32 @@ namespace Listenarr.Infrastructure.Metadata.Jobs
                             file.Id,
                             LogRedaction.SanitizeFilePath(observedPath));
 
+                        var taskFileService = taskScope.ServiceProvider
+                            .GetRequiredService<IAudiobookFileService>();
                         cancellationToken.ThrowIfCancellationRequested();
-                        var meta = await taskMetadataService.ExtractFileMetadataAsync(observedPath);
-                        if (meta != null)
-                        {
-                            await ApplyExtractedMetadataAsync(
-                                file.Id,
-                                file.AudiobookId,
+                        using var registrationLease =
+                            PinnedAudiobookFileRegistrationLease.Open(
                                 observedPath,
-                                meta,
-                                cancellationToken);
+                                file.PhysicalObjectIdentity);
+                        if (!registrationLease.MatchesCurrentPublication())
+                        {
+                            logger.LogDebug(
+                                "Skipped metadata rescan for file id={Id}; the stored pathname no longer identifies the pinned generation",
+                                file.Id);
+                            return;
+                        }
+
+                        if (await taskFileService.RefreshPhysicalGenerationAsync(
+                                new Audiobook { Id = file.AudiobookId },
+                                file.Id,
+                                file.PhysicalObjectIdentity,
+                                registrationLease,
+                                "MetadataRescan",
+                                cancellationToken))
+                        {
+                            logger.LogInformation(
+                                "Updated metadata for file id={Id}",
+                                file.Id);
                         }
                     }
                     catch (OperationCanceledException)
@@ -141,71 +156,46 @@ namespace Listenarr.Infrastructure.Metadata.Jobs
                         return;
                     }
 
-                    var audiobook = await audiobookRepository.GetByIdAsync(currentFile.AudiobookId);
-                    if (audiobook != null && await AreSameLibraryPathAsync(
-                        audiobook,
-                        currentFile.Path,
-                        applyScope.ServiceProvider.GetRequiredService<IFileSystemSemanticsResolver>(),
-                        applyScope.ServiceProvider.GetRequiredService<IRootFolderService>(),
-                        token))
+                    var audiobook = await audiobookRepository.GetByIdAsync(
+                        currentFile.AudiobookId);
+                    var clearLegacyPath = audiobook != null
+                        && await AreSameLibraryPathAsync(
+                            audiobook,
+                            currentFile.Path,
+                            applyScope.ServiceProvider
+                                .GetRequiredService<IFileSystemSemanticsResolver>(),
+                            applyScope.ServiceProvider
+                                .GetRequiredService<IRootFolderService>(),
+                            token);
+                    if (!await fileRepository.DeletePhysicalGenerationAsync(
+                            currentFile.Id,
+                            currentFile.AudiobookId,
+                            currentFile.Path,
+                            currentFile.PhysicalObjectIdentity,
+                            token))
                     {
-                        audiobook.FilePath = null;
-                        audiobook.FileSize = null;
-                        await audiobookRepository.UpdateAsync(audiobook);
+                        logger.LogInformation(
+                            "Preserved non-audio AudiobookFile entry id={Id} because its row changed before removal",
+                            currentFile.Id);
+                        return;
                     }
 
-                    await fileRepository.DeleteAsync(currentFile.Id, token);
+                    if (clearLegacyPath)
+                    {
+                        audiobook!.FilePath = null;
+                        audiobook.FileSize = null;
+                        if (!await audiobookRepository.UpdateAsync(audiobook))
+                        {
+                            logger.LogWarning(
+                                "Removed non-audio AudiobookFile entry id={Id}, but its audiobook disappeared before legacy path cleanup",
+                                currentFile.Id);
+                        }
+                    }
+
                     logger.LogInformation(
                         "Removed non-audio AudiobookFile entry id={Id} path={Path}",
                         currentFile.Id,
                         LogRedaction.SanitizeFilePath(currentFile.Path));
-                },
-                cancellationToken);
-        }
-
-        private async Task ApplyExtractedMetadataAsync(
-            int fileId,
-            int audiobookId,
-            string observedPath,
-            AudioMetadata metadata,
-            CancellationToken cancellationToken)
-        {
-            await audiobookOperationCoordinator.ExecuteExclusiveAsync(
-                audiobookId,
-                async token =>
-                {
-                    using var applyScope = scopeFactory.CreateScope();
-                    var fileRepository = applyScope.ServiceProvider.GetRequiredService<IAudiobookFileRepository>();
-                    var currentFile = await fileRepository.GetByIdAsync(fileId, token);
-                    if (currentFile == null || currentFile.AudiobookId != audiobookId)
-                    {
-                        return;
-                    }
-
-                    if (!string.Equals(currentFile.Path, observedPath, StringComparison.Ordinal))
-                    {
-                        logger.LogDebug(
-                            "Skipped stale metadata extraction for file id={Id}; path changed from {ObservedPath} to {CurrentPath}",
-                            fileId,
-                            LogRedaction.SanitizeFilePath(observedPath),
-                            LogRedaction.SanitizeFilePath(currentFile.Path));
-                        return;
-                    }
-
-                    var fileInfo = new FileInfo(observedPath);
-                    currentFile.Size = fileInfo.Exists ? fileInfo.Length : currentFile.Size;
-                    currentFile.DurationSeconds = Math.Abs(metadata.Duration.TotalSeconds) > double.Epsilon
-                        ? metadata.Duration.TotalSeconds
-                        : currentFile.DurationSeconds;
-                    currentFile.Format = !string.IsNullOrEmpty(metadata.Format)
-                        ? metadata.Format
-                        : currentFile.Format;
-                    currentFile.Bitrate = metadata.BitRate != 0 ? metadata.BitRate : currentFile.Bitrate;
-                    currentFile.SampleRate = metadata.SampleRate != 0 ? metadata.SampleRate : currentFile.SampleRate;
-                    currentFile.Channels = metadata.Channels != 0 ? metadata.Channels : currentFile.Channels;
-
-                    await fileRepository.UpdateAsync(currentFile, token);
-                    logger.LogInformation("Updated metadata for file id={Id}", currentFile.Id);
                 },
                 cancellationToken);
         }

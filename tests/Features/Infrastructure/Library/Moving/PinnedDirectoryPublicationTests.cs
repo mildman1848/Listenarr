@@ -115,6 +115,50 @@ public sealed class PinnedDirectoryCreationTests : BaseTests
             await File.ReadAllTextAsync(Path.Join(destinationParent, "book.m4b")));
     }
 
+    [WindowsFact]
+    public async Task OpenOrRepairOwnedAsync_InterruptedRetentionCopy_RebuildsFromPinnedPublication()
+    {
+        var parent = FileService.GetTempDirectory(
+            "pinned-destination-retention-repair");
+        const string publicName = "book.m4b";
+        var publicPath = await FileService.GetFileAsync(
+            parent,
+            publicName,
+            "verified audio");
+        var operationId = Guid.NewGuid();
+        var retentionName = PinnedDestinationRetentionGuard.CreateRetentionName(
+            operationId,
+            publicName);
+        var retentionPath = Path.Join(parent, retentionName);
+        await File.WriteAllTextAsync(retentionPath, "partial");
+        var expectedBytes = await File.ReadAllBytesAsync(publicPath);
+        var expectedHash = Convert.ToHexString(SHA256.HashData(expectedBytes));
+        using var anchor = PinnedDirectoryCreation.OpenPinnedDirectoryNoFollow(
+            parent);
+
+        var guard = await PinnedDestinationRetentionGuard
+            .OpenOrRepairOwnedAsync(
+                anchor,
+                publicName,
+                retentionName,
+                expectedBytes.LongLength,
+                expectedHash,
+                CancellationToken.None);
+
+        Assert.NotNull(guard);
+        using (guard)
+        {
+            Assert.True(await guard.CurrentPublicationMatchesAsync(
+                CancellationToken.None));
+            Assert.True(await guard.TryLinearizePublicationAsync(
+                CancellationToken.None));
+            Assert.True(await guard.CompleteAsync(CancellationToken.None));
+        }
+
+        Assert.Equal("verified audio", await File.ReadAllTextAsync(publicPath));
+        Assert.False(File.Exists(retentionPath));
+    }
+
     [Fact]
     public async Task DeleteOpenedFile_RemovesVerifiedPinnedEntry()
     {
@@ -132,12 +176,61 @@ public sealed class PinnedDirectoryCreationTests : BaseTests
     }
 
     [Fact]
+    public void TryOpenExistingFileWithOutcome_MissingFile_IsNotFound()
+    {
+        var parent = FileService.GetTempDirectory("pinned-file-open-missing");
+        using var anchor = PinnedDirectoryCreation.OpenPinnedDirectoryNoFollow(parent);
+
+        var outcome = anchor.TryOpenExistingFileWithOutcome(
+            "missing-marker.json",
+            requireDeleteAccess: true,
+            out var entry);
+
+        Assert.Equal(PinnedFileOpenOutcome.NotFound, outcome);
+        Assert.Null(entry);
+    }
+
+    [WindowsFact]
+    public async Task TryOpenExistingFileWithOutcome_WindowsSharingViolation_IsUnavailable()
+    {
+
+        var parent = FileService.GetTempDirectory("pinned-file-open-locked");
+        var marker = await FileService.GetFileAsync(
+            parent,
+            "marker.json",
+            "owned marker");
+        using var anchor = PinnedDirectoryCreation.OpenPinnedDirectoryNoFollow(parent);
+        using (File.Open(
+            marker,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.Read))
+        {
+            var lockedOutcome = anchor.TryOpenExistingFileWithOutcome(
+                "marker.json",
+                requireDeleteAccess: true,
+                out var lockedEntry);
+
+            Assert.Equal(PinnedFileOpenOutcome.Unavailable, lockedOutcome);
+            Assert.Null(lockedEntry);
+            Assert.True(File.Exists(marker));
+        }
+
+        var availableOutcome = anchor.TryOpenExistingFileWithOutcome(
+            "marker.json",
+            requireDeleteAccess: true,
+            out var availableEntry);
+        using (availableEntry)
+        {
+            Assert.Equal(PinnedFileOpenOutcome.Opened, availableOutcome);
+            Assert.NotNull(availableEntry);
+            Assert.True(availableEntry.VisiblePathMatches());
+        }
+    }
+
+    [LinuxFact]
     public async Task DeleteOpenedFile_UnixReplacementAtRetirementBoundary_IsPreserved()
     {
-        if (OperatingSystem.IsWindows())
-        {
-            return;
-        }
 
         var parent = FileService.GetTempDirectory("pinned-file-delete-race");
         var file = await FileService.GetFileAsync(parent, "marker.json", "owned");
@@ -190,13 +283,9 @@ public sealed class PinnedDirectoryCreationTests : BaseTests
         Assert.Equal("destination", await File.ReadAllTextAsync(destinationFile));
     }
 
-    [Fact]
+    [WindowsFact]
     public async Task PublishCreatedDirectoryAs_WindowsNonEmptyHierarchyWithLiveDescendant_FailsClosed()
     {
-        if (!OperatingSystem.IsWindows())
-        {
-            return;
-        }
 
         var parent = FileService.GetTempDirectory("pinned-directory-publication-live-hierarchy");
         using var creation = PinnedDirectoryCreation.TryCreateForPublication(parent, "prepared");
@@ -243,6 +332,148 @@ public sealed class PinnedDirectoryCreationTests : BaseTests
     }
 
     [Fact]
+    public async Task ReplaceWithinParent_ExpectedDestinationReplacedBeforeCommit_PreservesEveryGeneration()
+    {
+        var parent = FileService.GetTempDirectory(
+            "pinned-file-conditional-replacement-race");
+        var temporaryPath = await FileService.GetFileAsync(
+            parent,
+            "marker.json.pending",
+            "new marker");
+        var destinationPath = await FileService.GetFileAsync(
+            parent,
+            "marker.json",
+            "expected predecessor");
+        var predecessorPath = Path.Join(parent, "marker.predecessor");
+        using (var anchor =
+            PinnedDirectoryCreation.OpenPinnedDirectoryNoFollow(parent))
+        using (var temporary = anchor.OpenExistingFile(
+            "marker.json.pending",
+            requireDeleteAccess: true))
+        using (var expected = anchor.OpenExistingFile(
+            "marker.json",
+            requireDeleteAccess: false))
+        {
+            Assert.ThrowsAny<Exception>(() => temporary.ReplaceWithinParent(
+                "marker.json",
+                expected,
+                () =>
+                {
+                    File.Move(destinationPath, predecessorPath);
+                    File.WriteAllText(destinationPath, "external replacement");
+                }));
+        }
+
+        Assert.Equal("new marker", await File.ReadAllTextAsync(temporaryPath));
+        Assert.Equal(
+            "expected predecessor",
+            await File.ReadAllTextAsync(predecessorPath));
+        Assert.Equal(
+            "external replacement",
+            await File.ReadAllTextAsync(destinationPath));
+    }
+
+    [Fact]
+    public async Task ReplaceWithinParent_PublishedGenerationReplacedBeforePredecessorRetirement_PreservesPredecessor()
+    {
+        var parent = FileService.GetTempDirectory(
+            "pinned-file-post-publication-replacement-race");
+        var temporaryPath = await FileService.GetFileAsync(
+            parent,
+            "marker.json.pending",
+            "new marker");
+        var destinationPath = await FileService.GetFileAsync(
+            parent,
+            "marker.json",
+            "expected predecessor");
+        var displacedPublishedPath = Path.Join(parent, "published-generation.marker");
+        var replacementSucceeded = false;
+        Exception? failure;
+        using (var anchor =
+            PinnedDirectoryCreation.OpenPinnedDirectoryNoFollow(parent))
+        using (var temporary = anchor.OpenExistingFile(
+            "marker.json.pending",
+            requireDeleteAccess: true))
+        using (var expected = anchor.OpenExistingFile(
+            "marker.json",
+            requireDeleteAccess: false))
+        {
+            failure = Record.Exception(() => temporary.ReplaceWithinParent(
+                "marker.json",
+                expected,
+                afterPublication: () =>
+                {
+                    try
+                    {
+                        File.Move(destinationPath, displacedPublishedPath);
+                        File.WriteAllText(destinationPath, "external replacement");
+                        replacementSucceeded = true;
+                    }
+                    catch (IOException)
+                    {
+                        // Windows pins the published generation without delete sharing.
+                    }
+                    catch (UnauthorizedAccessException)
+                    {
+                        // Some Windows filesystems report sharing denial as access denied.
+                    }
+                }));
+        }
+
+        if (!replacementSucceeded)
+        {
+            Assert.Null(failure);
+            Assert.Equal("new marker", await File.ReadAllTextAsync(destinationPath));
+            Assert.False(File.Exists(temporaryPath));
+            Assert.Empty(Directory.EnumerateFiles(
+                parent,
+                "*.listenarr-predecessor.tmp",
+                SearchOption.TopDirectoryOnly));
+            return;
+        }
+
+        Assert.IsType<InvalidOperationException>(failure);
+        Assert.Equal("external replacement", await File.ReadAllTextAsync(destinationPath));
+        Assert.Equal("new marker", await File.ReadAllTextAsync(displacedPublishedPath));
+        Assert.Equal("expected predecessor", await File.ReadAllTextAsync(temporaryPath));
+    }
+
+    [Fact]
+    public async Task ReplaceWithinParent_ExpectedDestinationUnchanged_PublishesAndRetiresPredecessor()
+    {
+        var parent = FileService.GetTempDirectory(
+            "pinned-file-conditional-replacement-success");
+        await FileService.GetFileAsync(
+            parent,
+            "marker.json.pending",
+            "new marker");
+        await FileService.GetFileAsync(
+            parent,
+            "marker.json",
+            "expected predecessor");
+        using (var anchor =
+            PinnedDirectoryCreation.OpenPinnedDirectoryNoFollow(parent))
+        using (var temporary = anchor.OpenExistingFile(
+            "marker.json.pending",
+            requireDeleteAccess: true))
+        using (var expected = anchor.OpenExistingFile(
+            "marker.json",
+            requireDeleteAccess: false))
+        {
+            temporary.ReplaceWithinParent("marker.json", expected);
+        }
+
+        Assert.Equal(
+            "new marker",
+            await File.ReadAllTextAsync(Path.Join(parent, "marker.json")));
+        Assert.False(File.Exists(Path.Join(parent, "marker.json.pending")));
+        Assert.Empty(Directory.EnumerateFiles(
+            parent,
+            "*.listenarr-predecessor.tmp",
+            SearchOption.TopDirectoryOnly));
+    }
+
+    [Fact]
     public async Task PublishNewFileAsync_TemporaryNameReplacedBeforeCleanup_PreservesReplacementBytes()
     {
         var parent = FileService.GetTempDirectory("pinned-file-publication-cleanup-race");
@@ -275,13 +506,9 @@ public sealed class PinnedDirectoryCreationTests : BaseTests
         Assert.Contains("external bytes", survivingContents);
     }
 
-    [Fact]
+    [LinuxFact]
     public async Task PublishNewFileAsync_UnixTemporaryReplacement_IsDetectedAfterPublication()
     {
-        if (OperatingSystem.IsWindows())
-        {
-            return;
-        }
 
         var parent = FileService.GetTempDirectory("pinned-file-publication-leaf-race");
         var temporaryName = "marker.json.writing-test";

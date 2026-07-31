@@ -131,7 +131,6 @@ public sealed class BackendArchitectureTests : BaseTests
             "Listenarr.Tests.Features.Infrastructure.Configuration.OperationalOptionsValidatorTests",
             "Listenarr.Tests.Features.Infrastructure.Configuration.Paths.ApplicationPathServiceTests",
             "Listenarr.Tests.Features.Infrastructure.Converters.JsonValueConvertersTests",
-            "Listenarr.Tests.Features.Infrastructure.DependencyInjection.DependencyInjectionTests",
             "Listenarr.Tests.Features.Infrastructure.DependencyInjection.HostedServicesRegistrationTests",
             "Listenarr.Tests.Features.Infrastructure.DependencyInjection.InfrastructureServiceRegistrationExtensionsTests",
             "Listenarr.Tests.Features.Infrastructure.DownloadClients.Common.UsenetAdapterFilteringTests",
@@ -146,7 +145,6 @@ public sealed class BackendArchitectureTests : BaseTests
             "Listenarr.Tests.Features.Infrastructure.Downloads.Processing.DownloadProcessingJobCleanupProcessorTests",
             "Listenarr.Tests.Features.Infrastructure.FileSystem.ArchiveExtractorSafetyTests",
             "Listenarr.Tests.Features.Infrastructure.FileSystem.FileStorageSafetyTests",
-            "Listenarr.Tests.Features.Infrastructure.Library.Moving.MoveBackgroundServiceTests",
             "Listenarr.Tests.Features.Infrastructure.Library.Moving.MoveBackgroundService_BroadcastTests",
             "Listenarr.Tests.Features.Infrastructure.Library.Moving.MoveBackgroundService_FailureTests",
             "Listenarr.Tests.Features.Infrastructure.Library.Moving.MoveBackgroundService_FilePathPreservationTests",
@@ -208,6 +206,57 @@ public sealed class BackendArchitectureTests : BaseTests
         Assert.True(
             staleExemptions.Length == 0,
             $"Remove repaired legacy exemptions:{Environment.NewLine}{string.Join(Environment.NewLine, staleExemptions)}");
+    }
+
+    [Fact]
+    public void PlatformAndCapabilitySpecificTests_DoNotSilentlyPass()
+    {
+        var testsRoot = Path.Join(RepositoryRoot, "tests");
+        var silentPreconditionReturnPatterns = new[]
+        {
+            new Regex(
+                @"if\s*\(\s*!?OperatingSystem\.Is(?:Windows|Linux)\(\)\s*\)\s*(?:\{\s*)?return\s*;",
+                RegexOptions.CultureInvariant),
+            new Regex(
+                @"if\s*\(\s*!TryCreate[A-Za-z]+\([^)]*\)\s*\)\s*\{[^}]*\breturn\s*;",
+                RegexOptions.CultureInvariant | RegexOptions.Singleline),
+            new Regex(
+                @"if\s*\(\s*![A-Za-z_][A-Za-z0-9_]*\s*\)\s*\{\s*return\s*;",
+                RegexOptions.CultureInvariant | RegexOptions.Singleline),
+        };
+        var violations = Directory
+            .EnumerateFiles(testsRoot, "*.cs", SearchOption.AllDirectories)
+            .Where(file =>
+            {
+                var source = File.ReadAllText(file);
+                return silentPreconditionReturnPatterns.Any(pattern =>
+                    pattern.IsMatch(source));
+            })
+            .Select(file => Path.GetRelativePath(RepositoryRoot, file))
+            .Order(StringComparer.Ordinal)
+            .ToArray();
+
+        Assert.True(
+            violations.Length == 0,
+            "Platform or capability-specific tests must report a real skip or fail when their required precondition is unavailable:"
+            + Environment.NewLine
+            + string.Join(Environment.NewLine, violations));
+    }
+
+    [Fact]
+    public void RootFolderController_DoesNotUseGenericEnumParsingForPublicRequestValues()
+    {
+        var controllerPath = Path.Join(
+            RepositoryRoot,
+            "listenarr.api",
+            "Features",
+            "Library",
+            "RootFoldersController.cs");
+
+        Assert.DoesNotContain(
+            "Enum.TryParse<",
+            File.ReadAllText(controllerPath),
+            StringComparison.Ordinal);
     }
 
     private static string? DescribeTestConventionViolation(Type testType)

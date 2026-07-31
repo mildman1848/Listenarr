@@ -10,116 +10,210 @@ internal static partial class ScanFileDiscovery
         string scanRoot,
         Guid jobId,
         ILogger logger,
-        FileSystemPathSemantics semantics)
+        FileSystemPathSemantics semantics,
+        PinnedDirectoryCreation.PinnedDirectoryAnchor? pinnedScanRoot)
     {
         var candidates = new HashSet<string>(semantics.Comparer);
         var enumeratedDirectories = new HashSet<string>(semantics.Comparer);
+        var directoryObjectIdentities = new Dictionary<string, string>(
+            semantics.Comparer);
+        var fileObjectIdentities = new Dictionary<string, string>(
+            semantics.Comparer);
         var issues = new List<ScanDiscoveryIssue>();
-        var directories = new Stack<string>();
-        directories.Push(scanRoot);
+        var directories = new Stack<DirectoryEnumerationAnchor>();
+        var root = pinnedScanRoot?.Duplicate()
+            ?? PinnedDirectoryCreation.OpenPinnedBoundary(scanRoot);
+        directories.Push(new DirectoryEnumerationAnchor(
+            root,
+            root.GetDirectoryObjectIdentity()));
 
-        while (directories.Count > 0)
+        try
         {
-            var directory = directories.Pop();
-            string normalizedDirectory;
-            try
+            while (directories.Count > 0)
             {
-                normalizedDirectory = Path.GetFullPath(directory);
-            }
-            catch (Exception exception) when (IsFilesystemException(exception))
-            {
-                RecordEnumerationFailure(
-                    issues,
-                    logger,
-                    jobId,
-                    directory,
-                    exception);
-                continue;
-            }
-
-            try
-            {
-                foreach (var file in fileSystem.EnumerateFiles(normalizedDirectory).ToList())
+                var pending = directories.Pop();
+                using var directory = pending.Anchor;
+                var localCandidates = new Dictionary<string, string>(
+                    semantics.Comparer);
+                var localChildren = new List<DirectoryEnumerationAnchor>();
+                try
                 {
-                    try
+                    if (!DirectoryIdentityMatches(directory, pending.ObjectIdentity))
                     {
-                        if (fileSystem.IsReparsePoint(file))
-                        {
-                            issues.Add(new ScanDiscoveryIssue(
-                                ScanDiscoveryIssueKind.LinkSkipped,
-                                file,
-                                "Linked files are not scanned."));
-                            continue;
-                        }
-
-                        if (FileUtils.IsAudioFile(file))
-                        {
-                            candidates.Add(FileSystemPathIdentity.Canonicalize(
-                                Path.GetFullPath(file),
-                                semantics.Syntax));
-                        }
-                    }
-                    catch (Exception exception) when (IsFilesystemException(exception))
-                    {
-                        RecordEnumerationFailure(
+                        RecordDirectoryGenerationChange(
                             issues,
                             logger,
                             jobId,
-                            file,
-                            exception);
+                            directory.FullPath);
+                        continue;
                     }
-                }
 
-                foreach (var child in fileSystem.EnumerateDirectories(normalizedDirectory).ToList())
-                {
-                    try
+                    foreach (var visibleFile in fileSystem
+                        .EnumerateFiles(directory.FullPath)
+                        .ToList())
                     {
-                        if (fileSystem.IsReparsePoint(child))
+                        try
                         {
-                            logger.LogWarning(
-                                "Skipped linked directory while scanning job {JobId}: {Dir}",
+                            if (fileSystem.IsReparsePoint(visibleFile))
+                            {
+                                issues.Add(new ScanDiscoveryIssue(
+                                    ScanDiscoveryIssueKind.LinkSkipped,
+                                    visibleFile,
+                                    "Linked files are not scanned."));
+                                continue;
+                            }
+
+                            var fileName = Path.GetFileName(visibleFile);
+                            using var pinnedFile = directory.OpenExistingFile(
+                                fileName,
+                                requireDeleteAccess: false);
+                            if (!pinnedFile.VisiblePathMatches())
+                            {
+                                RecordDirectoryGenerationChange(
+                                    issues,
+                                    logger,
+                                    jobId,
+                                    visibleFile);
+                                continue;
+                            }
+
+                            if (FileUtils.IsAudioFile(visibleFile))
+                            {
+                                var canonicalFile =
+                                    FileSystemPathIdentity.Canonicalize(
+                                        pinnedFile.FullPath,
+                                        semantics.Syntax);
+                                localCandidates[canonicalFile] =
+                                    pinnedFile.GetObjectIdentity();
+                            }
+                        }
+                        catch (Exception exception) when (
+                            IsFilesystemException(exception)
+                            || exception is InvalidOperationException)
+                        {
+                            RecordEnumerationFailure(
+                                issues,
+                                logger,
                                 jobId,
-                                child);
-                            issues.Add(new ScanDiscoveryIssue(
-                                ScanDiscoveryIssueKind.LinkSkipped,
-                                child,
-                                "Linked directories are not traversed."));
-                            continue;
+                                visibleFile,
+                                exception);
+                        }
+                    }
+
+                    foreach (var visibleChild in fileSystem
+                        .EnumerateDirectories(directory.FullPath)
+                        .ToList())
+                    {
+                        try
+                        {
+                            if (fileSystem.IsReparsePoint(visibleChild))
+                            {
+                                logger.LogWarning(
+                                    "Skipped linked directory while scanning job {JobId}: {Dir}",
+                                    jobId,
+                                    LogRedaction.SanitizeFilePath(visibleChild));
+                                issues.Add(new ScanDiscoveryIssue(
+                                    ScanDiscoveryIssueKind.LinkSkipped,
+                                    visibleChild,
+                                    "Linked directories are not traversed."));
+                                continue;
+                            }
+
+                            var childName = Path.GetFileName(
+                                Path.TrimEndingDirectorySeparator(visibleChild));
+                            var childAnchor = directory.OpenExistingChild(childName);
+                            localChildren.Add(new DirectoryEnumerationAnchor(
+                                childAnchor,
+                                childAnchor.GetDirectoryObjectIdentity()));
+                        }
+                        catch (Exception exception) when (
+                            IsFilesystemException(exception)
+                            || exception is InvalidOperationException)
+                        {
+                            RecordEnumerationFailure(
+                                issues,
+                                logger,
+                                jobId,
+                                visibleChild,
+                                exception);
+                        }
+                    }
+
+                    if (!DirectoryIdentityMatches(directory, pending.ObjectIdentity))
+                    {
+                        foreach (var child in localChildren)
+                        {
+                            child.Anchor.Dispose();
                         }
 
+                        RecordDirectoryGenerationChange(
+                            issues,
+                            logger,
+                            jobId,
+                            directory.FullPath);
+                        continue;
+                    }
+
+                    foreach (var candidate in localCandidates)
+                    {
+                        candidates.Add(candidate.Key);
+                        fileObjectIdentities[candidate.Key] = candidate.Value;
+                    }
+
+                    var canonicalDirectory =
+                        FileSystemPathIdentity.Canonicalize(
+                            directory.FullPath,
+                            semantics.Syntax);
+                    enumeratedDirectories.Add(canonicalDirectory);
+                    directoryObjectIdentities[canonicalDirectory] =
+                        pending.ObjectIdentity;
+                    foreach (var child in localChildren)
+                    {
                         directories.Push(child);
                     }
-                    catch (Exception exception) when (IsFilesystemException(exception))
-                    {
-                        RecordEnumerationFailure(
-                            issues,
-                            logger,
-                            jobId,
-                            child,
-                            exception);
-                    }
                 }
+                catch (Exception exception) when (
+                    IsFilesystemException(exception)
+                    || exception is InvalidOperationException)
+                {
+                    foreach (var child in localChildren)
+                    {
+                        child.Anchor.Dispose();
+                    }
 
-                enumeratedDirectories.Add(FileSystemPathIdentity.Canonicalize(
-                    normalizedDirectory,
-                    semantics.Syntax));
+                    RecordEnumerationFailure(
+                        issues,
+                        logger,
+                        jobId,
+                        directory.FullPath,
+                        exception);
+                }
             }
-            catch (Exception exception) when (IsFilesystemException(exception))
+        }
+        finally
+        {
+            while (directories.TryPop(out var pending))
             {
-                RecordEnumerationFailure(
-                    issues,
-                    logger,
-                    jobId,
-                    normalizedDirectory,
-                    exception);
+                pending.Anchor.Dispose();
             }
         }
 
         return new EnumerationResult(
             candidates.OrderBy(path => path, semantics.Comparer).ToList(),
             enumeratedDirectories.OrderBy(path => path, semantics.Comparer).ToList(),
+            directoryObjectIdentities,
+            fileObjectIdentities,
             issues);
     }
+
+    private static bool DirectoryIdentityMatches(
+        PinnedDirectoryCreation.PinnedDirectoryAnchor directory,
+        string expectedIdentity) =>
+        directory.VisiblePathMatches()
+        && string.Equals(
+            directory.GetDirectoryObjectIdentity(),
+            expectedIdentity,
+            StringComparison.Ordinal);
 
     private static bool IsFilesystemException(Exception exception) =>
         exception is IOException
@@ -127,7 +221,8 @@ internal static partial class ScanFileDiscovery
             or System.Security.SecurityException
             or ArgumentException
             or NotSupportedException
-            or PathTooLongException;
+            or PathTooLongException
+            or System.ComponentModel.Win32Exception;
 
     private static void RecordEnumerationFailure(
         ICollection<ScanDiscoveryIssue> issues,
@@ -140,15 +235,37 @@ internal static partial class ScanFileDiscovery
             exception,
             "Failed to enumerate path for scan job {JobId}: {Path}",
             jobId,
-            path);
+            LogRedaction.SanitizeFilePath(path));
         issues.Add(new ScanDiscoveryIssue(
             ScanDiscoveryIssueKind.EnumerationFailure,
             path,
-            exception.Message));
+            "The path could not be enumerated safely."));
     }
+
+    private static void RecordDirectoryGenerationChange(
+        ICollection<ScanDiscoveryIssue> issues,
+        ILogger logger,
+        Guid jobId,
+        string path)
+    {
+        logger.LogWarning(
+            "Directory or file generation changed while scanning job {JobId}: {Path}",
+            jobId,
+            LogRedaction.SanitizeFilePath(path));
+        issues.Add(new ScanDiscoveryIssue(
+            ScanDiscoveryIssueKind.DirectoryGenerationChanged,
+            path,
+            "A directory or file generation changed while it was being enumerated."));
+    }
+
+    private sealed record DirectoryEnumerationAnchor(
+        PinnedDirectoryCreation.PinnedDirectoryAnchor Anchor,
+        string ObjectIdentity);
 
     private sealed record EnumerationResult(
         IReadOnlyList<string> Candidates,
         IReadOnlyList<string> EnumeratedDirectories,
+        IReadOnlyDictionary<string, string> DirectoryObjectIdentities,
+        IReadOnlyDictionary<string, string> FileObjectIdentities,
         IReadOnlyList<ScanDiscoveryIssue> Issues);
 }

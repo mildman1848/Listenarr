@@ -80,6 +80,12 @@ jobs:
         working-directory: fe
         run: npm run build --if-present
 
+      - name: Repository path safety
+        run: npm run --silent validate:repository-paths
+
+      - name: Repository path-safety tests
+        run: npm run --silent test:repository-paths
+
       - name: Frontend lint
         run: npm run --silent lint:frontend
 

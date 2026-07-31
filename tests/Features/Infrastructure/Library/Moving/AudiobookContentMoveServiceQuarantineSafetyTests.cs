@@ -129,10 +129,9 @@ public partial class AudiobookContentMoveServiceTests
             external,
             "book.m4b",
             "verified audio");
-        if (!TryCreateDirectoryLink(quarantineRoot, external))
-        {
-            return;
-        }
+        Assert.True(
+            TryCreateDirectoryLink(quarantineRoot, external),
+            "The required directory link could not be created.");
 
         try
         {
@@ -181,10 +180,9 @@ public partial class AudiobookContentMoveServiceTests
         var external = FileService.GetTempDirectory("content-move-linked-quarantine-external");
         var externalFile = await FileService.GetFileAsync(external, "book.m4b", "verified audio");
         var linkedDirectory = Path.Join(quarantineRoot, "nested");
-        if (!TryCreateDirectoryLink(linkedDirectory, external))
-        {
-            return;
-        }
+        Assert.True(
+            TryCreateDirectoryLink(linkedDirectory, external),
+            "The required directory link could not be created.");
 
         try
         {

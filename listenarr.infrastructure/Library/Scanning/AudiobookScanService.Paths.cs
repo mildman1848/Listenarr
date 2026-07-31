@@ -63,7 +63,7 @@ internal sealed partial class AudiobookScanService
                 diagnostics.Add(new AudiobookScanDiagnostic(
                     "OwnershipIdentityInvalid",
                     file.Path,
-                    exception.Message));
+                    "The stored ownership identity is invalid for this filesystem."));
                 continue;
             }
 
@@ -153,9 +153,19 @@ internal sealed partial class AudiobookScanService
             return audiobook.BasePath;
         }
 
+        var previousBasePath = audiobook.BasePath;
         audiobook.BasePath = selected;
         cancellationToken.ThrowIfCancellationRequested();
-        await audiobookRepository.UpdateAsync(audiobook);
+        if (!await audiobookRepository.UpdateAsync(audiobook))
+        {
+            audiobook.BasePath = previousBasePath;
+            diagnostics.Add(new AudiobookScanDiagnostic(
+                "BasePathPersistenceFailed",
+                selected,
+                "The planned BasePath could not be persisted and was not applied."));
+            return previousBasePath;
+        }
+
         logger.LogInformation(
             "Updated audiobook {AudiobookId} BasePath to {BasePath} from authoritative scan evidence",
             audiobook.Id,
@@ -295,7 +305,7 @@ internal sealed partial class AudiobookScanService
             ArgumentException or NotSupportedException or PathTooLongException
             or System.Security.SecurityException)
         {
-            reason = exception.Message;
+            reason = "The stored audiobook file path is invalid for this filesystem.";
             return false;
         }
     }

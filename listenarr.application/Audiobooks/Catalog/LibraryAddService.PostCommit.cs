@@ -4,6 +4,52 @@ namespace Listenarr.Application.Audiobooks.Catalog;
 
 public partial class LibraryAddService
 {
+    private async Task TryPublishPreparedImagesAsync(
+        Audiobook audiobook,
+        PreparedLibraryImage preparedImage,
+        IReadOnlyList<string> preparedAuthorImages)
+    {
+        var fallbackImageUrl = audiobook.ImageUrl;
+        try
+        {
+            var publishedImageUrl = await PublishLibraryImageAsync(preparedImage);
+            if (!string.IsNullOrWhiteSpace(publishedImageUrl)
+                && !string.Equals(
+                    publishedImageUrl,
+                    fallbackImageUrl,
+                    StringComparison.Ordinal))
+            {
+                if (await _repo.TryUpdateImageUrlAsync(
+                        audiobook.Id,
+                        fallbackImageUrl,
+                        publishedImageUrl,
+                        CancellationToken.None))
+                {
+                    audiobook.ImageUrl = publishedImageUrl;
+                }
+                else
+                {
+                    _logger.LogWarning(
+                        "Audiobook {AudiobookId} was added, but its published image URL could not be enrolled because the stored value changed",
+                        audiobook.Id);
+                }
+            }
+        }
+        catch (Exception exception) when (exception is not (
+            OutOfMemoryException or StackOverflowException))
+        {
+            _logger.LogWarning(
+                exception,
+                "Audiobook {AudiobookId} was added, but its prepared cover image could not be published",
+                audiobook.Id);
+        }
+
+        foreach (var authorImageKey in preparedAuthorImages)
+        {
+            await PublishAuthorImageAsync(authorImageKey);
+        }
+    }
+
     private async Task TrySendAddedNotificationAsync(Audiobook audiobook)
     {
         try

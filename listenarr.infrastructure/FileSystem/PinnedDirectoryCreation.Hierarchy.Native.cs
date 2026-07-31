@@ -10,19 +10,26 @@ internal sealed partial class PinnedDirectoryCreation
         SafeFileHandle parentHandle,
         string parentPath,
         string childName,
-        bool requireDirectoryDeleteAccess) => OperatingSystem.IsWindows()
+        bool requireDirectoryDeleteAccess,
+        bool parentFollowsVisibleFinalLink) => OperatingSystem.IsWindows()
             ? TryCreateRelativeWindows(
                 parentHandle,
                 parentPath,
                 childName,
-                requireDirectoryDeleteAccess)
-            : TryCreateRelativeUnix(parentHandle, parentPath, childName);
+                requireDirectoryDeleteAccess,
+                parentFollowsVisibleFinalLink)
+            : TryCreateRelativeUnix(
+                parentHandle,
+                parentPath,
+                childName,
+                parentFollowsVisibleFinalLink);
 
     private static PinnedDirectoryCreation TryCreateRelativeWindows(
         SafeFileHandle parentHandle,
         string parentPath,
         string childName,
-        bool requireDirectoryDeleteAccess)
+        bool requireDirectoryDeleteAccess,
+        bool parentFollowsVisibleFinalLink)
     {
         var ownedParentHandle = DuplicateSafeHandle(parentHandle);
         try
@@ -41,7 +48,8 @@ internal sealed partial class PinnedDirectoryCreation
                     directoryHandle: null,
                     parentPath,
                     childName,
-                    created: false);
+                    created: false,
+                    parentFollowsVisibleFinalLink);
             }
             if (status < 0)
             {
@@ -53,7 +61,8 @@ internal sealed partial class PinnedDirectoryCreation
                 new SafeFileHandle(rawHandle, ownsHandle: true),
                 parentPath,
                 childName,
-                created: true);
+                created: true,
+                parentFollowsVisibleFinalLink);
         }
         catch
         {
@@ -65,7 +74,8 @@ internal sealed partial class PinnedDirectoryCreation
     private static PinnedDirectoryCreation TryCreateRelativeUnix(
         SafeFileHandle parentHandle,
         string parentPath,
-        string childName)
+        string childName,
+        bool parentFollowsVisibleFinalLink)
     {
         var ownedParentHandle = DuplicateSafeHandle(parentHandle);
         var temporaryName = $".listenarr-create-{Guid.NewGuid():N}";
@@ -110,7 +120,8 @@ internal sealed partial class PinnedDirectoryCreation
                         directoryHandle: null,
                         parentPath,
                         childName,
-                        created: false);
+                        created: false,
+                        parentFollowsVisibleFinalLink);
                 }
 
                 throw new Win32Exception(
@@ -124,7 +135,8 @@ internal sealed partial class PinnedDirectoryCreation
                 directoryHandle,
                 parentPath,
                 childName,
-                created: true);
+                created: true,
+                parentFollowsVisibleFinalLink);
         }
         catch
         {

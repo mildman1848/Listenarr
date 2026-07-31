@@ -142,7 +142,8 @@ public sealed class ManualImportCompanionImporter
             cancellationToken.ThrowIfCancellationRequested();
             try
             {
-                if (FileUtils.IsAudioFile(companionFile))
+                var isAudioCompanion = FileUtils.IsAudioFile(companionFile);
+                if (isAudioCompanion)
                 {
                     var profile = await BuildAudioMatchProfileAsync(companionFile);
                     if (profile == null || !FileUtils.LikelyMatchesAnyReference(profile, selectedAudioProfiles))
@@ -183,9 +184,10 @@ public sealed class ManualImportCompanionImporter
                 var destinationDirectory = Path.GetDirectoryName(destinationPath)
                     ?? throw new InvalidOperationException(
                         "The companion import destination has no parent directory.");
+                AudiobookFileOwnershipCheckResult? ownership = null;
                 if (_audiobookFileService != null && targetAudiobook != null)
                 {
-                    var ownership = await _audiobookFileService.CheckAudiobookFileOwnershipAsync(
+                    ownership = await _audiobookFileService.CheckAudiobookFileOwnershipAsync(
                         targetAudiobook,
                         destinationPath,
                         destinationDirectory,
@@ -220,11 +222,20 @@ public sealed class ManualImportCompanionImporter
                     audiobookIds[0],
                     cancellationToken);
                 cancellationToken.ThrowIfCancellationRequested();
-                var success = await _fileMover.PerformActionOn(
-                    action,
-                    companionFile,
-                    destinationPath,
-                    operationId);
+                var success = isAudioCompanion
+                    ? await PublishAndRegisterAudioCompanionAsync(
+                        action,
+                        companionFile,
+                        destinationPath,
+                        operationId,
+                        targetAudiobook!,
+                        ownership!,
+                        cancellationToken)
+                    : await _fileMover.PerformActionOn(
+                        action,
+                        companionFile,
+                        destinationPath,
+                        operationId);
                 if (success)
                 {
                     destinationTracker.Commit(destinationReservation);
@@ -238,6 +249,58 @@ public sealed class ManualImportCompanionImporter
         }
 
         return importedCount;
+    }
+
+    private async Task<bool> PublishAndRegisterAudioCompanionAsync(
+        FileAction action,
+        string sourcePath,
+        string destinationPath,
+        Guid operationId,
+        Audiobook audiobook,
+        AudiobookFileOwnershipCheckResult ownership,
+        CancellationToken cancellationToken)
+    {
+        var expectedIdentity = action == FileAction.HardlinkCopy
+            ? ownership.ExistingFile?.PhysicalObjectIdentity
+            : null;
+        using var registrationLease = !string.IsNullOrWhiteSpace(expectedIdentity)
+            ? await _fileMover.PrepareActionForRegistrationAsync(
+                action,
+                sourcePath,
+                destinationPath,
+                operationId,
+                expectedIdentity)
+            : await _fileMover.PrepareActionForRegistrationAsync(
+                action,
+                sourcePath,
+                destinationPath,
+                operationId);
+        if (registrationLease == null
+            || _audiobookFileService == null
+            || !await _audiobookFileService.RegisterPublishedGenerationAsync(
+                audiobook,
+                ownership,
+                registrationLease,
+                "manual-import-companion",
+                cancellationToken))
+        {
+            return false;
+        }
+
+        if (action == FileAction.Move
+            && !await _fileMover.CompletePreparedMoveAsync(
+                sourcePath,
+                destinationPath,
+                registrationLease,
+                operationId))
+        {
+            await _audiobookFileService.RollbackPublishedGenerationIfStaleAsync(
+                audiobook,
+                registrationLease);
+            return false;
+        }
+
+        return registrationLease.CompletePublication();
     }
 
     private static bool TryResolveCompanionDestination(

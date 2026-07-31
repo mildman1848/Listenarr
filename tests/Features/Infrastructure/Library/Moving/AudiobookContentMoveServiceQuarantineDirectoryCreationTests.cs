@@ -13,10 +13,9 @@ public partial class AudiobookContentMoveServiceTests
         var external = FileService.GetTempDirectory("content-move-quarantine-parent-race-external");
         var probe = Path.Join(root, "link-probe");
         Directory.CreateDirectory(sourceParent);
-        if (!TryCreateTempDirectoryLink(probe, external))
-        {
-            return;
-        }
+        Assert.True(
+            TryCreateTempDirectoryLink(probe, external),
+            "The required directory link could not be created.");
         Directory.Delete(probe);
 
         var source = Path.Join(sourceParent, "Book");
@@ -82,10 +81,9 @@ public partial class AudiobookContentMoveServiceTests
         var external = FileService.GetTempDirectory("content-move-quarantine-marker-race-external");
         var probe = Path.Join(root, "link-probe");
         Directory.CreateDirectory(sourceParent);
-        if (!TryCreateTempDirectoryLink(probe, external))
-        {
-            return;
-        }
+        Assert.True(
+            TryCreateTempDirectoryLink(probe, external),
+            "The required directory link could not be created.");
         Directory.Delete(probe);
 
         var source = Path.Join(sourceParent, "Book");

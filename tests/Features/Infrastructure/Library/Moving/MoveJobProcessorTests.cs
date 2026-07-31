@@ -269,13 +269,9 @@ namespace Listenarr.Tests.Features.Infrastructure.Library.Moving
             Assert.True(File.Exists(Path.Join(dst, "book.m4b")));
         }
 
-        [Fact]
+        [LinuxFact]
         public async Task ProcessJobAsync_CaseOnlyMove_OnCaseSensitiveHost_MovesFiles()
         {
-            if (OperatingSystem.IsWindows())
-            {
-                return;
-            }
 
             var root = FileService.GetTempDirectory("move-processor-case-only-root");
             var src = Path.Join(root, "Title");

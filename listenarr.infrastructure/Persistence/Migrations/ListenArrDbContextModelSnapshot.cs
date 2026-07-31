@@ -456,6 +456,18 @@ namespace Listenarr.Infrastructure.Persistence.Migrations
                         .HasMaxLength(16)
                         .HasColumnType("TEXT");
 
+                    b.Property<DateTime?>("PhysicalIdentityObservedAtUtc")
+                        .HasColumnType("TEXT");
+
+                    b.Property<int>("PhysicalIdentityVersion")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("INTEGER")
+                        .HasDefaultValue(1);
+
+                    b.Property<string>("PhysicalObjectIdentity")
+                        .HasMaxLength(512)
+                        .HasColumnType("TEXT");
+
                     b.Property<int?>("SampleRate")
                         .HasColumnType("INTEGER");
 
@@ -1138,6 +1150,11 @@ namespace Listenarr.Infrastructure.Persistence.Migrations
                     b.Property<long>("Id")
                         .ValueGeneratedOnAdd()
                         .HasColumnType("INTEGER");
+
+                    b.Property<int>("CleanupProtectionVersion")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("INTEGER")
+                        .HasDefaultValue(0);
 
                     b.Property<string>("CleanupState")
                         .IsRequired()

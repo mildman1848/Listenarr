@@ -1,3 +1,4 @@
+using Listenarr.Domain.Common;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 
@@ -71,10 +72,58 @@ internal static class MoveScanHandoffDispatchWorkflow
                 return new MoveScanDispatchResult(MoveScanDispatchOutcome.Failed);
             }
 
+            using var authorizationScope = scopeFactory.CreateScope();
+            var authorizationService = authorizationScope.ServiceProvider
+                .GetRequiredService<IScanPathAuthorizationService>();
+            var authorization = await authorizationService.AuthorizeAsync(
+                claim.TargetPath,
+                cancellationToken);
+            if (!authorization.IsAuthorized
+                || !authorization.Identity.HasValue
+                || !authorization.PhysicalIdentity.HasValue
+                || !FileSystemPathIdentity.AreEquivalentEndpoints(
+                    claim.TargetPath,
+                    claim.TargetIdentity,
+                    authorization.Path!,
+                    authorization.Identity.Value))
+            {
+                throw new InvalidOperationException(
+                    authorization.Error
+                        ?? "The move scan target no longer has its authorized path and physical identity.");
+            }
+
+            await AudiobookContentMoveService.VerifyPublishedManifestAsync(
+                claim.TargetPath,
+                claim.TargetManifest,
+                claim.TargetIdentity.Semantics,
+                cancellationToken);
+
+            var currentAuthorization = await authorizationService.AuthorizeAsync(
+                claim.TargetPath,
+                cancellationToken);
+            if (!currentAuthorization.IsAuthorized
+                || !currentAuthorization.Identity.HasValue
+                || !currentAuthorization.PhysicalIdentity.HasValue
+                || !FileSystemPathIdentity.AreEquivalentEndpoints(
+                    claim.TargetPath,
+                    claim.TargetIdentity,
+                    currentAuthorization.Path!,
+                    currentAuthorization.Identity.Value)
+                || currentAuthorization.PhysicalIdentity.Value
+                    != authorization.PhysicalIdentity.Value)
+            {
+                throw new InvalidOperationException(
+                    currentAuthorization.Error
+                        ?? "The move scan target changed while its durable manifest was being verified.");
+            }
+
+            var physicalIdentity =
+                currentAuthorization.PhysicalIdentity.Value;
             beforeEnqueue?.Invoke(claim);
             var scanJobId = await scanQueueService.EnqueueMoveHandoffScanAsync(
                 audiobook,
-                claim);
+                claim,
+                physicalIdentity);
             if (!scanJobId.HasValue)
             {
                 await handoffStore.ReleaseClaimAsync(

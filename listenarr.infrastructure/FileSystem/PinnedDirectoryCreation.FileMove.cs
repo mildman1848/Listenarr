@@ -1,7 +1,6 @@
 using System.ComponentModel;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
-using Microsoft.Win32.SafeHandles;
 
 namespace Listenarr.Infrastructure.FileSystem;
 
@@ -64,7 +63,8 @@ internal sealed partial class PinnedDirectoryCreation
                 DuplicateSafeHandle(_handle),
                 handle,
                 FullPath,
-                fileName);
+                fileName,
+                _followVisibleFinalLink);
             if (entry.VisiblePathMatches())
             {
                 return entry;
@@ -73,6 +73,66 @@ internal sealed partial class PinnedDirectoryCreation
             entry.Dispose();
             throw new InvalidOperationException(
                 "The file changed while it was being opened beneath its pinned parent.");
+        }
+
+        internal PinnedFileEntry OpenExistingFileForStableRead(
+            string fileName)
+        {
+            ThrowIfDisposed();
+            ValidateLeafName(fileName);
+            var fullPath = Path.Join(FullPath, fileName);
+            ExclusiveDirectoryCreator.InvokeBeforeOpenParentHook(fullPath);
+            EnsureVisiblePathMatches();
+            var handle = OperatingSystem.IsWindows()
+                ? OpenRelativeFileStableReadWindows(
+                    _handle,
+                    fileName,
+                    fullPath)
+                : OpenRelativeFileUnix(_handle, fileName, fullPath);
+            var entry = new PinnedFileEntry(
+                DuplicateSafeHandle(_handle),
+                handle,
+                FullPath,
+                fileName,
+                _followVisibleFinalLink);
+            if (entry.VisiblePathMatches())
+            {
+                return entry;
+            }
+
+            entry.Dispose();
+            throw new InvalidOperationException(
+                "The file changed while it was being opened for stable metadata extraction.");
+        }
+
+        internal PinnedFileEntry OpenExistingFileForStableDelete(
+            string fileName)
+        {
+            ThrowIfDisposed();
+            ValidateLeafName(fileName);
+            var fullPath = Path.Join(FullPath, fileName);
+            ExclusiveDirectoryCreator.InvokeBeforeOpenParentHook(fullPath);
+            EnsureVisiblePathMatches();
+            var handle = OperatingSystem.IsWindows()
+                ? OpenRelativeFileStableDeleteWindows(
+                    _handle,
+                    fileName,
+                    fullPath)
+                : OpenRelativeFileUnix(_handle, fileName, fullPath);
+            var entry = new PinnedFileEntry(
+                DuplicateSafeHandle(_handle),
+                handle,
+                FullPath,
+                fileName,
+                _followVisibleFinalLink);
+            if (entry.VisiblePathMatches())
+            {
+                return entry;
+            }
+
+            entry.Dispose();
+            throw new InvalidOperationException(
+                "The file changed while it was being opened for stable retirement.");
         }
 
         internal PinnedFileEntry? TryOpenExistingFile(
@@ -104,7 +164,8 @@ internal sealed partial class PinnedDirectoryCreation
                 DuplicateSafeHandle(_handle),
                 handle,
                 FullPath,
-                fileName);
+                fileName,
+                _followVisibleFinalLink);
             if (entry.VisiblePathMatches())
             {
                 return entry;
@@ -118,34 +179,6 @@ internal sealed partial class PinnedDirectoryCreation
 
     internal sealed partial class PinnedFileEntry : IDisposable
     {
-        private SafeFileHandle _parentHandle;
-        private readonly SafeFileHandle _fileHandle;
-        private string _parentPath;
-        private string _fileName;
-        private bool _disposed;
-
-        internal PinnedFileEntry(
-            SafeFileHandle parentHandle,
-            SafeFileHandle fileHandle,
-            string parentPath,
-            string fileName)
-        {
-            _parentHandle = parentHandle;
-            _fileHandle = fileHandle;
-            _parentPath = parentPath;
-            _fileName = fileName;
-        }
-
-        internal string FullPath => Path.Join(_parentPath, _fileName);
-
-        internal string FileName => _fileName;
-
-        internal SafeFileHandle DuplicateHandleForOperation()
-        {
-            ThrowIfDisposed();
-            return DuplicateSafeHandle(_fileHandle);
-        }
-
         internal FileStream OpenReadStream(int bufferSize, bool asynchronous)
         {
             ThrowIfDisposed();
@@ -400,6 +433,8 @@ internal sealed partial class PinnedDirectoryCreation
             _parentHandle = newParentHandle;
             _parentPath = destinationParent.FullPath;
             _fileName = destinationName;
+            _parentFollowsVisibleFinalLink =
+                destinationParent.FollowsVisibleFinalLink;
         }
 
         internal void MoveWithinParent(string destinationName)
@@ -432,45 +467,6 @@ internal sealed partial class PinnedDirectoryCreation
             {
                 throw new InvalidOperationException(
                     "The published file does not identify the opened partial file.");
-            }
-
-            _fileName = destinationName;
-        }
-
-        internal void ReplaceWithinParent(
-            string destinationName,
-            PinnedFileEntry expectedDestination)
-        {
-            ThrowIfDisposed();
-            ArgumentNullException.ThrowIfNull(expectedDestination);
-            ValidateLeafName(destinationName);
-            if (!VisiblePathMatches() || !expectedDestination.VisiblePathMatches())
-            {
-                throw new InvalidOperationException(
-                    "A marker changed before its atomic replacement.");
-            }
-
-            RenameRelativeEntry(
-                _parentHandle,
-                _fileHandle,
-                _fileName,
-                _parentHandle,
-                destinationName,
-                replaceExisting: true);
-            using var published = OperatingSystem.IsWindows()
-                ? OpenRelativeFileWindows(
-                    _parentHandle,
-                    destinationName,
-                    Path.Join(_parentPath, destinationName),
-                    requireDeleteAccess: false)
-                : OpenRelativeFileUnix(
-                    _parentHandle,
-                    destinationName,
-                    Path.Join(_parentPath, destinationName));
-            if (!HandlesIdentifySameDirectory(_fileHandle, published))
-            {
-                throw new InvalidOperationException(
-                    "The replacement marker does not identify the flushed temporary file.");
             }
 
             _fileName = destinationName;

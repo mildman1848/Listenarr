@@ -62,7 +62,23 @@ internal sealed class ScanPathAuthorizationService(
             boundary.RequestedMode,
             boundary.Path,
             fullPath);
-        return ScanPathAuthorizationResult.Authorized(fullPath, identity);
+        if (!TryCapturePhysicalIdentity(
+                boundary.Path,
+                fullPath,
+                boundary.Semantics,
+                out var physicalIdentity,
+                out var physicalError))
+        {
+            return ScanPathAuthorizationResult.Rejected(
+                ScanPathAuthorizationFailure.IdentityUnavailable,
+                physicalError
+                    ?? "The scan path physical identity could not be established safely.");
+        }
+
+        return ScanPathAuthorizationResult.Authorized(
+            fullPath,
+            identity,
+            physicalIdentity);
     }
 
     public async Task<ScanPathAuthorizationResult> ResolveDefaultAsync(
@@ -181,6 +197,95 @@ internal sealed class ScanPathAuthorizationService(
         }
 
         return roots;
+    }
+
+    private static bool TryCapturePhysicalIdentity(
+        string boundaryPath,
+        string scanPath,
+        FileSystemPathSemantics semantics,
+        out ScanPathPhysicalIdentity identity,
+        out string? error)
+    {
+        identity = default;
+        error = null;
+        try
+        {
+            var canonicalBoundary = FileSystemPathIdentity.Canonicalize(
+                boundaryPath,
+                semantics.Syntax);
+            var canonicalScanPath = FileSystemPathIdentity.Canonicalize(
+                scanPath,
+                semantics.Syntax);
+            using var boundary = PinnedDirectoryCreation.OpenPinnedBoundary(
+                canonicalBoundary);
+            var boundaryIdentity = boundary.GetDirectoryObjectIdentity();
+            using var scanRoot = OpenRelativeScanRoot(
+                boundary,
+                canonicalBoundary,
+                canonicalScanPath);
+            if (!boundary.VisiblePathMatches()
+                || !scanRoot.VisiblePathMatches())
+            {
+                error = "The configured scan boundary changed while its physical identity was being captured.";
+                return false;
+            }
+
+            identity = new ScanPathPhysicalIdentity(
+                boundaryIdentity,
+                scanRoot.GetDirectoryObjectIdentity());
+            return true;
+        }
+        catch (Exception exception) when (exception is not (
+            OperationCanceledException or OutOfMemoryException or StackOverflowException))
+        {
+            error = exception switch
+            {
+                DirectoryNotFoundException =>
+                    "The scan path no longer exists beneath its configured root.",
+                _ =>
+                    "The scan path contains a linked, replaced, or unavailable directory component."
+            };
+            return false;
+        }
+    }
+
+    private static PinnedDirectoryCreation.PinnedDirectoryAnchor
+        OpenRelativeScanRoot(
+            PinnedDirectoryCreation.PinnedDirectoryAnchor boundary,
+            string boundaryPath,
+            string scanPath)
+    {
+        var current = boundary.Duplicate();
+        try
+        {
+            var relative = Path.GetRelativePath(boundaryPath, scanPath);
+            if (relative == ".")
+            {
+                return current;
+            }
+
+            foreach (var segment in relative.Split(
+                [Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar],
+                StringSplitOptions.RemoveEmptyEntries))
+            {
+                if (segment is "." or "..")
+                {
+                    throw new InvalidOperationException(
+                        "The scan path contains navigation segments outside its configured root.");
+                }
+
+                var next = current.OpenExistingChild(segment);
+                current.Dispose();
+                current = next;
+            }
+
+            return current;
+        }
+        catch
+        {
+            current.Dispose();
+            throw;
+        }
     }
 
     private static bool IsFilesystemRoot(

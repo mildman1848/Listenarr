@@ -41,6 +41,11 @@ namespace Listenarr.Tests.Features.Infrastructure.Persistence
     [Trait("Category", "Infrastructure")]
     public class SqliteMigrationSchemaTests : BaseTests
     {
+        private const string PhysicalIdentityMigrationId =
+            "20260730033245_AddPhysicalFileIdentityAndMoveCleanupProtection";
+        private const string PhysicalIdentityMigrationPredecessorId =
+            "20260727000644_AddOwnershipRecoveryProtocols";
+
         public static TheoryData<string> ChangedMigrationIds => new()
         {
             "20251124102000_AddMoveJobSourcePath",
@@ -59,7 +64,8 @@ namespace Listenarr.Tests.Features.Infrastructure.Persistence
             "20260717143713_AddLibraryDirectoryOwnership",
             "20260720122500_EnforceSingleDefaultRootFolder",
             "20260726042801_AddDirectoryObjectIdentityAuthorization",
-            "20260727000644_AddOwnershipRecoveryProtocols"
+            "20260727000644_AddOwnershipRecoveryProtocols",
+            PhysicalIdentityMigrationId
         };
 
         private static (SqliteConnection Connection, ListenArrDbContext Context) CreateMigratedSqliteContext()
@@ -214,6 +220,145 @@ namespace Listenarr.Tests.Features.Infrastructure.Persistence
             await Assert.ThrowsAsync<SqliteException>(() =>
                 context.Database.ExecuteSqlRawAsync(
                     "UPDATE \"AudiobookFiles\" SET \"PathOwnershipKey\" = 'owned:path' WHERE \"Id\" = 2"));
+        }
+
+        [Fact]
+        [Trait("Scenario", "PhysicalIdentityAndCleanupProtectionMigration")]
+        public async Task PhysicalIdentityMigration_PreservesLegacyRowsAcrossUpgradeAndDowngrade()
+        {
+            await using var connection = new SqliteConnection("DataSource=:memory:");
+            await connection.OpenAsync();
+
+            var options = new DbContextOptionsBuilder<ListenArrDbContext>()
+                .UseSqlite(connection, sqlite =>
+                    sqlite.MigrationsAssembly(typeof(ListenArrDbContext).Assembly.GetName().Name))
+                .Options;
+            var moveJobId = Guid.NewGuid();
+
+            await using var context = new ListenArrDbContext(options);
+            var migrations = context.Database.GetMigrations().ToList();
+            Assert.Single(migrations, migration => migration == PhysicalIdentityMigrationId);
+            Assert.DoesNotContain(
+                "20260728190000_AddAudiobookFilePhysicalIdentity",
+                migrations);
+            Assert.DoesNotContain(
+                "20260728193000_AddMoveCleanupProtectionVersion",
+                migrations);
+
+            var migrator = context.GetService<IMigrator>();
+            await migrator.MigrateAsync(PhysicalIdentityMigrationPredecessorId);
+            Assert.False(await ColumnExistsAsync(
+                connection,
+                "AudiobookFiles",
+                "PhysicalObjectIdentity"));
+            Assert.False(await ColumnExistsAsync(
+                connection,
+                "MoveJobEntries",
+                "CleanupProtectionVersion"));
+
+            await context.Database.ExecuteSqlRawAsync(
+                """
+                INSERT INTO "Audiobooks" ("Id", "Explicit", "Abridged", "Monitored")
+                VALUES (101, 0, 0, 1)
+                """);
+            await context.Database.ExecuteSqlRawAsync(
+                """
+                INSERT INTO "AudiobookFiles" ("Id", "AudiobookId", "Path", "CreatedAt",
+                    "PathCaseSensitivity", "PathCaseSensitivityMode", "PathIdentityVersion",
+                    "PathIdentityState")
+                VALUES (201, 101, '/library/legacy.m4b', CURRENT_TIMESTAMP,
+                    'Unknown', 'Auto', 1, 'Unavailable')
+                """);
+            await context.Database.ExecuteSqlRawAsync(
+                """
+                INSERT INTO "MoveJobs" ("Id", "AudiobookId", "EnqueuedAt", "Status",
+                    "AttemptCount", "DeleteEmptySource", "FailureKind", "IdentityKeyVersion",
+                    "LeaseGeneration", "Phase")
+                VALUES ({0}, 101, CURRENT_TIMESTAMP, 'Queued', 0, 0, 'None', 5, 0, 'None')
+                """,
+                moveJobId);
+            await context.Database.ExecuteSqlRawAsync(
+                """
+                INSERT INTO "MoveJobEntries" ("Id", "MoveJobId", "RelativePath", "EntryType",
+                    "Length", "LastWriteTimeUtc", "CopyState", "CleanupState")
+                VALUES (301, {0}, 'legacy.m4b', 'File', 1234, CURRENT_TIMESTAMP,
+                    'Pending', 'Pending')
+                """,
+                moveJobId);
+
+            await migrator.MigrateAsync(PhysicalIdentityMigrationId);
+
+            await using (var command = connection.CreateCommand())
+            {
+                command.CommandText =
+                    """
+                    SELECT "PhysicalIdentityVersion", "PhysicalObjectIdentity",
+                           "PhysicalIdentityObservedAtUtc"
+                    FROM "AudiobookFiles"
+                    WHERE "Id" = 201
+                    """;
+                await using var reader = await command.ExecuteReaderAsync();
+                Assert.True(await reader.ReadAsync());
+                Assert.Equal(1, reader.GetInt32(0));
+                Assert.True(reader.IsDBNull(1));
+                Assert.True(reader.IsDBNull(2));
+            }
+
+            Assert.Equal(
+                0L,
+                (long)(await ExecuteScalarAsync(
+                    connection,
+                    "SELECT \"CleanupProtectionVersion\" FROM \"MoveJobEntries\" WHERE \"Id\" = 301"))!);
+            Assert.True(await IndexExistsAsync(
+                connection,
+                "MoveJobEntries",
+                "IX_MoveJobEntries_MoveJobId_RelativePath"));
+
+            await migrator.MigrateAsync(PhysicalIdentityMigrationPredecessorId);
+
+            Assert.False(await ColumnExistsAsync(
+                connection,
+                "AudiobookFiles",
+                "PhysicalIdentityObservedAtUtc"));
+            Assert.False(await ColumnExistsAsync(
+                connection,
+                "AudiobookFiles",
+                "PhysicalIdentityVersion"));
+            Assert.False(await ColumnExistsAsync(
+                connection,
+                "AudiobookFiles",
+                "PhysicalObjectIdentity"));
+            Assert.False(await ColumnExistsAsync(
+                connection,
+                "MoveJobEntries",
+                "CleanupProtectionVersion"));
+            Assert.Equal(
+                "/library/legacy.m4b",
+                (string)(await ExecuteScalarAsync(
+                    connection,
+                    "SELECT \"Path\" FROM \"AudiobookFiles\" WHERE \"Id\" = 201"))!);
+            Assert.Equal(
+                "legacy.m4b",
+                (string)(await ExecuteScalarAsync(
+                    connection,
+                    "SELECT \"RelativePath\" FROM \"MoveJobEntries\" WHERE \"Id\" = 301"))!);
+            Assert.True(await IndexExistsAsync(
+                connection,
+                "MoveJobEntries",
+                "IX_MoveJobEntries_MoveJobId_RelativePath"));
+            Assert.True(await IndexExistsAsync(
+                connection,
+                "AudiobookFiles",
+                "IX_AudiobookFiles_PathIdentityLookupKey"));
+            Assert.True(await IndexExistsAsync(
+                connection,
+                "AudiobookFiles",
+                "IX_AudiobookFiles_PathOwnershipKey"));
+
+            await using var foreignKeyCheck = connection.CreateCommand();
+            foreignKeyCheck.CommandText = "PRAGMA foreign_key_check;";
+            await using var foreignKeyReader = await foreignKeyCheck.ExecuteReaderAsync();
+            Assert.False(await foreignKeyReader.ReadAsync());
         }
 
         [Fact]
@@ -871,6 +1016,23 @@ namespace Listenarr.Tests.Features.Infrastructure.Persistence
                 """;
             command.Parameters.AddWithValue("$table", tableName);
             command.Parameters.AddWithValue("$column", columnName);
+            return Convert.ToInt32(await command.ExecuteScalarAsync()) == 1;
+        }
+
+        private static async Task<bool> IndexExistsAsync(
+            SqliteConnection connection,
+            string tableName,
+            string indexName)
+        {
+            await using var command = connection.CreateCommand();
+            command.CommandText =
+                """
+                SELECT COUNT(*)
+                FROM pragma_index_list($table)
+                WHERE name = $index
+                """;
+            command.Parameters.AddWithValue("$table", tableName);
+            command.Parameters.AddWithValue("$index", indexName);
             return Convert.ToInt32(await command.ExecuteScalarAsync()) == 1;
         }
 

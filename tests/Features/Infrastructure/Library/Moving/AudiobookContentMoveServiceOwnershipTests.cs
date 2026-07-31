@@ -51,10 +51,9 @@ public partial class AudiobookContentMoveServiceTests
         var external = FileService.GetTempDirectory("content-move-temp-linked-external");
         var externalFile = await FileService.GetFileAsync(external, "external.txt", "external bytes");
         var linkedChild = Path.Join(tempName, "linked-child");
-        if (!TryCreateDirectoryLink(linkedChild, external))
-        {
-            return;
-        }
+        Assert.True(
+            TryCreateDirectoryLink(linkedChild, external),
+            "The required directory link could not be created.");
 
         try
         {

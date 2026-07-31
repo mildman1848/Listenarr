@@ -113,13 +113,9 @@ namespace Listenarr.Tests.Features.Infrastructure.Library.Moving
             Assert.True(File.Exists(Path.Join(target, "extras", "cover.jpg")));
         }
 
-        [Fact]
+        [LinuxFact]
         public async Task MoveContentsAsync_EndpointEqualityUsesBothFilesystemSemantics()
         {
-            if (OperatingSystem.IsWindows())
-            {
-                return;
-            }
 
             var parent = FileService.GetTempDirectory("content-move-endpoint-semantics");
             var source = Path.Join(parent, "Book");
@@ -550,13 +546,9 @@ namespace Listenarr.Tests.Features.Infrastructure.Library.Moving
             Assert.True(Directory.Exists(sourceRoot));
         }
 
-        [Fact]
+        [LinuxFact]
         public async Task FinalizeMove_InsensitiveConfiguredRootAlias_PreservesPhysicalLibraryRoot()
         {
-            if (OperatingSystem.IsWindows())
-            {
-                return;
-            }
 
             var parent = FileService.GetTempDirectory("content-move-case-alias-parent");
             var physicalRoot = Path.Join(parent, "library");

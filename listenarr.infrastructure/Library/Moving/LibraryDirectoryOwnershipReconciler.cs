@@ -78,9 +78,19 @@ public sealed class LibraryDirectoryOwnershipReconciler(
                     && !Directory.Exists(
                         LibraryDirectoryOwnershipRemoval.GetQuarantinePath(ownership)))
                 {
+                    using var missingAuthorization =
+                        ownership.ManagedRootFolderId.HasValue
+                            ? await authorizer.AuthorizeOwnershipAsync(
+                                ownership,
+                                cancellationToken)
+                            : await authorizer.AuthorizeContainingRootAsync(
+                                ownership.CanonicalPath,
+                                ownership.GetIdentity().Semantics,
+                                cancellationToken);
                     if (LibraryDirectoryOwnershipRemoval
                         .TryValidateLegacyMissingBothRecovery(
                             ownership,
+                            missingAuthorization.ParentAnchor,
                             out var legacyPayload))
                     {
                         var now = DateTime.UtcNow;
@@ -101,7 +111,9 @@ public sealed class LibraryDirectoryOwnershipReconciler(
                         continue;
                     }
 
-                    LibraryDirectoryOwnershipRemoval.ValidateRecoverableState(ownership);
+                    LibraryDirectoryOwnershipMarker.ValidateSiblingMarker(
+                        ownership,
+                        missingAuthorization.ParentAnchor);
                     continue;
                 }
 
@@ -141,16 +153,16 @@ public sealed class LibraryDirectoryOwnershipReconciler(
                 ownership.DirectoryObjectIdentityVersion = 1;
                 ownership.DirectoryObjectIdentity = liveIdentity;
                 ownership.DirectoryObjectIdentityUnavailableReason = null;
-                if (ownership.State == LibraryDirectoryOwnershipState.Unavailable)
-                {
-                    ownership.State = LibraryDirectoryOwnershipState.Owned;
-                }
                 ownership.StateReason = null;
-                await PinnedLibraryDirectoryOwnershipMarker.UpgradeLegacyAsync(
+                await PinnedLibraryDirectoryOwnershipMarker.ReconcileAsync(
                     ownership,
                     directory,
                     authorization.ParentAnchor,
                     cancellationToken);
+                if (ownership.State == LibraryDirectoryOwnershipState.Unavailable)
+                {
+                    ownership.State = LibraryDirectoryOwnershipState.Owned;
+                }
                 ownership.UpdatedAt = DateTime.UtcNow;
                 await db.SaveChangesAsync(cancellationToken);
             }

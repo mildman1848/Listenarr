@@ -50,7 +50,8 @@ internal sealed partial class EfLibraryDirectoryOwnershipStore
                     OwnershipComparison.Compatible
                 && candidate.Ownership.State is
                     LibraryDirectoryOwnershipState.Owned
-                        or LibraryDirectoryOwnershipState.Retained))
+                        or LibraryDirectoryOwnershipState.Retained
+                        or LibraryDirectoryOwnershipState.Unavailable))
         {
             return;
         }
@@ -69,7 +70,8 @@ internal sealed partial class EfLibraryDirectoryOwnershipStore
         await db.SaveChangesAsync(cancellationToken);
         if (transaction != null)
         {
-            await transaction.CommitAsync(cancellationToken);
+            cancellationToken.ThrowIfCancellationRequested();
+            await transaction.CommitAsync(CancellationToken.None);
         }
 
         throw new InvalidOperationException(

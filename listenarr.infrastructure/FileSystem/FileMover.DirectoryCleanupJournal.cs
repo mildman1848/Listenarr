@@ -9,6 +9,7 @@ public partial class FileMover
     private sealed record CleanupJournalFile(
         string RelativePath,
         RegularFileIdentity Identity,
+        RegularFileIdentity? DestinationIdentity,
         long Length,
         string Sha256);
 
@@ -45,6 +46,14 @@ public partial class FileMover
         {
             using var parent =
                 PinnedDirectoryCreation.OpenPinnedDirectoryNoFollow(parentPath);
+            if (!TryReconcileCleanupJournalReplacements(
+                    parent,
+                    parentPath,
+                    out reason))
+            {
+                return false;
+            }
+
             CleanupJournalPayload? matching = null;
             string? matchingJournalName = null;
             foreach (var journalPath in Directory.EnumerateFiles(
@@ -98,7 +107,7 @@ public partial class FileMover
             OperationCanceledException or OutOfMemoryException or StackOverflowException))
         {
             reason =
-                $"Directory-cleanup journal recovery failed: {exception.GetType().Name}.";
+                $"Directory-cleanup journal recovery failed: {exception.GetType().Name}: {exception.Message}";
             return false;
         }
     }
@@ -110,7 +119,7 @@ public partial class FileMover
     {
         var expectedQuarantine =
             $"{CopyCleanupMarker}{payload.OperationId:N}.state";
-        if (payload.Version != 1
+        if (payload.Version is not (1 or 2)
             || !string.Equals(
                 payload.QuarantineName,
                 expectedQuarantine,
@@ -141,6 +150,20 @@ public partial class FileMover
         }
         using var quarantine =
             quarantinePublication.OpenCreatedDirectoryAnchor();
+        if (payload.Version == 1)
+        {
+            payload = await UpgradeLegacyCleanupJournalAsync(
+                parent,
+                journalName,
+                payload,
+                quarantine)
+                ?? payload;
+            if (payload.Version != 2)
+            {
+                return false;
+            }
+        }
+
         if (!await ValidateCleanupManifestAsync(
                 payload,
                 quarantine.FullPath,
@@ -213,22 +236,18 @@ public partial class FileMover
         var payload = JsonSerializer.Deserialize<CleanupJournalPayload>(
             payloadBytes);
         if (payload == null
-            || payload.Version != 1
+            || payload.Version is not (1 or 2)
             || payload.OperationId == Guid.Empty
             || payload.Files == null
             || payload.Directories == null)
         {
             return null;
         }
-        var manifestBytes = JsonSerializer.SerializeToUtf8Bytes(new
-        {
-            Files = payload.Files,
-            Directories = payload.Directories
-                .OrderBy(pair => pair.Key, StringComparer.Ordinal)
-                .ToArray()
-        });
         return string.Equals(
-            Convert.ToHexString(SHA256.HashData(manifestBytes)),
+            ComputeCleanupManifestHash(
+                payload.Version,
+                payload.Files,
+                payload.Directories),
             payload.ManifestHash,
             StringComparison.Ordinal)
             ? payload
@@ -248,6 +267,13 @@ public partial class FileMover
                 "The copied destination root identity is unavailable.");
         }
 
+        var journalVersion = DirectoryCleanupJournalVersionForTest;
+        if (journalVersion is not (1 or 2))
+        {
+            throw new InvalidOperationException(
+                "The directory cleanup journal version is unsupported.");
+        }
+
         var operationId = Guid.NewGuid();
         var files = new List<CleanupJournalFile>(snapshot.Files.Count);
         foreach (var file in snapshot.Files)
@@ -256,6 +282,19 @@ public partial class FileMover
                 snapshot.SourceRoot,
                 file.RelativePath,
                 "journal source file");
+            var destinationPath = ResolveSnapshotPath(
+                normalizedDestination,
+                file.RelativePath,
+                "journal destination file");
+            if (!TryGetRegularFileIdentity(
+                    destinationPath,
+                    out var destinationFileIdentity))
+            {
+                return new DirectoryCopyCleanupResult(
+                    false,
+                    false,
+                    "A copied destination file identity is unavailable.");
+            }
             await using var stream = new FileStream(
                 sourcePath,
                 FileMode.Open,
@@ -268,21 +307,18 @@ public partial class FileMover
             files.Add(new CleanupJournalFile(
                 file.RelativePath,
                 file.Identity,
+                journalVersion == 2 ? destinationFileIdentity : null,
                 length,
                 hash));
         }
 
-        var manifestBytes = JsonSerializer.SerializeToUtf8Bytes(new
-        {
-            Files = files,
-            Directories = snapshot.DirectoryIdentities
-                .OrderBy(pair => pair.Key, StringComparer.Ordinal)
-                .ToArray()
-        });
-        var manifestHash = Convert.ToHexString(SHA256.HashData(manifestBytes));
+        var manifestHash = ComputeCleanupManifestHash(
+            journalVersion,
+            files,
+            snapshot.DirectoryIdentities);
         var quarantineName = $"{CopyCleanupMarker}{operationId:N}.state";
         var payload = new CleanupJournalPayload(
-            Version: 1,
+            Version: journalVersion,
             operationId,
             Path.GetFullPath(snapshot.SourceRoot),
             normalizedDestination,

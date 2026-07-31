@@ -83,36 +83,49 @@ namespace Listenarr.Api.Features.Library
 
             deleteFiles = deleteFiles || deleteFolder;
 
+            var deleted = await _repo.DeleteByIdAsync(id);
+            if (!deleted)
+            {
+                return new ObjectResult(new { message = "Failed to delete audiobook" })
+                {
+                    StatusCode = StatusCodes.Status500InternalServerError
+                };
+            }
+
             AudiobookFilesystemDeleteResult? filesystemResult = null;
             if (deleteFiles)
             {
-                filesystemResult = await _audiobookFilesystemDeleteService.DeleteAsync(
-                    audiobook,
-                    deleteFolder,
-                    cancellationToken);
+                try
+                {
+                    filesystemResult = await _audiobookFilesystemDeleteService.DeleteAsync(
+                        audiobook,
+                        deleteFolder,
+                        CancellationToken.None);
+                }
+                catch (Exception exception) when (exception is not (
+                    OutOfMemoryException or StackOverflowException))
+                {
+                    _logger.LogWarning(
+                        exception,
+                        "Audiobook {AudiobookId} was deleted, but its filesystem cleanup failed",
+                        id);
+                    filesystemResult = new AudiobookFilesystemDeleteResult();
+                    filesystemResult.Warnings.Add(
+                        "The audiobook was removed from the library, but its files could not be fully deleted.");
+                }
             }
 
             await DeleteCachedImageAsync(audiobook);
-
-            var deleted = await _repo.DeleteByIdAsync(id);
-            if (deleted)
+            var message = filesystemResult?.BuildDeleteMessage() ?? "Audiobook deleted successfully.";
+            return new OkObjectResult(new
             {
-                var message = filesystemResult?.BuildDeleteMessage() ?? "Audiobook deleted successfully.";
-                return new OkObjectResult(new
-                {
-                    message,
-                    id,
-                    deletedFiles = filesystemResult?.DeletedFiles ?? 0,
-                    deletedFolder = filesystemResult?.DeletedFolder,
-                    deletedParentFolder = filesystemResult?.DeletedParentFolder,
-                    warnings = filesystemResult?.Warnings ?? new List<string>()
-                });
-            }
-
-            return new ObjectResult(new { message = "Failed to delete audiobook" })
-            {
-                StatusCode = StatusCodes.Status500InternalServerError
-            };
+                message,
+                id,
+                deletedFiles = filesystemResult?.DeletedFiles ?? 0,
+                deletedFolder = filesystemResult?.DeletedFolder,
+                deletedParentFolder = filesystemResult?.DeletedParentFolder,
+                warnings = filesystemResult?.Warnings ?? new List<string>()
+            });
         }
 
         private async Task DeleteCachedImageAsync(Audiobook audiobook)
@@ -128,7 +141,8 @@ namespace Listenarr.Api.Features.Library
                     await DeleteCachedImageFromUrlAsync(audiobook);
                 }
             }
-            catch (Exception ex) when (ex is not OperationCanceledException && ex is not OutOfMemoryException && ex is not StackOverflowException)
+            catch (Exception ex) when (ex is not (
+                OutOfMemoryException or StackOverflowException))
             {
                 _logger.LogWarning(ex, "Failed to delete cached image for audiobook id {Id}", audiobook.Id);
             }

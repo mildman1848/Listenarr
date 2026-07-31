@@ -62,7 +62,8 @@ internal sealed partial class EfMoveExecutionStore
                 await db.SaveChangesAsync(cancellationToken);
                 if (transaction != null)
                 {
-                    await transaction.CommitAsync(cancellationToken);
+                    cancellationToken.ThrowIfCancellationRequested();
+                    await transaction.CommitAsync(CancellationToken.None);
                 }
             },
             cancellationToken);

@@ -27,6 +27,19 @@ namespace Listenarr.Api.Features.Library
         Guid JobId,
         string Target);
 
+    internal sealed record MoveJobStatusResponse(
+        Guid Id,
+        int AudiobookId,
+        MoveJobStatus Status,
+        MoveJobPhase Phase,
+        string? RequestedPath,
+        string? Error,
+        int AttemptCount,
+        DateTime EnqueuedAt,
+        DateTime? UpdatedAt,
+        DateTime? NextAttemptAt,
+        bool CanRetry);
+
     public sealed partial class LibraryMoveWorkflow
     {
         private readonly IAudiobookRepository _repo;
@@ -103,7 +116,11 @@ namespace Listenarr.Api.Features.Library
                 catch (Exception ex) when (ex is not OperationCanceledException && ex is not OutOfMemoryException && ex is not StackOverflowException)
                 {
                     _logger.LogError(ex, "Failed to update BasePath for audiobook {AudiobookId}", id);
-                    return new ObjectResult(new { message = "Failed to update BasePath", error = ex.Message })
+                    return new ObjectResult(new
+                    {
+                        message = "Failed to update BasePath",
+                        code = "destination_update_failed"
+                    })
                     {
                         StatusCode = StatusCodes.Status500InternalServerError
                     };
@@ -125,11 +142,25 @@ namespace Listenarr.Api.Features.Library
             if (job != null)
             {
                 _logger.LogInformation("Queried move job {JobId} status: {Status}", gid, job.Status);
-                return new OkObjectResult(job);
+                return new OkObjectResult(ToStatusResponse(job));
             }
 
             return new NotFoundObjectResult(new { message = "Job not found" });
         }
+
+        private static MoveJobStatusResponse ToStatusResponse(MoveJob job) =>
+            new(
+                job.Id,
+                job.AudiobookId,
+                job.Status,
+                job.Phase,
+                job.RequestedPath,
+                MoveJobPublicProjection.ToError(job),
+                job.AttemptCount,
+                job.EnqueuedAt,
+                job.UpdatedAt,
+                job.NextAttemptAt,
+                job.Status is MoveJobStatus.Failed or MoveJobStatus.NeedsAttention);
 
         public async Task<IActionResult> RequeueAsync(
             string jobId,
@@ -145,9 +176,13 @@ namespace Listenarr.Api.Features.Library
                     gid,
                     cancellationToken);
             }
-            catch (MoveRelocationConflictException ex)
+            catch (MoveRelocationConflictException)
             {
-                return new ConflictObjectResult(new { message = ex.Message, code = "move_relocation_conflict" });
+                return new ConflictObjectResult(new
+                {
+                    message = "The move overlaps an active root folder relocation. Retry after the relocation completes.",
+                    code = "move_relocation_conflict"
+                });
             }
 
             if (newJobId == null)

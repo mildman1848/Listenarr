@@ -341,14 +341,10 @@ namespace Listenarr.Tests.Features.Api.Services
             Assert.DoesNotContain(duplicatedSegment, actualFullPath, StringComparison.OrdinalIgnoreCase);
         }
 
-        [Fact]
+        [WindowsFact]
         [Trait("OSPlatform", "Windows")]
         public async Task ImportSingleFile_WithWindowsShortBasePath_NormalizesFinalPath()
         {
-            if (!OperatingSystem.IsWindows())
-            {
-                return;
-            }
 
             var outputRoot = FileService.GetTempDirectory("import-out");
             var longBasePath = Path.Join(outputRoot, "A Very Long Audiobook Folder Name");

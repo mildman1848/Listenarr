@@ -58,6 +58,7 @@ public sealed partial class RootFolderRelocationService
                 {
                     await PublishOwnershipMigrationTargetsAsync(
                         preparedPlans,
+                        relocation.TargetPath,
                         cancellationToken);
                     foreach (var plan in preparedPlans)
                     {
@@ -81,6 +82,7 @@ public sealed partial class RootFolderRelocationService
                     // markers after every restart before committing metadata.
                     await PublishOwnershipMigrationTargetsAsync(
                         publishedPlans,
+                        relocation.TargetPath,
                         cancellationToken);
                     await CompleteOwnershipMigrationMetadataAsync(
                         db,
@@ -96,8 +98,12 @@ public sealed partial class RootFolderRelocationService
                 {
                     await PublishOwnershipMigrationTargetsAsync(
                         plans,
+                        relocation.TargetPath,
                         CancellationToken.None);
-                    RetireOwnershipMigrationSources(plans);
+                    RetireOwnershipMigrationSources(
+                        plans,
+                        relocation.SourcePath,
+                        relocation.TargetPath);
                     db.LibraryDirectoryOwnershipPathMigrations
                         .RemoveRange(plans.Select(plan => plan.Journal));
                     FinalizeRecoveredMetadataOnlyRelocation(

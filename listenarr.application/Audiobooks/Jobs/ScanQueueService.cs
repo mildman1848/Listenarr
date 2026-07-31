@@ -41,21 +41,43 @@ public partial class ScanQueueService : IScanQueueService
         ArgumentNullException.ThrowIfNull(command.Audiobook);
 
         var pathIdentity = command.PathIdentity;
-        if (!string.IsNullOrWhiteSpace(command.Path))
+        var physicalIdentity = command.PhysicalIdentity;
+        switch (command.AuthorizationMode)
         {
-            if (!pathIdentity.HasValue)
-            {
-                throw new InvalidOperationException(
-                    "A path-scoped scan must be authorized before queue publication.");
-            }
+            case ScanAuthorizationMode.ResolveCurrentAudiobookPath:
+                if (!string.IsNullOrWhiteSpace(command.Path)
+                    || pathIdentity.HasValue
+                    || physicalIdentity.HasValue)
+                {
+                    throw new ArgumentException(
+                        "A current-path scan cannot carry a queued path or queued path identities.",
+                        nameof(command));
+                }
+                break;
 
-            pathIdentity.Value.ValidateForPath(command.Path);
-        }
-        else if (pathIdentity.HasValue)
-        {
-            throw new ArgumentException(
-                "A scan path identity cannot be supplied without a scan path.",
-                nameof(command));
+            case ScanAuthorizationMode.PreauthorizedPath:
+                if (string.IsNullOrWhiteSpace(command.Path)
+                    || !pathIdentity.HasValue
+                    || !physicalIdentity.HasValue
+                    || !IsCompletePhysicalIdentity(physicalIdentity.Value))
+                {
+                    throw new InvalidOperationException(
+                        "A preauthorized path scan must carry its path plus lexical and physical authorization before queue publication.");
+                }
+
+                pathIdentity.Value.ValidateForPath(command.Path);
+                break;
+
+            case ScanAuthorizationMode.MoveHandoff:
+                throw new ArgumentException(
+                    "Move handoff scans must be published through EnqueueMoveHandoffScanAsync.",
+                    nameof(command));
+
+            default:
+                throw new ArgumentOutOfRangeException(
+                    nameof(command),
+                    command.AuthorizationMode,
+                    "Unknown scan authorization mode.");
         }
 
         var job = new ScanJob
@@ -63,9 +85,11 @@ public partial class ScanQueueService : IScanQueueService
             AudiobookId = command.Audiobook.Id,
             Path = command.Path,
             PathIdentity = pathIdentity,
+            PhysicalIdentity = physicalIdentity,
             CorrelationId = command.CorrelationId,
             DownloadId = command.DownloadId,
-            IsAuthoritativeScope = command.IsAuthoritativeScope
+            IsAuthoritativeScope = command.IsAuthoritativeScope,
+            AuthorizationMode = command.AuthorizationMode
         };
         return await EnqueueJobAsync(
                 job,
@@ -82,13 +106,16 @@ public partial class ScanQueueService : IScanQueueService
             audiobook,
             Path: null,
             PathIdentity: null,
+            PhysicalIdentity: null,
             correlationId,
             downloadId,
-            IsAuthoritativeScope: true));
+            IsAuthoritativeScope: true,
+            AuthorizationMode: ScanAuthorizationMode.ResolveCurrentAudiobookPath));
 
     public async Task<Guid?> EnqueueMoveHandoffScanAsync(
         Audiobook audiobook,
-        MoveScanHandoffClaim claim)
+        MoveScanHandoffClaim claim,
+        ScanPathPhysicalIdentity physicalIdentity)
     {
         ArgumentNullException.ThrowIfNull(audiobook);
         ArgumentNullException.ThrowIfNull(claim);
@@ -99,15 +126,24 @@ public partial class ScanQueueService : IScanQueueService
         }
 
         claim.TargetIdentity.ValidateForPath(claim.TargetPath);
+        if (!IsCompletePhysicalIdentity(physicalIdentity))
+        {
+            throw new ArgumentException(
+                "Move handoff physical authority is incomplete.",
+                nameof(physicalIdentity));
+        }
+
         var job = new ScanJob
         {
             AudiobookId = audiobook.Id,
             Path = claim.TargetPath,
             PathIdentity = claim.TargetIdentity,
+            PhysicalIdentity = physicalIdentity,
             CorrelationId = $"move:{claim.MoveJobId:N}",
             MoveScanHandoffId = claim.HandoffId,
             MoveScanAttemptGeneration = claim.AttemptGeneration,
             IsAuthoritativeScope = true,
+            AuthorizationMode = ScanAuthorizationMode.MoveHandoff,
             Status = "Queued"
         };
 
@@ -331,6 +367,11 @@ public partial class ScanQueueService : IScanQueueService
             await pendingDispatch!;
         }
     }
+
+    private static bool IsCompletePhysicalIdentity(
+        ScanPathPhysicalIdentity physicalIdentity) =>
+        !string.IsNullOrWhiteSpace(physicalIdentity.BoundaryObjectIdentity)
+        && !string.IsNullOrWhiteSpace(physicalIdentity.ScanRootObjectIdentity);
 
     public bool TryGetJob(Guid id, out ScanJob? job) => _jobs.TryGetValue(id, out job);
 

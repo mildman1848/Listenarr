@@ -27,17 +27,20 @@ namespace Listenarr.Api.Features.Library
         private readonly IServiceScopeFactory _scopeFactory;
         private readonly IAudiobookDestinationRewriteService _destinationRewriteService;
         private readonly IAudiobookOperationCoordinator _audiobookOperationCoordinator;
+        private readonly IFileSystemSemanticsResolver _fileSystemSemanticsResolver;
         private readonly ILogger<LibraryUpdateWorkflow> _logger;
 
         public LibraryUpdateWorkflow(
             IServiceScopeFactory scopeFactory,
             IAudiobookDestinationRewriteService destinationRewriteService,
             IAudiobookOperationCoordinator audiobookOperationCoordinator,
+            IFileSystemSemanticsResolver fileSystemSemanticsResolver,
             ILogger<LibraryUpdateWorkflow> logger)
         {
             _scopeFactory = scopeFactory;
             _destinationRewriteService = destinationRewriteService;
             _audiobookOperationCoordinator = audiobookOperationCoordinator ?? throw new ArgumentNullException(nameof(audiobookOperationCoordinator));
+            _fileSystemSemanticsResolver = fileSystemSemanticsResolver ?? throw new ArgumentNullException(nameof(fileSystemSemanticsResolver));
             _logger = logger;
         }
 
@@ -50,6 +53,7 @@ namespace Listenarr.Api.Features.Library
             }
 
             var basePathRewritten = false;
+            var suppressStaleImageUrl = false;
             var metadataUpdateRequested = HasMetadataUpdates(request);
 
             if (request.BasePath != null)
@@ -60,6 +64,9 @@ namespace Listenarr.Api.Features.Library
                     : FileUtils.NormalizeStoredPath(existingAudiobook.BasePath);
                 if (!string.Equals(requestedBasePath, existingBasePath, StringComparison.Ordinal))
                 {
+                    suppressStaleImageUrl = await IsPathInsideBasePathAsync(
+                        request.ImageUrl,
+                        existingAudiobook.BasePath);
                     _logger.LogWarning(
                         "Deprecated PUT /library/{AudiobookId} BasePath update received. Route destination changes through the move endpoint with moveFiles=false.",
                         id);
@@ -79,7 +86,11 @@ namespace Listenarr.Api.Features.Library
                     catch (Exception ex) when (ex is not OperationCanceledException && ex is not OutOfMemoryException && ex is not StackOverflowException)
                     {
                         _logger.LogError(ex, "Failed to compatibility-route BasePath update for audiobook {AudiobookId}", id);
-                        return new ObjectResult(new { message = "Failed to update BasePath", error = ex.Message })
+                        return new ObjectResult(new
+                        {
+                            message = "Failed to update BasePath",
+                            code = "destination_update_failed"
+                        })
                         {
                             StatusCode = StatusCodes.Status500InternalServerError
                         };
@@ -94,6 +105,7 @@ namespace Listenarr.Api.Features.Library
                     id,
                     request,
                     basePathRewritten,
+                    suppressStaleImageUrl,
                     metadataUpdateRequested));
         }
 
@@ -102,6 +114,36 @@ namespace Listenarr.Api.Features.Library
             using var scope = _scopeFactory.CreateScope();
             var repository = scope.ServiceProvider.GetRequiredService<IAudiobookRepository>();
             return await repository.GetByIdAsync(id);
+        }
+
+        private async Task<bool> IsPathInsideBasePathAsync(
+            string? candidatePath,
+            string? basePath)
+        {
+            if (string.IsNullOrWhiteSpace(candidatePath)
+                || string.IsNullOrWhiteSpace(basePath))
+            {
+                return false;
+            }
+
+            try
+            {
+                var resolution = await _fileSystemSemanticsResolver.ResolveAsync(
+                    basePath,
+                    FileSystemCaseSensitivityMode.Auto);
+                return resolution.State == PathIdentityState.Valid
+                    && FileSystemPathIdentity.IsSameOrInside(
+                        candidatePath,
+                        basePath,
+                        resolution.Semantics);
+            }
+            catch (Exception exception) when (exception is
+                IOException or UnauthorizedAccessException or ArgumentException or
+                InvalidOperationException or NotSupportedException or PathTooLongException or
+                System.Security.SecurityException)
+            {
+                return false;
+            }
         }
 
         private static bool HasMetadataUpdates(AudiobookUpdateRequest request) =>

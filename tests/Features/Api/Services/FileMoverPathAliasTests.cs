@@ -32,13 +32,9 @@ public sealed class FileMoverPathAliasTests : BaseTests, IDisposable
         Directory.CreateDirectory(_root);
     }
 
-    [Fact]
+    [LinuxFact]
     public async Task MoveDirectoryAsync_DestinationSymbolicLinkAlias_IsBlockedBeforeMutation()
     {
-        if (OperatingSystem.IsWindows())
-        {
-            return;
-        }
 
         var source = Path.Join(_root, "destination-alias-source");
         var destination = Path.Join(_root, "destination-alias");
@@ -56,13 +52,9 @@ public sealed class FileMoverPathAliasTests : BaseTests, IDisposable
         Assert.Equal("audio", await File.ReadAllTextAsync(Path.Join(source, "book.m4b")));
     }
 
-    [Fact]
+    [LinuxFact]
     public async Task MoveDirectoryAsync_SourceSymbolicLinkAlias_IsBlockedBeforeMutation()
     {
-        if (OperatingSystem.IsWindows())
-        {
-            return;
-        }
 
         var destination = Path.Join(_root, "source-alias-target");
         var source = Path.Join(_root, "source-alias");
@@ -80,13 +72,9 @@ public sealed class FileMoverPathAliasTests : BaseTests, IDisposable
         Assert.Equal("audio", await File.ReadAllTextAsync(Path.Join(destination, "book.m4b")));
     }
 
-    [Fact]
+    [LinuxFact]
     public async Task MoveDirectoryAsync_SymbolicLinkAncestorAlias_IsBlockedBeforeMutation()
     {
-        if (OperatingSystem.IsWindows())
-        {
-            return;
-        }
 
         var physicalParent = Path.Join(_root, "physical-parent");
         var source = Path.Join(physicalParent, "book");

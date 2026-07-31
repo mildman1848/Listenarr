@@ -603,6 +603,12 @@ public sealed class EfMoveScanHandoffStoreTests : BaseTests
         };
         SetPathIdentities(job);
         db.MoveJobs.Add(job);
+        db.MoveJobEntries.Add(new MoveJobEntry
+        {
+            MoveJobId = job.Id,
+            RelativePath = string.Empty,
+            EntryType = MoveJobEntryType.Directory
+        });
         await db.SaveChangesAsync();
         return job;
     }
@@ -628,6 +634,12 @@ public sealed class EfMoveScanHandoffStoreTests : BaseTests
         };
         SetPathIdentities(move);
         db.MoveJobs.Add(move);
+        db.MoveJobEntries.Add(new MoveJobEntry
+        {
+            MoveJobId = move.Id,
+            RelativePath = string.Empty,
+            EntryType = MoveJobEntryType.Directory
+        });
         db.MoveScanHandoffs.Add(handoff);
         await db.SaveChangesAsync();
         return handoff;

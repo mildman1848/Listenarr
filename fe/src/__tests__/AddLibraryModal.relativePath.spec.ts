@@ -72,6 +72,35 @@ describe('AddLibraryModal relative path derivation', () => {
     )
   })
 
+  it('submits an exact Unix destination whose trailing whitespace is significant', async () => {
+    const { apiService } = await import('@/services/api')
+    vi.mocked(apiService.addToLibrary).mockClear()
+    const wrapper = mount(AddLibraryModal, {
+      props: {
+        visible: false,
+        book: fakeBook,
+      },
+      attachTo: document.body,
+      global: {
+        plugins: [(await import('pinia')).createPinia()],
+      },
+    })
+
+    await wrapper.setProps({ visible: true })
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    ;(wrapper.vm as unknown as { selectedRootId: number }).selectedRootId = 0
+    ;(wrapper.vm as unknown as { customRootPath: string }).customRootPath = '/library/Author/Title '
+    await wrapper.vm.$nextTick()
+    await (wrapper.vm as unknown as { addToLibrary: () => Promise<void> }).addToLibrary()
+
+    expect(apiService.addToLibrary).toHaveBeenCalledTimes(1)
+    expect(apiService.addToLibrary).toHaveBeenCalledWith(
+      expect.any(Object),
+      expect.objectContaining({ destinationPath: '/library/Author/Title ' }),
+    )
+    wrapper.unmount()
+  })
+
   it('shows relative path (full minus root) when preview returns fullPath and root configured', async () => {
     const wrapper = mount(AddLibraryModal, {
       props: {

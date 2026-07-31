@@ -24,6 +24,7 @@ public sealed record MoveScanHandoffClaim(
     int AudiobookId,
     string TargetPath,
     PathIdentitySnapshot TargetIdentity,
+    IReadOnlyList<MoveJobEntry> TargetManifest,
     int AttemptGeneration,
     string LeaseOwner,
     int LeaseGeneration);

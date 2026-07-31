@@ -19,13 +19,30 @@ using Listenarr.Domain.Common;
 
 namespace Listenarr.Application.Audiobooks.Contracts
 {
+    public enum ScanAuthorizationMode
+    {
+        ResolveCurrentAudiobookPath,
+        PreauthorizedPath,
+        MoveHandoff
+    }
+
+    public static class ScanJobPublicError
+    {
+        public static string? FromInternal(string? error) =>
+            string.IsNullOrWhiteSpace(error)
+                ? null
+                : "The scan failed. Review the server logs for details.";
+    }
+
     public sealed record ScanEnqueueCommand(
         Audiobook Audiobook,
         string? Path = null,
         PathIdentitySnapshot? PathIdentity = null,
+        ScanPathPhysicalIdentity? PhysicalIdentity = null,
         string? CorrelationId = null,
         string? DownloadId = null,
-        bool IsAuthoritativeScope = true);
+        bool IsAuthoritativeScope = true,
+        ScanAuthorizationMode AuthorizationMode = ScanAuthorizationMode.ResolveCurrentAudiobookPath);
 
     public interface IScanQueueService
     {
@@ -36,7 +53,8 @@ namespace Listenarr.Application.Audiobooks.Contracts
             string? downloadId = null);
         Task<Guid?> EnqueueMoveHandoffScanAsync(
             Audiobook audiobook,
-            MoveScanHandoffClaim claim);
+            MoveScanHandoffClaim claim,
+            ScanPathPhysicalIdentity physicalIdentity);
         Task<Guid?> RequeueScanAsync(Guid jobId);
         Task CommitTerminalJobStatusAsync(
             Guid jobId,

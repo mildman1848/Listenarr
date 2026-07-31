@@ -31,6 +31,19 @@ namespace Listenarr.Application.Audiobooks.Contracts.Repositories
             AudiobookFilePathIdentity identity,
             CancellationToken ct = default);
         Task UpdateAsync(AudiobookFile file, CancellationToken ct = default);
+        Task<bool> ReplacePhysicalGenerationAsync(
+            int fileId,
+            int audiobookId,
+            string? expectedPath,
+            string? expectedPhysicalObjectIdentity,
+            AudiobookFile replacement,
+            CancellationToken ct = default);
+        Task<bool> DeletePhysicalGenerationAsync(
+            int fileId,
+            int audiobookId,
+            string? expectedPath,
+            string? expectedPhysicalObjectIdentity,
+            CancellationToken ct = default);
         Task DeleteByAudiobookIdAsync(int audiobookId, CancellationToken ct = default);
         Task DeleteAsync(int id, CancellationToken ct = default);
         Task<List<string>> GetAllFilePathsAsync(

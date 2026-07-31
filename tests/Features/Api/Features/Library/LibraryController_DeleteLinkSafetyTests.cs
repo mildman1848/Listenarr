@@ -33,10 +33,9 @@ public class LibraryController_DeleteLinkSafetyTests : BaseTests
         await File.WriteAllTextAsync(externalFile, "external");
         await AddAuthorizedRootAsync(tempRoot);
 
-        if (!TryCreateDirectoryLink(linkedDirectory, externalFolder))
-        {
-            return;
-        }
+        Assert.True(
+            TryCreateDirectoryLink(linkedDirectory, externalFolder),
+            "The required directory link could not be created.");
 
         var audiobook = await _audiobookRepository.AddAsync(new AudiobookBuilder()
             .WithTitle("Linked Book")
@@ -143,7 +142,7 @@ public class LibraryController_DeleteLinkSafetyTests : BaseTests
             if (!TryCreateDirectoryLink(bookFolder, externalFolder))
             {
                 Directory.Move(displacedFolder, bookFolder);
-                return;
+                Assert.Fail("The required directory link could not be created.");
             }
 
             replaced = true;
@@ -152,11 +151,9 @@ public class LibraryController_DeleteLinkSafetyTests : BaseTests
         var service = _provider.GetRequiredService<IAudiobookFilesystemDeleteService>();
         var result = await service.DeleteAsync(audiobook, deleteFolder: true);
 
-        if (!replaced)
-        {
-            return;
-        }
-
+        Assert.True(
+            replaced,
+            "The filesystem deletion path did not reach the replacement hook.");
         Assert.True(File.Exists(displacedFile));
         Assert.Equal("owned audio", await File.ReadAllTextAsync(displacedFile));
         Assert.True(File.Exists(externalFile));

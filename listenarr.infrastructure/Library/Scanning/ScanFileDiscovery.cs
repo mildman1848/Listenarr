@@ -22,7 +22,8 @@ internal static partial class ScanFileDiscovery
         ILogger logger,
         FileSystemPathSemantics semantics,
         IReadOnlyCollection<string>? ownedPaths = null,
-        IReadOnlyDictionary<string, int>? ownershipByCanonicalPath = null)
+        IReadOnlyDictionary<string, int>? ownershipByCanonicalPath = null,
+        PinnedDirectoryCreation.PinnedDirectoryAnchor? pinnedScanRoot = null)
     {
         ArgumentNullException.ThrowIfNull(fileSystem);
         ArgumentException.ThrowIfNullOrWhiteSpace(scanRoot);
@@ -34,7 +35,8 @@ internal static partial class ScanFileDiscovery
             scanRoot,
             jobId,
             logger,
-            semantics);
+            semantics,
+            pinnedScanRoot);
         var issues = enumeration.Issues.ToList();
         var canonicalRoot = FileSystemPathIdentity.Canonicalize(
             scanRoot,
@@ -236,6 +238,8 @@ internal static partial class ScanFileDiscovery
             attributed.OrderBy(path => path, semantics.Comparer).ToList(),
             boundaries,
             enumeration.EnumeratedDirectories,
+            enumeration.DirectoryObjectIdentities,
+            enumeration.FileObjectIdentities,
             selectedStableIdentifierBoundary,
             identifierBoundaries.Count > 1,
             issues);

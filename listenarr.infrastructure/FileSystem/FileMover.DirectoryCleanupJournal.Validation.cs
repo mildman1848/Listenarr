@@ -46,16 +46,34 @@ public partial class FileMover
         var expectedFilePaths = payload.Files
             .Select(file => file.RelativePath)
             .ToHashSet(StringComparer.Ordinal);
-        var actualFilePaths = actualFiles
-            .Select(path => GetVerifiedRelativePath(candidateRoot, path))
-            .ToHashSet(StringComparer.Ordinal);
+        var recoveryFiles = payload.Files.ToDictionary(
+            file => GetCleanupRecoveryRelativePath(payload, file),
+            file => file,
+            StringComparer.Ordinal);
+        var actualLogicalFilePaths = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var actualFile in actualFiles)
+        {
+            var actualRelative = GetVerifiedRelativePath(
+                candidateRoot,
+                actualFile);
+            var logicalRelative = expectedFilePaths.Contains(actualRelative)
+                ? actualRelative
+                : recoveryFiles.TryGetValue(actualRelative, out var recoveryFile)
+                    ? recoveryFile.RelativePath
+                    : null;
+            if (logicalRelative == null
+                || !actualLogicalFilePaths.Add(logicalRelative))
+            {
+                return false;
+            }
+        }
+
         var expectedDirectoryPaths = payload.Directories.Keys
             .ToHashSet(StringComparer.Ordinal);
         var actualDirectoryPaths = actualDirectories
             .Select(path => GetVerifiedRelativePath(candidateRoot, path))
             .ToHashSet(StringComparer.Ordinal);
-        if (!expectedFilePaths.SetEquals(actualFilePaths)
-            || !expectedDirectoryPaths.SetEquals(actualDirectoryPaths))
+        if (!expectedDirectoryPaths.SetEquals(actualDirectoryPaths))
         {
             return false;
         }
@@ -66,23 +84,39 @@ public partial class FileMover
                 candidateRoot,
                 file.RelativePath,
                 "quarantined cleanup file");
-            if (!TryGetRegularFileIdentity(candidate, out var identity)
-                || identity != file.Identity)
+            if (!File.Exists(candidate))
             {
-                return false;
+                candidate = ResolveSnapshotPath(
+                    candidateRoot,
+                    GetCleanupRecoveryRelativePath(payload, file),
+                    "quarantined cleanup recovery file");
             }
-            await using var stream = new FileStream(
-                candidate,
-                FileMode.Open,
-                FileAccess.Read,
-                FileShare.Read | FileShare.Delete,
-                128 * 1024,
-                FileOptions.Asynchronous | FileOptions.SequentialScan);
-            if (stream.Length != file.Length
-                || !string.Equals(
-                    Convert.ToHexString(await SHA256.HashDataAsync(stream)),
-                    file.Sha256,
-                    StringComparison.Ordinal))
+
+            var candidateExists = File.Exists(candidate);
+            if (candidateExists)
+            {
+                if (!TryGetRegularFileIdentity(candidate, out var identity)
+                    || identity != file.Identity)
+                {
+                    return false;
+                }
+                await using var stream = new FileStream(
+                    candidate,
+                    FileMode.Open,
+                    FileAccess.Read,
+                    FileShare.Read | FileShare.Delete,
+                    128 * 1024,
+                    FileOptions.Asynchronous | FileOptions.SequentialScan);
+                if (stream.Length != file.Length
+                    || !string.Equals(
+                        Convert.ToHexString(await SHA256.HashDataAsync(stream)),
+                        file.Sha256,
+                        StringComparison.Ordinal))
+                {
+                    return false;
+                }
+            }
+            else if (!validateDestination)
             {
                 return false;
             }
@@ -92,10 +126,59 @@ public partial class FileMover
                     payload.DestinationRoot,
                     file.RelativePath,
                     "cleanup destination file");
-                if (!File.Exists(destination)
-                    || !await FileSystemSafety.FilesHaveSameContentAsync(
-                        candidate,
-                        destination))
+                if (candidateExists)
+                {
+                    if (!await FileSystemSafety.FilesHaveSameContentAsync(
+                            candidate,
+                            destination))
+                    {
+                        return false;
+                    }
+                }
+                else
+                {
+                    using var retention =
+                        await OpenExistingCleanupRetentionAsync(payload, file);
+                    if (retention != null)
+                    {
+                        if (!await retention.CurrentPublicationMatchesAsync(
+                                CancellationToken.None))
+                        {
+                            return false;
+                        }
+                    }
+                    else
+                    {
+                        await using var destinationStream = new FileStream(
+                            destination,
+                            FileMode.Open,
+                            FileAccess.Read,
+                            FileShare.Read | FileShare.Delete,
+                            128 * 1024,
+                            FileOptions.Asynchronous | FileOptions.SequentialScan);
+                        if (destinationStream.Length != file.Length
+                            || !string.Equals(
+                                Convert.ToHexString(
+                                    await SHA256.HashDataAsync(destinationStream)),
+                                file.Sha256,
+                                StringComparison.Ordinal))
+                        {
+                            return false;
+                        }
+                    }
+                }
+
+                if (payload.Version == 2
+                    && (!file.DestinationIdentity.HasValue
+                        || !TryGetRegularFileIdentity(
+                            destination,
+                            out var destinationFileIdentity)
+                        || destinationFileIdentity
+                            != file.DestinationIdentity.Value))
+                {
+                    return false;
+                }
+                if (payload.Version is not (1 or 2))
                 {
                     return false;
                 }
@@ -105,14 +188,20 @@ public partial class FileMover
         return true;
     }
 
-    private static async Task<bool> DeletePinnedCleanupTreeAsync(
+    private async Task<bool> DeletePinnedCleanupTreeAsync(
         PinnedDirectoryCreation.PinnedDirectoryAnchor directory,
         CleanupJournalPayload payload,
         string relativeDirectory)
     {
-        var expectedFiles = payload.Files
-            .Select(file => file.RelativePath)
-            .ToHashSet(StringComparer.Ordinal);
+        var expectedFiles = payload.Files.ToDictionary(
+            file => file.RelativePath,
+            file => file,
+            StringComparer.Ordinal);
+        var recoveryFiles = payload.Files.ToDictionary(
+            file => GetCleanupRecoveryRelativePath(payload, file),
+            file => file,
+            StringComparer.Ordinal);
+        var processedFiles = new HashSet<string>(StringComparer.Ordinal);
         var names = Directory.EnumerateFileSystemEntries(directory.FullPath)
             .Select(Path.GetFileName)
             .Where(name => !string.IsNullOrEmpty(name))
@@ -165,34 +254,184 @@ public partial class FileMover
                     immediateWindows: true);
                 continue;
             }
-            if (!expectedFiles.Contains(relative))
+            var isRecoveryFile = false;
+            if (!expectedFiles.TryGetValue(relative, out var expectedFile))
+            {
+                if (!recoveryFiles.TryGetValue(relative, out expectedFile))
+                {
+                    return false;
+                }
+
+                isRecoveryFile = true;
+            }
+            if (!processedFiles.Add(expectedFile.RelativePath))
             {
                 return false;
             }
+
             using var file = directory.OpenExistingFile(
                 name,
                 requireDeleteAccess: true);
-            var expectedFile = payload.Files.Single(
-                candidate => string.Equals(
-                    candidate.RelativePath,
-                    relative,
-                    StringComparison.Ordinal));
+            if (payload.Version != 2
+                || !expectedFile.DestinationIdentity.HasValue)
+            {
+                return false;
+            }
+
+            using var destinationRoot =
+                PinnedDirectoryCreation.OpenPinnedHierarchyNoFollow(
+                    payload.DestinationRoot,
+                    createMissing: false);
+            using var destinationRootHandle =
+                destinationRoot.DuplicateHandleForOperation();
+            if (!TryGetRegularFileIdentity(
+                    destinationRootHandle,
+                    out var destinationRootIdentity)
+                || destinationRootIdentity != payload.DestinationRootIdentity)
+            {
+                return false;
+            }
+
+            var destinationParentRelative =
+                Path.GetDirectoryName(expectedFile.RelativePath);
+            using var destinationParent = OpenRelativeCleanupDirectory(
+                destinationRoot,
+                destinationParentRelative);
+            using var destinationFile = destinationParent.OpenExistingFile(
+                Path.GetFileName(expectedFile.RelativePath),
+                requireDeleteAccess: false);
+            using var destinationFileHandle =
+                destinationFile.DuplicateHandleForOperation();
             using var fileHandle = file.DuplicateHandleForOperation();
             if (!TryGetRegularFileIdentity(fileHandle, out var fileIdentity)
                 || fileIdentity != expectedFile.Identity
+                || !TryGetRegularFileIdentity(
+                    destinationFileHandle,
+                    out var destinationFileIdentity)
+                || destinationFileIdentity
+                    != expectedFile.DestinationIdentity.Value
                 || !await file.MatchesAsync(
                     expectedFile.Length,
                     expectedFile.Sha256,
                     CancellationToken.None)
+                || !await destinationFile.MatchesAsync(
+                    expectedFile.Length,
+                    expectedFile.Sha256,
+                    CancellationToken.None)
                 || !directory.VisiblePathMatches()
-                || !file.VisiblePathMatches())
+                || !file.VisiblePathMatches()
+                || !destinationRoot.VisiblePathMatches()
+                || !destinationParent.VisiblePathMatches()
+                || !destinationFile.VisiblePathMatches())
             {
                 return false;
             }
+
+            if (AfterCleanupDestinationPinnedForTestAsync != null)
+            {
+                await AfterCleanupDestinationPinnedForTestAsync(
+                    expectedFile.RelativePath);
+            }
+
+            if (!directory.VisiblePathMatches()
+                || !file.VisiblePathMatches()
+                || !destinationRoot.VisiblePathMatches()
+                || !destinationParent.VisiblePathMatches()
+                || !destinationFile.VisiblePathMatches()
+                || !await destinationFile.MatchesAsync(
+                    expectedFile.Length,
+                    expectedFile.Sha256,
+                    CancellationToken.None))
+            {
+                return false;
+            }
+
+            var retentionName =
+                PinnedDestinationRetentionGuard.CreateRetentionName(
+                    payload.OperationId,
+                    expectedFile.RelativePath);
+            using var retention =
+                await PinnedDestinationRetentionGuard.OpenOrCreateAsync(
+                    destinationParent,
+                    Path.GetFileName(expectedFile.RelativePath),
+                    retentionName,
+                    expectedFile.Length,
+                    expectedFile.Sha256,
+                    CancellationToken.None);
+            if (retention == null)
+            {
+                return false;
+            }
+
+            var recoveryName =
+                PinnedDestinationRetentionGuard.CreateSourceRecoveryName(
+                    payload.OperationId,
+                    expectedFile.RelativePath);
+            if (!isRecoveryFile)
+            {
+                file.MoveWithinParent(recoveryName);
+                directory.FlushDirectoryEntry();
+            }
+            if (AfterCleanupSourceFileRetiredForTestAsync != null)
+            {
+                await AfterCleanupSourceFileRetiredForTestAsync(
+                    expectedFile.RelativePath);
+            }
+
+            if (BeforeCleanupSourceRecoveryDeleteForTestAsync != null)
+            {
+                await BeforeCleanupSourceRecoveryDeleteForTestAsync(
+                    expectedFile.RelativePath);
+            }
+
+            if (!await retention.TryLinearizePublicationAsync(
+                    CancellationToken.None))
+            {
+                return false;
+            }
+
             file.Delete(immediateWindows: true);
+            directory.FlushDirectoryEntry();
+            if (AfterCleanupSourceRecoveryDeleteForTestAsync != null)
+            {
+                await AfterCleanupSourceRecoveryDeleteForTestAsync(
+                    expectedFile.RelativePath);
+            }
+
+            if (!await retention.CompleteAsync(CancellationToken.None))
+            {
+                return false;
+            }
+        }
+
+        foreach (var expectedFile in payload.Files.Where(file =>
+            IsDirectChildOfCleanupDirectory(
+                file.RelativePath,
+                relativeDirectory)))
+        {
+            if (processedFiles.Contains(expectedFile.RelativePath))
+            {
+                continue;
+            }
+
+            using var retention = await OpenExistingCleanupRetentionAsync(
+                payload,
+                expectedFile);
+            if (retention == null)
+            {
+                continue;
+            }
+
+            if (!await retention.TryLinearizePublicationAsync(
+                    CancellationToken.None)
+                || !await retention.CompleteAsync(CancellationToken.None))
+            {
+                return false;
+            }
         }
 
         return directory.VisiblePathMatches()
             && !Directory.EnumerateFileSystemEntries(directory.FullPath).Any();
     }
+
 }

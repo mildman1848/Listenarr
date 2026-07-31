@@ -39,6 +39,176 @@ namespace Listenarr.Tests.Features.Api.Features.Library
         }
 
         [Fact]
+        public async Task DeleteAudiobook_DatabaseFailure_PreservesCachedImage()
+        {
+            var audiobook = new Audiobook
+            {
+                Id = 9901,
+                Title = "Delete Commit Failure",
+                Asin = "B000DELETE"
+            };
+            var repository = new Mock<IAudiobookRepository>(MockBehavior.Strict);
+            repository.Setup(service => service.GetByIdAsync(audiobook.Id))
+                .ReturnsAsync(audiobook);
+            repository.Setup(service => service.DeleteByIdAsync(audiobook.Id))
+                .ReturnsAsync(false);
+            var imageCache = new Mock<IImageCacheService>(MockBehavior.Strict);
+            var filesystemDelete = new Mock<IAudiobookFilesystemDeleteService>(
+                MockBehavior.Strict);
+            var fileSystem = new Mock<IFileSystem>(MockBehavior.Strict);
+            Init(services => services
+                .WithSingleton<IAudiobookRepository>(repository.Object)
+                .WithSingleton<IImageCacheService>(imageCache.Object)
+                .WithSingleton<IAudiobookFilesystemDeleteService>(filesystemDelete.Object)
+                .WithSingleton<IFileSystem>(fileSystem.Object));
+
+            var result = await _provider.GetRequiredService<LibraryController>()
+                .DeleteAudiobook(
+                    audiobook.Id,
+                    deleteFiles: false,
+                    deleteFolder: false);
+
+            var failure = Assert.IsType<ObjectResult>(result);
+            Assert.Equal(500, failure.StatusCode);
+            repository.Verify(service => service.GetByIdAsync(audiobook.Id), Times.Once);
+            repository.Verify(service => service.DeleteByIdAsync(audiobook.Id), Times.Once);
+            imageCache.VerifyNoOtherCalls();
+            filesystemDelete.VerifyNoOtherCalls();
+            fileSystem.VerifyNoOtherCalls();
+        }
+
+        [Fact]
+        public async Task DeleteAudiobook_DatabaseFailure_DoesNotDeleteFiles()
+        {
+            var audiobook = new Audiobook
+            {
+                Id = 9902,
+                Title = "Delete Files Commit Failure"
+            };
+            var repository = new Mock<IAudiobookRepository>(MockBehavior.Strict);
+            repository.Setup(service => service.GetByIdAsync(audiobook.Id))
+                .ReturnsAsync(audiobook);
+            repository.Setup(service => service.DeleteByIdAsync(audiobook.Id))
+                .ReturnsAsync(false);
+            var imageCache = new Mock<IImageCacheService>(MockBehavior.Strict);
+            var filesystemDelete = new Mock<IAudiobookFilesystemDeleteService>(
+                MockBehavior.Strict);
+            var fileSystem = new Mock<IFileSystem>(MockBehavior.Strict);
+            Init(services => services
+                .WithSingleton<IAudiobookRepository>(repository.Object)
+                .WithSingleton<IImageCacheService>(imageCache.Object)
+                .WithSingleton<IAudiobookFilesystemDeleteService>(filesystemDelete.Object)
+                .WithSingleton<IFileSystem>(fileSystem.Object));
+
+            var result = await _provider.GetRequiredService<LibraryController>()
+                .DeleteAudiobook(
+                    audiobook.Id,
+                    deleteFiles: true,
+                    deleteFolder: true);
+
+            var failure = Assert.IsType<ObjectResult>(result);
+            Assert.Equal(500, failure.StatusCode);
+            filesystemDelete.VerifyNoOtherCalls();
+            imageCache.VerifyNoOtherCalls();
+            fileSystem.VerifyNoOtherCalls();
+        }
+
+        [Fact]
+        public async Task DeleteAudiobook_CanceledImageCleanupAfterCommit_RemainsSuccessful()
+        {
+            var audiobook = new Audiobook
+            {
+                Id = 9904,
+                Title = "Delete Image Cleanup Cancellation",
+                Asin = "B000CANCEL"
+            };
+            var repository = new Mock<IAudiobookRepository>(MockBehavior.Strict);
+            repository.Setup(service => service.GetByIdAsync(audiobook.Id))
+                .ReturnsAsync(audiobook);
+            repository.Setup(service => service.DeleteByIdAsync(audiobook.Id))
+                .ReturnsAsync(true);
+            var imageCache = new Mock<IImageCacheService>(MockBehavior.Strict);
+            imageCache.Setup(service => service.GetCachedImagePathAsync(audiobook.Asin))
+                .ThrowsAsync(new TaskCanceledException("Injected image cleanup cancellation."));
+            var filesystemDelete = new Mock<IAudiobookFilesystemDeleteService>(
+                MockBehavior.Strict);
+            var fileSystem = new Mock<IFileSystem>(MockBehavior.Strict);
+            Init(services => services
+                .WithSingleton<IAudiobookRepository>(repository.Object)
+                .WithSingleton<IImageCacheService>(imageCache.Object)
+                .WithSingleton<IAudiobookFilesystemDeleteService>(filesystemDelete.Object)
+                .WithSingleton<IFileSystem>(fileSystem.Object));
+
+            var result = await _provider.GetRequiredService<LibraryController>()
+                .DeleteAudiobook(
+                    audiobook.Id,
+                    deleteFiles: false,
+                    deleteFolder: false);
+
+            Assert.IsType<OkObjectResult>(result);
+            repository.Verify(service => service.DeleteByIdAsync(audiobook.Id), Times.Once);
+            imageCache.Verify(service => service.GetCachedImagePathAsync(audiobook.Asin), Times.Once);
+            filesystemDelete.VerifyNoOtherCalls();
+            fileSystem.VerifyNoOtherCalls();
+        }
+
+        [Fact]
+        public async Task DeleteAudiobook_FilesystemFailureAfterCommit_ReturnsSuccessWithWarning()
+        {
+            var audiobook = new Audiobook
+            {
+                Id = 9903,
+                Title = "Delete Cleanup Failure"
+            };
+            var deleteCommitted = false;
+            var repository = new Mock<IAudiobookRepository>(MockBehavior.Strict);
+            repository.Setup(service => service.GetByIdAsync(audiobook.Id))
+                .ReturnsAsync(audiobook);
+            repository.Setup(service => service.DeleteByIdAsync(audiobook.Id))
+                .ReturnsAsync(() =>
+                {
+                    deleteCommitted = true;
+                    return true;
+                });
+            var imageCache = new Mock<IImageCacheService>(MockBehavior.Strict);
+            var filesystemDelete = new Mock<IAudiobookFilesystemDeleteService>(
+                MockBehavior.Strict);
+            filesystemDelete.Setup(service => service.DeleteAsync(
+                    audiobook,
+                    true,
+                    CancellationToken.None))
+                .Returns(() =>
+                {
+                    Assert.True(deleteCommitted);
+                    return Task.FromException<AudiobookFilesystemDeleteResult>(
+                        new IOException("Injected cleanup failure."));
+                });
+            var fileSystem = new Mock<IFileSystem>(MockBehavior.Strict);
+            Init(services => services
+                .WithSingleton<IAudiobookRepository>(repository.Object)
+                .WithSingleton<IImageCacheService>(imageCache.Object)
+                .WithSingleton<IAudiobookFilesystemDeleteService>(filesystemDelete.Object)
+                .WithSingleton<IFileSystem>(fileSystem.Object));
+
+            var result = await _provider.GetRequiredService<LibraryController>()
+                .DeleteAudiobook(
+                    audiobook.Id,
+                    deleteFiles: true,
+                    deleteFolder: true);
+
+            var ok = Assert.IsType<OkObjectResult>(result);
+            var json = System.Text.Json.JsonSerializer.Serialize(ok.Value);
+            Assert.Contains("could not be fully deleted", json, StringComparison.Ordinal);
+            repository.Verify(service => service.DeleteByIdAsync(audiobook.Id), Times.Once);
+            filesystemDelete.Verify(service => service.DeleteAsync(
+                audiobook,
+                true,
+                CancellationToken.None), Times.Once);
+            imageCache.VerifyNoOtherCalls();
+            fileSystem.VerifyNoOtherCalls();
+        }
+
+        [Fact]
         [Trait("Method", "DeleteAudiobook")]
         [Trait("Scenario", "DeleteFiles_RemovesAllFilesInFolderButPreservesDirectory")]
         public async Task DeleteAudiobook_DeleteFiles_RemovesAllFilesInFolderButPreservesDirectory()
@@ -444,13 +614,9 @@ namespace Listenarr.Tests.Features.Api.Features.Library
             Assert.False(File.Exists(audioPath));
         }
 
-        [Fact]
+        [LinuxFact]
         public async Task FilesystemDelete_NestedRootUsesMostSpecificSemantics()
         {
-            if (OperatingSystem.IsWindows())
-            {
-                return;
-            }
 
             var outerRoot = FileService.GetTempDirectory("listenarr-delete-nested-outer");
             var innerRoot = Path.Join(outerRoot, "Sensitive Library");

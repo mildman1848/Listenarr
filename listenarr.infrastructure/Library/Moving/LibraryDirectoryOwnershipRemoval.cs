@@ -63,7 +63,7 @@ internal static class LibraryDirectoryOwnershipRemoval
                     ?? throw new InvalidOperationException(
                         "The durable directory ownership path has no parent directory.");
                 using var parent =
-                    PinnedDirectoryCreation.OpenPinnedDirectoryNoFollow(parentPath);
+                    PinnedDirectoryCreation.OpenPinnedBoundary(parentPath);
                 using var publication =
                     parent.OpenExistingChildForPublication(
                         Path.GetFileName(quarantinePath));
@@ -98,9 +98,11 @@ internal static class LibraryDirectoryOwnershipRemoval
 
     public static bool TryValidateLegacyMissingBothRecovery(
         LibraryDirectoryOwnership ownership,
+        PinnedDirectoryCreation.PinnedDirectoryAnchor parent,
         out LibraryDirectoryOwnershipMarker.MarkerPayload? legacyPayload)
     {
         ArgumentNullException.ThrowIfNull(ownership);
+        ArgumentNullException.ThrowIfNull(parent);
         legacyPayload = null;
         var originalPath = ownership.CanonicalPath;
         var quarantinePath = GetQuarantinePath(ownership);
@@ -115,11 +117,19 @@ internal static class LibraryDirectoryOwnershipRemoval
         var parentPath = Path.GetDirectoryName(originalPath)
             ?? throw new InvalidOperationException(
                 "The durable directory ownership path has no parent directory.");
+        if (!FileSystemPathIdentity.AreEquivalent(
+                parent.FullPath,
+                parentPath,
+                ownership.GetIdentity().Semantics)
+            || !parent.VisiblePathMatches())
+        {
+            throw new InvalidOperationException(
+                "The authorized ownership parent no longer matches the legacy recovery path.");
+        }
+
         var siblingPath = LibraryDirectoryOwnershipMarker
             .GetMarkerPaths(ownership)[1];
         var temporaryName = Path.GetFileName(siblingPath) + ".v2.tmp";
-        using var parent =
-            PinnedDirectoryCreation.OpenPinnedDirectoryNoFollow(parentPath);
         using var temporary = parent.TryOpenExistingFile(
             temporaryName,
             requireDeleteAccess: false);

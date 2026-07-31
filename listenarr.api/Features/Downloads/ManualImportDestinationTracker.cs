@@ -20,9 +20,43 @@ public sealed class ManualImportDestinationTracker(
 
     public int Count => _usedDestinationsByBoundary.Values.Sum(set => set.Count);
 
-    public async Task<ManualImportDestinationReservation> PlanUniqueAsync(
+    public Task<ManualImportDestinationReservation> PlanUniqueAsync(
+        string desiredDestination,
+        CancellationToken cancellationToken = default) =>
+        PlanAsync(
+            sourcePath: null,
+            desiredDestination,
+            allowExistingEquivalent: false,
+            cancellationToken);
+
+    public Task<ManualImportDestinationReservation> PlanIdempotentOrUniqueAsync(
+        string sourcePath,
         string desiredDestination,
         CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(sourcePath);
+        return PlanAsync(
+            sourcePath,
+            desiredDestination,
+            allowExistingEquivalent: true,
+            cancellationToken);
+    }
+
+    public void Commit(ManualImportDestinationReservation reservation)
+    {
+        if (!_usedDestinationsByBoundary.TryGetValue(reservation.BoundaryKey, out var usedDestinations))
+        {
+            throw new InvalidOperationException("Destination reservation boundary was not planned.");
+        }
+
+        usedDestinations.Add(reservation.Path);
+    }
+
+    private async Task<ManualImportDestinationReservation> PlanAsync(
+        string? sourcePath,
+        string desiredDestination,
+        bool allowExistingEquivalent,
+        CancellationToken cancellationToken)
     {
         if (string.IsNullOrWhiteSpace(desiredDestination))
         {
@@ -48,6 +82,20 @@ public sealed class ManualImportDestinationTracker(
             _usedDestinationsByBoundary[boundaryKey] = usedDestinations;
         }
 
+        if (allowExistingEquivalent
+            && sourcePath != null
+            && !usedDestinations.Contains(desiredDestination)
+            && fileSystem.FileExists(desiredDestination)
+            && await fileSystem.FilesHaveSameContentAsync(
+                sourcePath,
+                desiredDestination,
+                cancellationToken))
+        {
+            return new ManualImportDestinationReservation(
+                desiredDestination,
+                boundaryKey);
+        }
+
         // Use the destination volume's case rules for both in-memory batch collisions
         // and pre-existing path checks so macOS/Linux mounted case-insensitive volumes
         // do not accept two case-only variants in the same successful import batch.
@@ -56,16 +104,6 @@ public sealed class ManualImportDestinationTracker(
             fileSystem.FileExists,
             usedDestinations);
         return new ManualImportDestinationReservation(uniqueDestination, boundaryKey);
-    }
-
-    public void Commit(ManualImportDestinationReservation reservation)
-    {
-        if (!_usedDestinationsByBoundary.TryGetValue(reservation.BoundaryKey, out var usedDestinations))
-        {
-            throw new InvalidOperationException("Destination reservation boundary was not planned.");
-        }
-
-        usedDestinations.Add(reservation.Path);
     }
 }
 

@@ -1,3 +1,4 @@
+using Listenarr.Tests.Common;
 using Microsoft.EntityFrameworkCore;
 
 namespace Listenarr.Tests.Features.Infrastructure.Library.Moving;
@@ -336,13 +337,9 @@ public partial class AudiobookContentMoveServiceTests
         Assert.False(File.Exists(writePath));
     }
 
-    [Fact]
+    [WindowsFact]
     public async Task GetRecoverableMoveAsync_LockedAuthoritativeMarker_IsRetryableAndPreserved()
     {
-        if (!OperatingSystem.IsWindows())
-        {
-            return;
-        }
 
         var source = FileService.GetTempDirectory("content-move-locked-marker-src");
         var sourceFile = await FileService.GetFileAsync(source, "book.m4b", "audio");

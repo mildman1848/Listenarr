@@ -121,6 +121,7 @@ internal sealed partial class AudiobookContentMoveService
         }
 
         var expectedPaths = new HashSet<string>(StringComparer.Ordinal);
+        var retentionPaths = new HashSet<string>(StringComparer.Ordinal);
         foreach (var entry in manifest)
         {
             if (IsRootManifestEntry(entry))
@@ -142,6 +143,18 @@ internal sealed partial class AudiobookContentMoveService
             }
 
             expectedPaths.Add(FileSystemPathIdentity.CreateKey("move-target", expectedPath, targetSemantics));
+            if (entry.EntryType == MoveJobEntryType.File
+                && Path.GetDirectoryName(expectedPath) is { } expectedParent)
+            {
+                retentionPaths.Add(FileSystemPathIdentity.CreateKey(
+                    "move-target-retention",
+                    Path.Join(
+                        expectedParent,
+                        PinnedDestinationRetentionGuard.CreateRetentionName(
+                            jobId,
+                            entry.RelativePath)),
+                    targetSemantics));
+            }
         }
 
         var markerPath = GetRecoveryMarkerPath(destinationRoot, jobId);
@@ -188,6 +201,15 @@ internal sealed partial class AudiobookContentMoveService
                         quarantineOwnership.DirectoryPath,
                         targetSemantics))
                 || (sourceInsideDestination && IsSameOrInside(file, source, targetSemantics)))
+            {
+                continue;
+            }
+
+            var fileKey = FileSystemPathIdentity.CreateKey(
+                "move-target-retention",
+                file,
+                targetSemantics);
+            if (retentionPaths.Contains(fileKey))
             {
                 continue;
             }

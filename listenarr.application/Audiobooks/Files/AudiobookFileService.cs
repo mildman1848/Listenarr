@@ -45,6 +45,38 @@ namespace Listenarr.Application.Audiobooks.Files
             string filePath,
             string? source = "scan",
             CancellationToken cancellationToken = default) =>
+            EnsureAudiobookFileAsync(
+                audiobook,
+                filePath,
+                registrationLease: null,
+                source,
+                cancellationToken);
+
+        public Task<bool> EnsureAudiobookFileAsync(
+            Audiobook audiobook,
+            IAudiobookFileRegistrationLease registrationLease,
+            string? source = "scan",
+            CancellationToken cancellationToken = default)
+        {
+            ArgumentNullException.ThrowIfNull(registrationLease);
+            ArgumentException.ThrowIfNullOrWhiteSpace(registrationLease.PublicPath);
+            ArgumentException.ThrowIfNullOrWhiteSpace(registrationLease.MetadataPath);
+            ArgumentException.ThrowIfNullOrWhiteSpace(
+                registrationLease.PhysicalObjectIdentity);
+            return EnsureAudiobookFileAsync(
+                audiobook,
+                registrationLease.PublicPath,
+                registrationLease,
+                source,
+                cancellationToken);
+        }
+
+        private Task<bool> EnsureAudiobookFileAsync(
+            Audiobook audiobook,
+            string filePath,
+            IAudiobookFileRegistrationLease? registrationLease,
+            string? source,
+            CancellationToken cancellationToken) =>
             filesystemMutationCoordinator.ExecuteExclusiveAsync(
                 globalToken => audiobookOperationCoordinator.ExecuteExclusiveAsync(
                     audiobook.Id,
@@ -62,6 +94,7 @@ namespace Listenarr.Application.Audiobooks.Files
                         return await EnsureAudiobookFileCoreAsync(
                             currentAudiobook,
                             filePath,
+                            registrationLease,
                             source,
                             token);
                     },
@@ -72,11 +105,23 @@ namespace Listenarr.Application.Audiobooks.Files
         private async Task<bool> EnsureAudiobookFileCoreAsync(
             Audiobook audiobook,
             string filePath,
+            IAudiobookFileRegistrationLease? registrationLease,
             string? source,
             CancellationToken cancellationToken)
         {
             try
             {
+                if (registrationLease != null
+                    && !registrationLease.MatchesCurrentPublication())
+                {
+                    logger.LogInformation(
+                        "Skipping audiobook file registration because the discovered file generation is no longer published for audiobook {AudiobookId}: {Path}",
+                        audiobook.Id,
+                        LogRedaction.SanitizeFilePath(filePath));
+                    return false;
+                }
+
+                var metadataPath = registrationLease?.MetadataPath ?? filePath;
                 if (!fileSystem.FileExists(filePath)
                     || fileSystem.IsReparsePoint(filePath))
                 {
@@ -215,63 +260,14 @@ namespace Listenarr.Application.Audiobooks.Files
                     return false;
                 }
 
-                AudioMetadata? meta = null;
-                try
-                {
-                    var fileInfoForCache = new FileInfo(filePath);
-                    var ticks = fileInfoForCache.Exists ? fileInfoForCache.LastWriteTimeUtc.Ticks : 0L;
-                    var cacheKey = $"meta::{filePath}::{ticks}";
-                    if (!memoryCache.TryGetValue(cacheKey, out var cachedObj) || !(cachedObj is AudioMetadata cachedMeta))
-                    {
-                        using var _ = await limiter.Sem.LockAsync();
-                        meta = await metadataService.ExtractFileMetadataAsync(filePath);
-                        memoryCache.Set(cacheKey, meta, TimeSpan.FromMinutes(5));
-                    }
-                    else
-                    {
-                        meta = cachedMeta;
-                    }
-                }
-                catch (Exception mEx) when (mEx is not OperationCanceledException && mEx is not OutOfMemoryException && mEx is not StackOverflowException)
-                {
-                    logger.LogInformation(mEx, "Metadata extraction failed for {Path}", LogRedaction.SanitizeFilePath(filePath));
-                }
+                var cacheIdentity = registrationLease?.PhysicalObjectIdentity
+                    ?? filePath;
+                var meta = await ExtractMetadataAsync(
+                    metadataPath,
+                    cacheIdentity,
+                    filePath);
 
-                try
-                {
-                    var needRetry = meta == null || (meta.Duration == TimeSpan.Zero && string.IsNullOrEmpty(meta.Format));
-                    if (needRetry)
-                    {
-                        var installTask = ffmpegService.EnsureFfprobeInstalledAsync();
-                        var completed = await Task.WhenAny(installTask, Task.Delay(TimeSpan.FromSeconds(10)));
-                        if (completed == installTask)
-                        {
-                            try
-                            {
-                                var ffpath = await installTask;
-                                if (!string.IsNullOrEmpty(ffpath))
-                                {
-                                    using var _ = await limiter.Sem.LockAsync();
-                                    meta = await metadataService.ExtractFileMetadataAsync(filePath);
-                                    var fileInfoForCache2 = new FileInfo(filePath);
-                                    var ticks2 = fileInfoForCache2.Exists ? fileInfoForCache2.LastWriteTimeUtc.Ticks : 0L;
-                                    var cacheKey2 = $"meta::{filePath}::{ticks2}";
-                                    memoryCache.Set(cacheKey2, meta, TimeSpan.FromMinutes(5));
-                                }
-                            }
-                            catch (Exception rex) when (rex is not OperationCanceledException && rex is not OutOfMemoryException && rex is not StackOverflowException)
-                            {
-                                logger.LogInformation(rex, "Retry metadata extraction failed for {Path}", LogRedaction.SanitizeFilePath(filePath));
-                            }
-                        }
-                    }
-                }
-                catch (Exception exRetry) when (exRetry is not OperationCanceledException && exRetry is not OutOfMemoryException && exRetry is not StackOverflowException)
-                {
-                    logger.LogDebug(exRetry, "Non-fatal error while attempting ffprobe install/retry for {Path}", LogRedaction.SanitizeFilePath(filePath));
-                }
-
-                var fi = new FileInfo(filePath);
+                var fi = new FileInfo(metadataPath);
                 var fileRecord = AudiobookFile.CreateUnresolved(filePath);
                 fileRecord.AudiobookId = audiobook.Id;
                 fileRecord.Size = fi.Exists ? fi.Length : null;
@@ -284,12 +280,28 @@ namespace Listenarr.Application.Audiobooks.Files
                 fileRecord.Bitrate = meta?.BitRate;
                 fileRecord.SampleRate = meta?.SampleRate;
                 fileRecord.Channels = meta?.Channels;
+                if (registrationLease != null)
+                {
+                    fileRecord.ApplyPhysicalObjectIdentity(
+                        registrationLease.PhysicalObjectIdentity,
+                        DateTime.UtcNow);
+                }
 
                 var attempts = 0;
                 while (true)
                 {
                     try
                     {
+                        if (registrationLease != null
+                            && !registrationLease.MatchesCurrentPublication())
+                        {
+                            logger.LogInformation(
+                                "Skipping audiobook file claim because the discovered file generation changed before persistence for audiobook {AudiobookId}: {Path}",
+                                audiobook.Id,
+                                LogRedaction.SanitizeFilePath(filePath));
+                            return false;
+                        }
+
                         var claim = await ClaimAudiobookFileAsync(
                             audiobook,
                             fileRecord,
@@ -298,6 +310,18 @@ namespace Listenarr.Application.Audiobooks.Files
                         if (!claim.Created)
                         {
                             LogClaimRejection(audiobook.Id, filePath, claim);
+                            return false;
+                        }
+
+                        if (registrationLease != null
+                            && !registrationLease.MatchesCurrentPublication())
+                        {
+                            await DeleteCreatedPhysicalGenerationAsync(
+                                fileRecord);
+                            logger.LogWarning(
+                                "Removed audiobook file claim because the public file generation changed during persistence for audiobook {AudiobookId}: {Path}",
+                                audiobook.Id,
+                                LogRedaction.SanitizeFilePath(filePath));
                             return false;
                         }
 

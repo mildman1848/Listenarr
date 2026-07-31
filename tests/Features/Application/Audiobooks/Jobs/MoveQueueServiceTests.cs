@@ -17,6 +17,7 @@
  */
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.EntityFrameworkCore;
+using Listenarr.Tests.Common;
 using Listenarr.Tests.Mocks;
 using AppMoveQueueService = Listenarr.Application.Audiobooks.Jobs.MoveQueueService;
 using MoveQueueService = Listenarr.Tests.Features.Application.Audiobooks.Jobs.MoveQueueServiceTestAdapter;
@@ -188,6 +189,128 @@ namespace Listenarr.Tests.Features.Application.Audiobooks.Jobs
         }
 
         [Fact]
+        public async Task UpdateJobStatus_NotificationCanceledAfterCommit_RemainsSuccessful()
+        {
+            using var cancellation = new CancellationTokenSource();
+            var job = new MoveJob
+            {
+                Id = Guid.NewGuid(),
+                AudiobookId = 42,
+                Status = MoveJobStatus.Running,
+                LeaseOwner = LeaseOwner,
+                LeaseGeneration = 3,
+                LeaseExpiresAt = DateTime.UtcNow.AddMinutes(1)
+            };
+            var persistence = new Mock<IMoveQueuePersistence>();
+            persistence.Setup(store => store.GetByIdAsync(
+                    job.Id,
+                    It.IsAny<CancellationToken>()))
+                .ReturnsAsync(job);
+            persistence.Setup(store => store.UpdateStatusAsync(
+                    job.Id,
+                    LeaseOwner,
+                    job.LeaseGeneration,
+                    MoveJobStatus.Completed,
+                    It.IsAny<MoveJobPhase>(),
+                    null,
+                    MoveFailureKind.None,
+                    It.IsAny<DateTimeOffset>(),
+                    It.IsAny<CancellationToken>()))
+                .Returns(() =>
+                {
+                    cancellation.Cancel();
+                    return Task.FromResult(true);
+                });
+            var relocation = new Mock<IRootFolderRelocationService>();
+            relocation.Setup(service => service.OnMoveJobStateChangedAsync(
+                    job.Id,
+                    It.IsAny<CancellationToken>()))
+                .ThrowsAsync(new OperationCanceledException(
+                    cancellation.Token));
+            var broadcaster = new Mock<IHubBroadcaster>(MockBehavior.Strict);
+            var service = new MoveQueueService(
+                NullLogger<MoveQueueService>.Instance,
+                persistence.Object,
+                broadcaster.Object,
+                TimeProvider.System,
+                BuildSemanticsResolver(),
+                relocation.Object);
+
+            await service.UpdateJobStatusAsync(
+                job.Id,
+                LeaseOwner,
+                job.LeaseGeneration,
+                MoveJobStatus.Completed,
+                cancellationToken: cancellation.Token);
+
+            persistence.Verify(store => store.UpdateStatusAsync(
+                job.Id,
+                LeaseOwner,
+                job.LeaseGeneration,
+                MoveJobStatus.Completed,
+                It.IsAny<MoveJobPhase>(),
+                null,
+                MoveFailureKind.None,
+                It.IsAny<DateTimeOffset>(),
+                cancellation.Token), Times.Once);
+            broadcaster.VerifyNoOtherCalls();
+        }
+
+        [Fact]
+        public async Task NotifyPersistedJobState_InternalError_BroadcastsPublicProjection()
+        {
+            const string secret = "C:\\private\\library\\database-secret";
+            var job = new MoveJob
+            {
+                Id = Guid.NewGuid(),
+                AudiobookId = 42,
+                Status = MoveJobStatus.NeedsAttention,
+                FailureKind = MoveFailureKind.Verification,
+                Error = secret,
+                RequestedPath = "C:\\library\\target",
+                UpdatedAt = DateTime.UtcNow
+            };
+            var persistence = new Mock<IMoveQueuePersistence>();
+            persistence.Setup(store => store.GetByIdAsync(
+                    job.Id,
+                    It.IsAny<CancellationToken>()))
+                .ReturnsAsync(job);
+            var relocation = new Mock<IRootFolderRelocationService>();
+            relocation.Setup(service => service.OnMoveJobStateChangedAsync(
+                    job.Id,
+                    It.IsAny<CancellationToken>()))
+                .Returns(Task.CompletedTask);
+            object? payload = null;
+            var broadcaster = new Mock<IHubBroadcaster>();
+            broadcaster.Setup(service => service.BroadcastAsync(
+                    "MoveJobUpdate",
+                    It.IsAny<object>(),
+                    It.IsAny<CancellationToken>()))
+                .Callback<string, object, CancellationToken>((_, value, _) =>
+                    payload = value)
+                .Returns(Task.CompletedTask);
+            var service = new MoveQueueService(
+                NullLogger<MoveQueueService>.Instance,
+                persistence.Object,
+                broadcaster.Object,
+                TimeProvider.System,
+                BuildSemanticsResolver(),
+                relocation.Object);
+
+            await service.NotifyPersistedJobStateAsync(
+                job.Id,
+                job.Status,
+                job.Error);
+
+            var update = Assert.IsType<MoveJobPublicUpdate>(payload);
+            Assert.Equal(job.Id.ToString(), update.JobId);
+            Assert.Equal(
+                "The moved files could not be verified.",
+                update.Error);
+            Assert.DoesNotContain(secret, update.Error, StringComparison.Ordinal);
+        }
+
+        [Fact]
         public async Task NotifyPersistedJobState_CanceledWaiter_ReleasesPublicationGateEntry()
         {
             var job = new MoveJob
@@ -330,6 +453,28 @@ namespace Listenarr.Tests.Features.Application.Audiobooks.Jobs
         }
 
         [Fact]
+        public async Task GetJobAsync_PersistenceFailure_Propagates()
+        {
+            var jobId = Guid.NewGuid();
+            var persistence = new Mock<IMoveQueuePersistence>();
+            persistence.Setup(store => store.GetByIdAsync(
+                    jobId,
+                    It.IsAny<CancellationToken>()))
+                .ThrowsAsync(new PersistenceException(
+                    "database unavailable",
+                    new InvalidOperationException("provider secret")));
+            var service = new MoveQueueService(
+                NullLogger<MoveQueueService>.Instance,
+                persistence.Object,
+                new NoopHubBroadcaster(),
+                TimeProvider.System,
+                BuildSemanticsResolver());
+
+            await Assert.ThrowsAsync<PersistenceException>(() =>
+                service.GetJobAsync(jobId));
+        }
+
+        [Fact]
         public async Task EnqueueMoveAsync_UnresolvedIdentity_FailsClosedBeforePersisting()
         {
             var persistence = new Mock<IMoveQueuePersistence>();
@@ -460,13 +605,9 @@ namespace Listenarr.Tests.Features.Application.Audiobooks.Jobs
                 Times.Once);
         }
 
-        [Fact]
+        [LinuxFact]
         public async Task EnqueueMoveAsync_CaseDistinctDestinations_OnCaseSensitiveHost_CreateSeparateJobs()
         {
-            if (OperatingSystem.IsWindows())
-            {
-                return;
-            }
 
             var jobs = new List<MoveJob>();
             var persistence = CreateInMemoryPersistence(jobs);

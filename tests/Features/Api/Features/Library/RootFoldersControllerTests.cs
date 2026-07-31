@@ -15,6 +15,8 @@
  * You should have received a copy of the GNU Affero General Public License
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
+using System.Net;
+using System.Text;
 using System.Text.Json;
 using Listenarr.Tests.Common;
 using Microsoft.EntityFrameworkCore;
@@ -37,7 +39,11 @@ namespace Listenarr.Tests.Features.Api.Features.Library
             public System.Threading.Channels.ChannelReader<UnmatchedScanJob> Reader =>
                 System.Threading.Channels.Channel.CreateUnbounded<UnmatchedScanJob>().Reader;
             public Task<Guid> EnqueueAsync(string rootFolderPath) => Task.FromResult(Guid.NewGuid());
-            public bool TryGetJob(Guid id, out UnmatchedScanJob? job) { job = null; return false; }
+            public bool TryGetJob(Guid id, out UnmatchedScanJob? job)
+            {
+                job = LastJob;
+                return job != null && job.Id == id;
+            }
             public void UpdateJob(Guid id, string status, List<UnmatchedFileResult>? results = null, string? error = null) { }
             public bool TryGetLastJobForPath(string rootFolderPath, out UnmatchedScanJob? job)
             {
@@ -83,6 +89,7 @@ namespace Listenarr.Tests.Features.Api.Features.Library
         {
             public List<RootFolder> Store { get; } = new List<RootFolder>();
             public bool ThrowPersistenceConflictOnDelete { get; set; }
+            public Exception? CreateException { get; set; }
 
             public Task<RootFolder?> GetDefaultAsync() => Task.FromResult(Store.Count > 0 ? Store.First() : null);
 
@@ -96,9 +103,14 @@ namespace Listenarr.Tests.Features.Api.Features.Library
 
             public Task<RootFolder> CreateAsync(RootFolder root)
             {
+                if (CreateException != null)
+                {
+                    throw CreateException;
+                }
+
                 // simulate duplicate path error
                 if (Store.Exists(s => string.Equals(s.Path, root.Path, StringComparison.OrdinalIgnoreCase)))
-                    throw new ArgumentException("A root with the same path already exists")
+                    throw new InvalidOperationException("A root with the same path already exists")
 ; root.Id = Store.Count + 1;
                 Store.Add(root);
                 return Task.FromResult(root);
@@ -176,6 +188,44 @@ namespace Listenarr.Tests.Features.Api.Features.Library
         }
 
         [Fact]
+        public void GetUnmatchedResults_RedactsInternalFailureDetails()
+        {
+            var queue = new FakeUnmatchedQueue
+            {
+                LastJob = new UnmatchedScanJob
+                {
+                    Id = Guid.NewGuid(),
+                    RootFolderPath = "C:\\private\\library",
+                    Status = "Failed",
+                    Error = "C:\\private\\library failed with worker secret",
+                    Results =
+                    [
+                        new UnmatchedFileResult
+                        {
+                            FullPath = "C:\\private\\library\\book.m4b",
+                            RelativePath = "book.m4b"
+                        }
+                    ]
+                }
+            };
+            using var db = CreateDb();
+            var controller = new RootFoldersController(
+                new FakeService(),
+                queue,
+                new EfAudiobookFileRepository(db),
+                new AudiobookRepository(db),
+                new LocalFileSystem());
+
+            var result = controller.GetUnmatchedResults(queue.LastJob.Id);
+
+            var ok = Assert.IsType<Microsoft.AspNetCore.Mvc.OkObjectResult>(result);
+            var json = JsonSerializer.Serialize(ok.Value);
+            Assert.Contains("The unmatched scan failed", json, StringComparison.Ordinal);
+            Assert.Contains("book.m4b", json, StringComparison.Ordinal);
+            Assert.DoesNotContain("worker secret", json, StringComparison.OrdinalIgnoreCase);
+        }
+
+        [Fact]
         public void OpenApi_PreservesLegacyPutRouteAndTimestampContract()
         {
             using var factory = new Listenarr.Tests.Mocks.ListenarrWebApplicationFactory();
@@ -237,6 +287,42 @@ namespace Listenarr.Tests.Features.Api.Features.Library
             Assert.Equal(requestSchemaReference, createRequestSchemaReference);
         }
 
+        [Theory]
+        [InlineData("\"mode\":\"999\",\"targetCaseSensitivityMode\":\"Auto\"")]
+        [InlineData("\"mode\":\"relocate\",\"targetCaseSensitivityMode\":999")]
+        public async Task HttpPipeline_RejectsMalformedRelocationEnumsBeforeServiceAccess(
+            string enumProperties)
+        {
+            using var factory = new Listenarr.Tests.Mocks.ListenarrWebApplicationFactory();
+            using var client = factory.CreateClient();
+            var csrfToken = await GetAntiforgeryTokenAsync(client);
+            using var request = new HttpRequestMessage(
+                HttpMethod.Post,
+                "/api/v1/rootfolders/1/path-changes")
+            {
+                Content = new StringContent(
+                    $$"""
+                    {
+                      "targetPath": "C:\\library\\target",
+                      {{enumProperties}},
+                      "deleteEmptySource": false,
+                      "desiredName": "Root",
+                      "desiredIsDefault": false,
+                      "expectedCurrentPath": "C:\\library\\source"
+                    }
+                    """,
+                    Encoding.UTF8,
+                    "application/json")
+            };
+            request.Headers.Add("X-XSRF-TOKEN", csrfToken);
+
+            using var response = await client.SendAsync(request);
+
+            Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+            var body = await response.Content.ReadAsStringAsync();
+            Assert.Contains("case sensitivity", body, StringComparison.OrdinalIgnoreCase);
+        }
+
         [Fact]
         public void Update_IsExposedAsLegacyPutAction()
         {
@@ -293,7 +379,7 @@ namespace Listenarr.Tests.Features.Api.Features.Library
         }
 
         [Fact]
-        public async Task Create_DuplicatePath_ReturnsBadRequest()
+        public async Task Create_DuplicatePath_ReturnsConflict()
         {
             var svc = new FakeService();
             svc.Store.Add(new RootFolder { Id = 1, Name = "R1", Path = FileUtils.GetAbsolutePath("dup") });
@@ -309,8 +395,38 @@ namespace Listenarr.Tests.Features.Api.Features.Library
             };
             var res = await controller.Create(req);
 
-            var bad = Assert.IsType<Microsoft.AspNetCore.Mvc.BadRequestObjectResult>(res);
-            Assert.Contains("same path", bad.Value.ToString(), StringComparison.OrdinalIgnoreCase);
+            var conflict = Assert.IsType<Microsoft.AspNetCore.Mvc.ConflictObjectResult>(res);
+            Assert.Contains("conflicts", conflict.Value.ToString(), StringComparison.OrdinalIgnoreCase);
+        }
+
+        [Fact]
+        public async Task Create_InternalValidationReason_IsRedacted()
+        {
+            const string secret = "C:\\private\\identity-secret";
+            var svc = new FakeService
+            {
+                CreateException = new InvalidOperationException(
+                    $"Filesystem identity resolution failed at {secret}")
+            };
+            using var db = CreateDb();
+            var controller = new RootFoldersController(
+                svc,
+                _fakeQueue,
+                new EfAudiobookFileRepository(db),
+                new AudiobookRepository(db),
+                new LocalFileSystem());
+
+            var result = await controller.Create(new RootFolder
+            {
+                Name = "Secret Root",
+                Path = FileUtils.GetAbsolutePath("secret-root")
+            });
+
+            var conflict = Assert.IsType<Microsoft.AspNetCore.Mvc.ConflictObjectResult>(result);
+            var json = JsonSerializer.Serialize(conflict.Value);
+            Assert.Contains("conflicts with existing configuration", json, StringComparison.Ordinal);
+            Assert.DoesNotContain(secret, json, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain("identity resolution", json, StringComparison.OrdinalIgnoreCase);
         }
 
         [Fact]
@@ -829,6 +945,206 @@ namespace Listenarr.Tests.Features.Api.Features.Library
             }
         }
 
+        [Theory]
+        [InlineData("999")]
+        [InlineData("-1")]
+        [InlineData("0")]
+        [InlineData("1")]
+        [InlineData("Relocate, MetadataOnly")]
+        [InlineData(" relocate ")]
+        [InlineData("")]
+        [InlineData(" ")]
+        [InlineData("unknown")]
+        [InlineData(null)]
+        public async Task ChangePath_InvalidMode_RejectsBeforeRelocation(string? mode)
+        {
+            var relocationService = new Mock<IRootFolderRelocationService>(MockBehavior.Strict);
+            var db = CreateDb();
+            var controller = new RootFoldersController(
+                new FakeService(),
+                _fakeQueue,
+                new EfAudiobookFileRepository(db),
+                new AudiobookRepository(db),
+                new LocalFileSystem(),
+                relocationService: relocationService.Object);
+            var request = new RootFolderPathChangeRequest(
+                FileUtils.GetAbsolutePath("invalid-mode-target"),
+                mode!,
+                false,
+                "Root",
+                false,
+                FileSystemCaseSensitivityMode.Auto,
+                FileUtils.GetAbsolutePath("current-root"));
+
+            var result = await controller.ChangePath(1, request, CancellationToken.None);
+
+            var badRequest = Assert.IsType<Microsoft.AspNetCore.Mvc.BadRequestObjectResult>(result);
+            Assert.Contains("Mode", badRequest.Value?.ToString() ?? string.Empty, StringComparison.OrdinalIgnoreCase);
+            relocationService.VerifyNoOtherCalls();
+        }
+
+        [Fact]
+        public async Task ChangePath_UndefinedCaseSensitivity_RejectsBeforeRelocation()
+        {
+            var relocationService = new Mock<IRootFolderRelocationService>(MockBehavior.Strict);
+            var db = CreateDb();
+            var controller = new RootFoldersController(
+                new FakeService(),
+                _fakeQueue,
+                new EfAudiobookFileRepository(db),
+                new AudiobookRepository(db),
+                new LocalFileSystem(),
+                relocationService: relocationService.Object);
+            var request = new RootFolderPathChangeRequest(
+                FileUtils.GetAbsolutePath("invalid-case-sensitivity-target"),
+                "relocate",
+                false,
+                "Root",
+                false,
+                (FileSystemCaseSensitivityMode)999,
+                FileUtils.GetAbsolutePath("current-root"));
+
+            var result = await controller.ChangePath(1, request, CancellationToken.None);
+
+            Assert.IsType<Microsoft.AspNetCore.Mvc.BadRequestObjectResult>(result);
+            relocationService.VerifyNoOtherCalls();
+        }
+
+        [Theory]
+        [InlineData(null)]
+        [InlineData("")]
+        [InlineData(" ")]
+        public async Task ChangePath_MissingExpectedCurrentPath_RejectsBeforeRelocation(
+            string? expectedCurrentPath)
+        {
+            var relocationService = new Mock<IRootFolderRelocationService>(MockBehavior.Strict);
+            var db = CreateDb();
+            var controller = new RootFoldersController(
+                new FakeService(),
+                _fakeQueue,
+                new EfAudiobookFileRepository(db),
+                new AudiobookRepository(db),
+                new LocalFileSystem(),
+                relocationService: relocationService.Object);
+            var request = new RootFolderPathChangeRequest(
+                FileUtils.GetAbsolutePath("missing-expected-target"),
+                "relocate",
+                false,
+                "Root",
+                false,
+                FileSystemCaseSensitivityMode.Auto,
+                expectedCurrentPath!);
+
+            var result = await controller.ChangePath(1, request, CancellationToken.None);
+
+            Assert.IsType<Microsoft.AspNetCore.Mvc.BadRequestObjectResult>(result);
+            relocationService.VerifyNoOtherCalls();
+        }
+
+        [Theory]
+        [InlineData("relocate", RootFolderRelocationMode.Relocate)]
+        [InlineData("RELOCATE", RootFolderRelocationMode.Relocate)]
+        [InlineData("metadataOnly", RootFolderRelocationMode.MetadataOnly)]
+        [InlineData("METADATAONLY", RootFolderRelocationMode.MetadataOnly)]
+        public async Task ChangePath_SupportedMode_UsesExactPublicMapping(
+            string mode,
+            RootFolderRelocationMode expectedMode)
+        {
+            var relocationId = Guid.NewGuid();
+            var targetPath = FileUtils.GetAbsolutePath("valid-mode-target");
+            var relocationService = new Mock<IRootFolderRelocationService>();
+            relocationService.Setup(service => service.StartAsync(
+                    1,
+                    It.IsAny<RootFolderPathChangeCommand>(),
+                    It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new RootFolderPathChangeResult(
+                    expectedMode == RootFolderRelocationMode.Relocate ? relocationId : null,
+                    1,
+                    FileUtils.GetAbsolutePath("valid-mode-source"),
+                    targetPath,
+                    expectedMode == RootFolderRelocationMode.Relocate
+                        ? RootFolderRelocationStatus.Pending
+                        : RootFolderRelocationStatus.Completed,
+                    0,
+                    0,
+                    null));
+            var db = CreateDb();
+            var controller = new RootFoldersController(
+                new FakeService(),
+                _fakeQueue,
+                new EfAudiobookFileRepository(db),
+                new AudiobookRepository(db),
+                new LocalFileSystem(),
+                relocationService: relocationService.Object);
+            var request = new RootFolderPathChangeRequest(
+                targetPath,
+                mode,
+                false,
+                "Root",
+                false,
+                FileSystemCaseSensitivityMode.Auto,
+                FileUtils.GetAbsolutePath("valid-mode-source"));
+
+            var result = await controller.ChangePath(1, request, CancellationToken.None);
+
+            if (expectedMode == RootFolderRelocationMode.Relocate)
+            {
+                Assert.IsType<Microsoft.AspNetCore.Mvc.AcceptedAtRouteResult>(result);
+            }
+            else
+            {
+                Assert.IsType<Microsoft.AspNetCore.Mvc.OkObjectResult>(result);
+            }
+
+            relocationService.Verify(service => service.StartAsync(
+                1,
+                It.Is<RootFolderPathChangeCommand>(command =>
+                    command.Mode == expectedMode
+                    && command.TargetCaseSensitivityMode == FileSystemCaseSensitivityMode.Auto
+                    && command.ExpectedCurrentPath == FileUtils.GetAbsolutePath("valid-mode-source")),
+                It.IsAny<CancellationToken>()), Times.Once);
+        }
+
+        [Theory]
+        [InlineData("create")]
+        [InlineData("update")]
+        [InlineData("patch")]
+        public async Task RootFolderMutation_UndefinedCaseSensitivity_RejectsBeforeServiceAccess(
+            string operation)
+        {
+            var service = new Mock<IRootFolderService>(MockBehavior.Strict);
+            var db = CreateDb();
+            var controller = new RootFoldersController(
+                service.Object,
+                _fakeQueue,
+                new EfAudiobookFileRepository(db),
+                new AudiobookRepository(db),
+                new LocalFileSystem());
+            var root = new RootFolder
+            {
+                Id = 1,
+                Name = "Root",
+                Path = FileUtils.GetAbsolutePath("invalid-root-case-sensitivity"),
+                CaseSensitivityMode = (FileSystemCaseSensitivityMode)999
+            };
+
+            var result = operation switch
+            {
+                "create" => await controller.Create(root),
+                "update" => await controller.Update(1, root),
+                "patch" => await controller.Patch(
+                    1,
+                    new RootFolderMetadataUpdateRequest(
+                        root.Name,
+                        root.IsDefault,
+                        root.CaseSensitivityMode)),
+                _ => throw new InvalidOperationException($"Unknown operation {operation}")
+            };
+
+            Assert.IsType<Microsoft.AspNetCore.Mvc.BadRequestObjectResult>(result);
+            service.VerifyNoOtherCalls();
+        }
+
         [Fact]
         public async Task Delete_InUseWithoutReassign_ReturnsBadRequest()
         {
@@ -854,6 +1170,17 @@ namespace Listenarr.Tests.Features.Api.Features.Library
             var res = await controller.Delete(1, 2);
             var ok = Assert.IsType<Microsoft.AspNetCore.Mvc.OkObjectResult>(res);
             Assert.Contains("Deleted", ok.Value.ToString(), StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static async Task<string> GetAntiforgeryTokenAsync(HttpClient client)
+        {
+            using var tokenResponse = await client.GetAsync("/api/v1/antiforgery/token");
+            tokenResponse.EnsureSuccessStatusCode();
+            using var json = JsonDocument.Parse(
+                await tokenResponse.Content.ReadAsStringAsync());
+            var token = json.RootElement.GetProperty("token").GetString();
+            Assert.False(string.IsNullOrWhiteSpace(token));
+            return token!;
         }
 
         [Fact]

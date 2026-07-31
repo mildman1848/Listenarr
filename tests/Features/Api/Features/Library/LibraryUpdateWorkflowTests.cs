@@ -67,6 +67,7 @@ public sealed class LibraryUpdateWorkflowTests : BaseTests
             provider.GetRequiredService<IServiceScopeFactory>(),
             rewriteService.Object,
             operationCoordinator,
+            new FileSystemSemanticsResolver(),
             NullLogger<LibraryUpdateWorkflow>.Instance);
 
         var result = await workflow.UpdateAsync(id, new AudiobookUpdateRequest { BasePath = target });
@@ -126,6 +127,7 @@ public sealed class LibraryUpdateWorkflowTests : BaseTests
             provider.GetRequiredService<IServiceScopeFactory>(),
             rewriteService.Object,
             operationCoordinator,
+            new FileSystemSemanticsResolver(),
             NullLogger<LibraryUpdateWorkflow>.Instance);
 
         var result = await workflow.UpdateAsync(

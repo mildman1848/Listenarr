@@ -38,6 +38,43 @@ public sealed class RootFolderRelocationServiceTests : BaseTests
     }
 
     [Fact]
+    public async Task StartRelocation_ExpectedSourceChanged_RejectsBeforeCreatingSaga()
+    {
+        var source = Path.Join(TempRoot, $"expected-source-{Guid.NewGuid():N}");
+        var staleSource = Path.Join(TempRoot, $"stale-source-{Guid.NewGuid():N}");
+        var target = Path.Join(TempRoot, $"expected-target-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(source);
+        int rootId;
+        await using (var db = await _factory.CreateDbContextAsync())
+        {
+            var root = new RootFolder { Name = "Library", Path = source };
+            db.RootFolders.Add(root);
+            await db.SaveChangesAsync();
+            rootId = root.Id;
+        }
+
+        var service = CreateService();
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            service.StartAsync(
+                rootId,
+                new RootFolderPathChangeCommand(
+                    target,
+                    RootFolderRelocationMode.Relocate,
+                    true,
+                    "Moved Library",
+                    false,
+                    FileSystemCaseSensitivityMode.Auto,
+                    staleSource)));
+
+        Assert.Contains("changed", exception.Message, StringComparison.OrdinalIgnoreCase);
+        await using var verification = await _factory.CreateDbContextAsync();
+        Assert.Empty(verification.RootFolderRelocations);
+        Assert.Empty(verification.MoveJobs);
+        Assert.Equal(source, (await verification.RootFolders.SingleAsync()).Path);
+    }
+
+    [Fact]
     public async Task StartRelocation_PersistsSagaAndJobsWithoutChangingRootOrAudiobooks()
     {
         var source = Path.Join(Path.GetTempPath(), $"relocation-source-{Guid.NewGuid():N}");
@@ -1312,6 +1349,143 @@ public sealed class RootFolderRelocationServiceTests : BaseTests
     }
 
     [Fact]
+    public async Task MetadataOnly_RequestCancelledAfterJournalCommit_CompletesAuthoritatively()
+    {
+        var source = Path.Join(
+            Path.GetTempPath(),
+            $"metadata-cancel-source-{Guid.NewGuid():N}");
+        var target = Path.Join(
+            Path.GetTempPath(),
+            $"metadata-cancel-target-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(source);
+        int rootId;
+        await using (var db = await _factory.CreateDbContextAsync())
+        {
+            var root = new RootFolder
+            {
+                Name = "Library",
+                Path = source
+            };
+            db.RootFolders.Add(root);
+            db.Audiobooks.Add(new Audiobook
+            {
+                Title = "Title",
+                BasePath = Path.Join(source, "Title")
+            });
+            await db.SaveChangesAsync();
+            rootId = root.Id;
+        }
+
+        using var cancellation = new CancellationTokenSource();
+        var service = CreateService();
+        service.AfterMetadataOnlyJournalCommitForTest = cancellation.Cancel;
+
+        var result = await service.StartAsync(
+            rootId,
+            new RootFolderPathChangeCommand(
+                target,
+                RootFolderRelocationMode.MetadataOnly,
+                false,
+                "Metadata Library",
+                false,
+                FileSystemCaseSensitivityMode.Auto),
+            cancellation.Token);
+
+        Assert.Equal(RootFolderRelocationStatus.Completed, result.Status);
+        await using var verification = await _factory.CreateDbContextAsync();
+        var rootAfter = await verification.RootFolders.SingleAsync();
+        var audiobookAfter = await verification.Audiobooks.SingleAsync();
+        Assert.Equal(target, rootAfter.Path);
+        Assert.Equal("Metadata Library", rootAfter.Name);
+        Assert.Equal(Path.Join(target, "Title"), audiobookAfter.BasePath);
+        Assert.Empty(await verification.RootFolderRelocations.ToListAsync());
+    }
+
+    [Fact]
+    public async Task ReauthorizeLegacyTarget_RequestCancelledAfterAuthorization_CompletesRetry()
+    {
+        var source = Path.Join(
+            TempRoot,
+            $"legacy-reauthorize-source-{Guid.NewGuid():N}");
+        var target = Path.Join(
+            TempRoot,
+            $"legacy-reauthorize-target-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(source);
+        Directory.CreateDirectory(target);
+        var sourceResolution = await new FileSystemSemanticsResolver()
+            .ResolveAsync(source);
+        Assert.Equal(PathIdentityState.Valid, sourceResolution.State);
+
+        Guid relocationId;
+        await using (var db = await _factory.CreateDbContextAsync())
+        {
+            var root = new RootFolder
+            {
+                Name = "Library",
+                Path = source,
+                CaseSensitivityMode = FileSystemCaseSensitivityMode.Auto,
+                ResolvedCaseSensitivity =
+                    sourceResolution.Semantics.CaseSensitivity,
+                PathIdentityState = PathIdentityState.Valid,
+                PathIdentityKey = FileSystemPathIdentity.CreateKey(
+                    "root",
+                    source,
+                    sourceResolution.Semantics)
+            };
+            db.RootFolders.Add(root);
+            await db.SaveChangesAsync();
+            var relocation = new RootFolderRelocation
+            {
+                RootFolderId = root.Id,
+                ActiveRootFolderId = root.Id,
+                SourcePath = source,
+                SourceCaseSensitivityMode =
+                    FileSystemCaseSensitivityMode.Auto,
+                TargetPath = target,
+                TargetCaseSensitivityMode =
+                    FileSystemCaseSensitivityMode.Auto,
+                TargetIdentityEnrollmentState =
+                    TargetIdentityEnrollmentState.LegacyUnenrolled,
+                Mode = RootFolderRelocationMode.Relocate,
+                Status = RootFolderRelocationStatus.NeedsAttention,
+                DesiredName = "Reauthorized Library",
+                DesiredIsDefault = false,
+                TotalJobs = 0,
+                Error = "Legacy target identity must be reauthorized."
+            };
+            db.RootFolderRelocations.Add(relocation);
+            await db.SaveChangesAsync();
+            relocationId = relocation.Id;
+        }
+
+        using var cancellation = new CancellationTokenSource();
+        var service = CreateService();
+        service.AfterLegacyTargetAuthorizationCommitForTest =
+            cancellation.Cancel;
+
+        var result = await service.ReauthorizeLegacyTargetAsync(
+            relocationId,
+            target,
+            cancellation.Token);
+
+        Assert.Equal(RootFolderRelocationStatus.Completed, result.Status);
+        Assert.Equal(
+            TargetIdentityEnrollmentState.NotRequired,
+            result.TargetIdentityEnrollmentState);
+        await using var verification =
+            await _factory.CreateDbContextAsync();
+        var rootAfter = await verification.RootFolders.SingleAsync();
+        var relocationAfter = await verification.RootFolderRelocations
+            .SingleAsync(candidate => candidate.Id == relocationId);
+        Assert.Equal(target, rootAfter.Path);
+        Assert.Equal("Reauthorized Library", rootAfter.Name);
+        Assert.Equal(
+            RootFolderRelocationStatus.Completed,
+            relocationAfter.Status);
+        Assert.Null(relocationAfter.ActiveRootFolderId);
+    }
+
+    [Fact]
     public async Task MetadataOnly_PostCommitOwnershipCleanupFailure_ReturnsProtectedAttentionAndRecovers()
     {
         var rootPath = Path.Join(
@@ -1487,6 +1661,47 @@ public sealed class RootFolderRelocationServiceTests : BaseTests
     }
 
     [Fact]
+    public async Task ReconcileOwnershipMigration_SourceRetirementBlocked_PreservesJournalForRetry()
+    {
+        var scenario = await SeedPublishedOwnershipMigrationAsync();
+        var blocked = CreateService();
+        blocked.BeforeOwnershipMigrationSourceRetirementForTest = () =>
+            throw new IOException("simulated locked source ownership marker");
+
+        await blocked.ReconcileActiveAsync();
+
+        await using (var verification = await _factory.CreateDbContextAsync())
+        {
+            var relocation = await verification.RootFolderRelocations
+                .SingleAsync(candidate => candidate.Id == scenario.RelocationId);
+            var journal = await verification
+                .LibraryDirectoryOwnershipPathMigrations
+                .SingleAsync(candidate =>
+                    candidate.RelocationId == scenario.RelocationId);
+            Assert.Equal(
+                RootFolderRelocationStatus.NeedsAttention,
+                relocation.Status);
+            Assert.Contains(
+                "locked source ownership marker",
+                relocation.Error ?? string.Empty,
+                StringComparison.OrdinalIgnoreCase);
+            Assert.Equal(
+                LibraryDirectoryOwnershipPathMigrationState.MetadataCommitted,
+                journal.State);
+        }
+
+        await CreateService().ReconcileActiveAsync();
+
+        await using var recovered = await _factory.CreateDbContextAsync();
+        var completed = await recovered.RootFolderRelocations
+            .SingleAsync(candidate => candidate.Id == scenario.RelocationId);
+        Assert.Equal(RootFolderRelocationStatus.Completed, completed.Status);
+        Assert.False(await recovered.LibraryDirectoryOwnershipPathMigrations
+            .AnyAsync(candidate =>
+                candidate.RelocationId == scenario.RelocationId));
+    }
+
+    [Fact]
     public async Task ReconcileOwnershipMigration_TargetGenerationReplaced_BlocksBeforeMetadataCommit()
     {
         var scenario = await SeedPublishedOwnershipMigrationAsync();
@@ -1569,6 +1784,126 @@ public sealed class RootFolderRelocationServiceTests : BaseTests
     }
 
     [Fact]
+    public async Task ReconcileOwnershipMigration_DistinctHardlinkedSourceMarker_RetiresSourceName()
+    {
+        var scenario = await SeedPublishedOwnershipMigrationAsync();
+        var sourceRoot = Path.Join(
+            TempRoot,
+            $"ownership-hardlink-source-{Guid.NewGuid():N}");
+        var sourceOwnedPath = Path.Join(sourceRoot, "Book");
+        Directory.CreateDirectory(sourceRoot);
+        await using (var db = await _factory.CreateDbContextAsync())
+        {
+            var relocation = await db.RootFolderRelocations
+                .SingleAsync(candidate => candidate.Id == scenario.RelocationId);
+            var migration = await db.LibraryDirectoryOwnershipPathMigrations
+                .SingleAsync(candidate =>
+                    candidate.RelocationId == scenario.RelocationId);
+            var sourceResolution = await new FileSystemSemanticsResolver()
+                .ResolveAsync(sourceRoot);
+            Assert.Equal(PathIdentityState.Valid, sourceResolution.State);
+            relocation.SourcePath = sourceRoot;
+            migration.SourceCanonicalPath = sourceOwnedPath;
+            migration.SourcePathSyntax = sourceResolution.Semantics.Syntax;
+            migration.SourceCaseSensitivity =
+                sourceResolution.Semantics.CaseSensitivity;
+            migration.SourceCaseSensitivityMode =
+                FileSystemCaseSensitivityMode.Auto;
+            migration.SourceIdentityBoundary = sourceOwnedPath;
+            migration.SourceIdentityLookupKey =
+                FileSystemPathIdentity.CreateLookupKey(
+                    "library-directory",
+                    sourceOwnedPath,
+                    sourceResolution.Semantics.Syntax);
+            migration.SourceOwnershipKey =
+                FileSystemPathIdentity.CreateKey(
+                    "library-directory",
+                    sourceOwnedPath,
+                    sourceResolution.Semantics);
+            migration.State =
+                LibraryDirectoryOwnershipPathMigrationState.MetadataCommitted;
+            await db.SaveChangesAsync();
+
+            var ownership = await db.LibraryDirectoryOwnerships
+                .SingleAsync(candidate => candidate.Id == scenario.OwnershipId);
+            var payload = LibraryDirectoryOwnershipMarker.SerializePayload(
+                ownership);
+            await File.WriteAllTextAsync(
+                Path.Join(
+                    scenario.OwnedPath,
+                    LibraryDirectoryOwnershipMarker.FileName),
+                payload);
+            var targetSibling = Path.Join(
+                scenario.RootPath,
+                $".listenarr-directory-owner-{scenario.OwnershipToken}.json");
+            await File.WriteAllTextAsync(targetSibling, payload);
+            using var targetParent =
+                PinnedDirectoryCreation.OpenPinnedBoundary(scenario.RootPath);
+            using var targetMarker = targetParent.OpenExistingFile(
+                Path.GetFileName(targetSibling),
+                requireDeleteAccess: false);
+            using var sourceParent =
+                PinnedDirectoryCreation.OpenPinnedBoundary(sourceRoot);
+            using var sourceMarker = targetMarker.CreateHardLinkTo(
+                sourceParent,
+                Path.GetFileName(targetSibling));
+            Assert.True(sourceMarker.IdentifiesSameEntry(targetMarker));
+        }
+
+        await CreateService().ReconcileActiveAsync();
+
+        var sourceSibling = Path.Join(
+            sourceRoot,
+            $".listenarr-directory-owner-{scenario.OwnershipToken}.json");
+        var targetSiblingAfter = Path.Join(
+            scenario.RootPath,
+            $".listenarr-directory-owner-{scenario.OwnershipToken}.json");
+        Assert.False(File.Exists(sourceSibling));
+        Assert.True(File.Exists(targetSiblingAfter));
+        await using var verification = await _factory.CreateDbContextAsync();
+        Assert.False(await verification
+            .LibraryDirectoryOwnershipPathMigrations.AnyAsync());
+    }
+
+    [Fact]
+    public async Task ReconcileOwnershipMigration_SourceAlreadyRetired_TargetReplaced_PreservesJournal()
+    {
+        var scenario = await SeedPublishedOwnershipMigrationAsync();
+        var (sourceSibling, targetSibling) =
+            await PrepareDistinctOwnershipMigrationMarkersAsync(scenario);
+        var service = CreateService();
+        service.BeforeOwnershipMigrationSourceRetirementForTest = () =>
+        {
+            File.Delete(sourceSibling);
+            File.WriteAllText(targetSibling, "replacement marker");
+        };
+
+        await service.ReconcileActiveAsync();
+
+        Assert.False(File.Exists(sourceSibling));
+        Assert.Equal(
+            "replacement marker",
+            await File.ReadAllTextAsync(targetSibling));
+        await using var verification = await _factory.CreateDbContextAsync();
+        var relocation = await verification.RootFolderRelocations
+            .SingleAsync(candidate => candidate.Id == scenario.RelocationId);
+        var journal = await verification
+            .LibraryDirectoryOwnershipPathMigrations
+            .SingleAsync(candidate =>
+                candidate.RelocationId == scenario.RelocationId);
+        Assert.Equal(
+            RootFolderRelocationStatus.NeedsAttention,
+            relocation.Status);
+        Assert.Contains(
+            "ownership marker",
+            relocation.Error ?? string.Empty,
+            StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(
+            LibraryDirectoryOwnershipPathMigrationState.MetadataCommitted,
+            journal.State);
+    }
+
+    [Fact]
     public async Task ReconcileOwnershipMigration_EquivalentSiblingMarker_RemainsAfterCompletion()
     {
         var scenario = await SeedPublishedOwnershipMigrationAsync();
@@ -1591,6 +1926,280 @@ public sealed class RootFolderRelocationServiceTests : BaseTests
             ownershipAfter.PathOwnershipKey);
         Assert.False(await verification
             .LibraryDirectoryOwnershipPathMigrations.AnyAsync());
+    }
+
+    [DirectoryLinkFact]
+    public async Task MetadataOnly_LinkedSourceAndPhysicalTarget_PreservesActiveOwnershipMarkers()
+    {
+        var root = Path.Join(
+            TempRoot,
+            $"ownership-link-alias-{Guid.NewGuid():N}");
+        var physicalRoot = Path.Join(root, "physical");
+        var linkedRoot = Path.Join(root, "linked");
+        var physicalOwnedPath = Path.Join(physicalRoot, "Book");
+        var linkedOwnedPath = Path.Join(linkedRoot, "Book");
+        Directory.CreateDirectory(physicalOwnedPath);
+        Directory.CreateSymbolicLink(linkedRoot, physicalRoot);
+
+        try
+        {
+            var sourceResolution = await new FileSystemSemanticsResolver()
+                .ResolveAsync(linkedRoot);
+            var targetResolution = await new FileSystemSemanticsResolver()
+                .ResolveAsync(physicalRoot);
+            Assert.Equal(PathIdentityState.Valid, sourceResolution.State);
+            Assert.Equal(PathIdentityState.Valid, targetResolution.State);
+            var rootIdentity = await new DirectoryObjectIdentityResolver()
+                .ResolveAsync(linkedRoot);
+            var ownedIdentity = await new DirectoryObjectIdentityResolver()
+                .ResolveAsync(linkedOwnedPath);
+            Assert.True(rootIdentity.IsAvailable);
+            Assert.True(ownedIdentity.IsAvailable);
+
+            int rootId;
+            LibraryDirectoryOwnership ownership;
+            await using (var db = await _factory.CreateDbContextAsync())
+            {
+                var rootFolder = new RootFolder
+                {
+                    Name = "Linked Library",
+                    Path = linkedRoot,
+                    CaseSensitivityMode = FileSystemCaseSensitivityMode.Auto,
+                    ResolvedCaseSensitivity =
+                        sourceResolution.Semantics.CaseSensitivity,
+                    PathIdentityState = PathIdentityState.Valid,
+                    PathIdentityKey = FileSystemPathIdentity.CreateKey(
+                        "root",
+                        linkedRoot,
+                        sourceResolution.Semantics),
+                    DirectoryObjectIdentityVersion = rootIdentity.Version,
+                    DirectoryObjectIdentity = rootIdentity.Value
+                };
+                var audiobook = new Audiobook
+                {
+                    Title = "Book",
+                    BasePath = linkedOwnedPath
+                };
+                db.RootFolders.Add(rootFolder);
+                db.Audiobooks.Add(audiobook);
+                await db.SaveChangesAsync();
+                rootId = rootFolder.Id;
+
+                ownership = new LibraryDirectoryOwnership
+                {
+                    Path = linkedOwnedPath,
+                    CanonicalPath = linkedOwnedPath,
+                    PathSyntax = sourceResolution.Semantics.Syntax,
+                    PathCaseSensitivity =
+                        sourceResolution.Semantics.CaseSensitivity,
+                    PathCaseSensitivityMode =
+                        FileSystemCaseSensitivityMode.Auto,
+                    PathIdentityBoundary = linkedOwnedPath,
+                    PathIdentityLookupKey =
+                        FileSystemPathIdentity.CreateLookupKey(
+                            "library-directory",
+                            linkedOwnedPath,
+                            sourceResolution.Semantics.Syntax),
+                    PathOwnershipKey = FileSystemPathIdentity.CreateKey(
+                        "library-directory",
+                        linkedOwnedPath,
+                        sourceResolution.Semantics),
+                    OwnershipToken = Guid.NewGuid().ToString("N"),
+                    State = LibraryDirectoryOwnershipState.Owned,
+                    CreationWorkflow = "Test",
+                    AudiobookId = audiobook.Id,
+                    ManagedRootFolderId = rootFolder.Id,
+                    DirectoryObjectIdentityVersion = ownedIdentity.Version,
+                    DirectoryObjectIdentity = ownedIdentity.Value
+                };
+                db.LibraryDirectoryOwnerships.Add(ownership);
+                await db.SaveChangesAsync();
+            }
+
+            using (var boundary =
+                PinnedDirectoryCreation.OpenPinnedBoundary(linkedRoot))
+            using (var publication =
+                boundary.OpenExistingChildForPublication("Book"))
+            {
+                await PinnedLibraryDirectoryOwnershipMarker.EnsureAsync(
+                    ownership,
+                    publication,
+                    CancellationToken.None);
+            }
+
+            var result = await CreateService().StartAsync(
+                rootId,
+                new RootFolderPathChangeCommand(
+                    physicalRoot,
+                    RootFolderRelocationMode.MetadataOnly,
+                    false,
+                    "Physical Library",
+                    false,
+                    FileSystemCaseSensitivityMode.Auto));
+
+            Assert.Equal(RootFolderRelocationStatus.Completed, result.Status);
+            await using var verification =
+                await _factory.CreateDbContextAsync();
+            var rootAfter = await verification.RootFolders.SingleAsync();
+            var ownershipAfter = await verification
+                .LibraryDirectoryOwnerships.SingleAsync();
+            Assert.Equal(physicalRoot, rootAfter.Path);
+            Assert.Equal(physicalOwnedPath, ownershipAfter.CanonicalPath);
+            LibraryDirectoryOwnershipMarker.Validate(
+                ownershipAfter,
+                physicalOwnedPath);
+            Assert.True(File.Exists(Path.Join(
+                physicalRoot,
+                $".listenarr-directory-owner-{ownership.OwnershipToken}.json")));
+            Assert.False(await verification
+                .LibraryDirectoryOwnershipPathMigrations.AnyAsync());
+        }
+        finally
+        {
+            if (Directory.Exists(linkedRoot)
+                && (File.GetAttributes(linkedRoot)
+                    & FileAttributes.ReparsePoint) != 0)
+            {
+                Directory.Delete(linkedRoot);
+            }
+        }
+    }
+
+    [DirectoryLinkFact]
+    public async Task MetadataOnly_PhysicalSourceAndLinkedTarget_PreservesActiveOwnershipMarkers()
+    {
+        var root = Path.Join(
+            TempRoot,
+            $"ownership-link-target-alias-{Guid.NewGuid():N}");
+        var physicalRoot = Path.Join(root, "physical");
+        var linkedRoot = Path.Join(root, "linked");
+        var physicalOwnedPath = Path.Join(physicalRoot, "Book");
+        var linkedOwnedPath = Path.Join(linkedRoot, "Book");
+        Directory.CreateDirectory(physicalOwnedPath);
+        Directory.CreateSymbolicLink(linkedRoot, physicalRoot);
+
+        try
+        {
+            var sourceResolution = await new FileSystemSemanticsResolver()
+                .ResolveAsync(physicalRoot);
+            var targetResolution = await new FileSystemSemanticsResolver()
+                .ResolveAsync(linkedRoot);
+            Assert.Equal(PathIdentityState.Valid, sourceResolution.State);
+            Assert.Equal(PathIdentityState.Valid, targetResolution.State);
+            var rootIdentity = await new DirectoryObjectIdentityResolver()
+                .ResolveAsync(physicalRoot);
+            var ownedIdentity = await new DirectoryObjectIdentityResolver()
+                .ResolveAsync(physicalOwnedPath);
+            Assert.True(rootIdentity.IsAvailable);
+            Assert.True(ownedIdentity.IsAvailable);
+
+            int rootId;
+            LibraryDirectoryOwnership ownership;
+            await using (var db = await _factory.CreateDbContextAsync())
+            {
+                var rootFolder = new RootFolder
+                {
+                    Name = "Physical Library",
+                    Path = physicalRoot,
+                    CaseSensitivityMode = FileSystemCaseSensitivityMode.Auto,
+                    ResolvedCaseSensitivity =
+                        sourceResolution.Semantics.CaseSensitivity,
+                    PathIdentityState = PathIdentityState.Valid,
+                    PathIdentityKey = FileSystemPathIdentity.CreateKey(
+                        "root",
+                        physicalRoot,
+                        sourceResolution.Semantics),
+                    DirectoryObjectIdentityVersion = rootIdentity.Version,
+                    DirectoryObjectIdentity = rootIdentity.Value
+                };
+                var audiobook = new Audiobook
+                {
+                    Title = "Book",
+                    BasePath = physicalOwnedPath
+                };
+                db.RootFolders.Add(rootFolder);
+                db.Audiobooks.Add(audiobook);
+                await db.SaveChangesAsync();
+                rootId = rootFolder.Id;
+
+                ownership = new LibraryDirectoryOwnership
+                {
+                    Path = physicalOwnedPath,
+                    CanonicalPath = physicalOwnedPath,
+                    PathSyntax = sourceResolution.Semantics.Syntax,
+                    PathCaseSensitivity =
+                        sourceResolution.Semantics.CaseSensitivity,
+                    PathCaseSensitivityMode =
+                        FileSystemCaseSensitivityMode.Auto,
+                    PathIdentityBoundary = physicalOwnedPath,
+                    PathIdentityLookupKey =
+                        FileSystemPathIdentity.CreateLookupKey(
+                            "library-directory",
+                            physicalOwnedPath,
+                            sourceResolution.Semantics.Syntax),
+                    PathOwnershipKey = FileSystemPathIdentity.CreateKey(
+                        "library-directory",
+                        physicalOwnedPath,
+                        sourceResolution.Semantics),
+                    OwnershipToken = Guid.NewGuid().ToString("N"),
+                    State = LibraryDirectoryOwnershipState.Owned,
+                    CreationWorkflow = "Test",
+                    AudiobookId = audiobook.Id,
+                    ManagedRootFolderId = rootFolder.Id,
+                    DirectoryObjectIdentityVersion = ownedIdentity.Version,
+                    DirectoryObjectIdentity = ownedIdentity.Value
+                };
+                db.LibraryDirectoryOwnerships.Add(ownership);
+                await db.SaveChangesAsync();
+            }
+
+            using (var boundary =
+                PinnedDirectoryCreation.OpenPinnedBoundary(physicalRoot))
+            using (var publication =
+                boundary.OpenExistingChildForPublication("Book"))
+            {
+                await PinnedLibraryDirectoryOwnershipMarker.EnsureAsync(
+                    ownership,
+                    publication,
+                    CancellationToken.None);
+            }
+
+            var result = await CreateService().StartAsync(
+                rootId,
+                new RootFolderPathChangeCommand(
+                    linkedRoot,
+                    RootFolderRelocationMode.MetadataOnly,
+                    false,
+                    "Linked Library",
+                    false,
+                    FileSystemCaseSensitivityMode.Auto));
+
+            Assert.Equal(RootFolderRelocationStatus.Completed, result.Status);
+            await using var verification =
+                await _factory.CreateDbContextAsync();
+            var rootAfter = await verification.RootFolders.SingleAsync();
+            var ownershipAfter = await verification
+                .LibraryDirectoryOwnerships.SingleAsync();
+            Assert.Equal(linkedRoot, rootAfter.Path);
+            Assert.Equal(linkedOwnedPath, ownershipAfter.CanonicalPath);
+            LibraryDirectoryOwnershipMarker.Validate(
+                ownershipAfter,
+                linkedOwnedPath);
+            Assert.True(File.Exists(Path.Join(
+                physicalRoot,
+                $".listenarr-directory-owner-{ownership.OwnershipToken}.json")));
+            Assert.False(await verification
+                .LibraryDirectoryOwnershipPathMigrations.AnyAsync());
+        }
+        finally
+        {
+            if (Directory.Exists(linkedRoot)
+                && (File.GetAttributes(linkedRoot)
+                    & FileAttributes.ReparsePoint) != 0)
+            {
+                Directory.Delete(linkedRoot);
+            }
+        }
     }
 
     [Fact]
@@ -2336,7 +2945,17 @@ public sealed class RootFolderRelocationServiceTests : BaseTests
         Assert.Contains("became unavailable", result.Error, StringComparison.OrdinalIgnoreCase);
         Assert.Equal(1, broadcaster.BroadcastCount);
         Assert.False(broadcaster.CoordinatorWasExecuting);
-        Assert.Same(result, broadcaster.Payload);
+        var publicResult = Assert.IsType<RootFolderPathChangeResult>(
+            broadcaster.Payload);
+        Assert.NotSame(result, publicResult);
+        Assert.Equal(result.RelocationId, publicResult.RelocationId);
+        Assert.Equal(
+            "The relocation requires attention. Review the affected move jobs and retry after resolving the underlying issue.",
+            publicResult.Error);
+        Assert.DoesNotContain(
+            "became unavailable",
+            publicResult.Error,
+            StringComparison.OrdinalIgnoreCase);
         await using var verification = await _factory.CreateDbContextAsync();
         var rootAfter = await verification.RootFolders.SingleAsync(root => root.Id == rootId);
         var relocationAfter = await verification.RootFolderRelocations.SingleAsync();
@@ -3362,6 +3981,76 @@ public sealed class RootFolderRelocationServiceTests : BaseTests
             Status = RootFolderRelocationStatus.Running
         });
         await db.SaveChangesAsync();
+    }
+
+    private async Task<(string SourceSibling, string TargetSibling)>
+        PrepareDistinctOwnershipMigrationMarkersAsync(
+            OwnershipMigrationScenario scenario)
+    {
+        var sourceRoot = Path.Join(
+            TempRoot,
+            $"ownership-retired-source-{Guid.NewGuid():N}");
+        var sourceOwnedPath = Path.Join(sourceRoot, "Book");
+        Directory.CreateDirectory(sourceRoot);
+        await using var db = await _factory.CreateDbContextAsync();
+        var relocation = await db.RootFolderRelocations
+            .SingleAsync(candidate => candidate.Id == scenario.RelocationId);
+        var migration = await db.LibraryDirectoryOwnershipPathMigrations
+            .SingleAsync(candidate =>
+                candidate.RelocationId == scenario.RelocationId);
+        var sourceResolution = await new FileSystemSemanticsResolver()
+            .ResolveAsync(sourceRoot);
+        Assert.Equal(PathIdentityState.Valid, sourceResolution.State);
+        relocation.SourcePath = sourceRoot;
+        migration.SourceCanonicalPath = sourceOwnedPath;
+        migration.SourcePathSyntax = sourceResolution.Semantics.Syntax;
+        migration.SourceCaseSensitivity =
+            sourceResolution.Semantics.CaseSensitivity;
+        migration.SourceCaseSensitivityMode =
+            FileSystemCaseSensitivityMode.Auto;
+        migration.SourceIdentityBoundary = sourceOwnedPath;
+        migration.SourceIdentityLookupKey =
+            FileSystemPathIdentity.CreateLookupKey(
+                "library-directory",
+                sourceOwnedPath,
+                sourceResolution.Semantics.Syntax);
+        migration.SourceOwnershipKey =
+            FileSystemPathIdentity.CreateKey(
+                "library-directory",
+                sourceOwnedPath,
+                sourceResolution.Semantics);
+        migration.State =
+            LibraryDirectoryOwnershipPathMigrationState.MetadataCommitted;
+        await db.SaveChangesAsync();
+
+        var ownership = await db.LibraryDirectoryOwnerships
+            .SingleAsync(candidate => candidate.Id == scenario.OwnershipId);
+        var payload = LibraryDirectoryOwnershipMarker.SerializePayload(
+            ownership);
+        await File.WriteAllTextAsync(
+            Path.Join(
+                scenario.OwnedPath,
+                LibraryDirectoryOwnershipMarker.FileName),
+            payload);
+        var targetSibling = Path.Join(
+            scenario.RootPath,
+            $".listenarr-directory-owner-{scenario.OwnershipToken}.json");
+        await File.WriteAllTextAsync(targetSibling, payload);
+        using var targetParent =
+            PinnedDirectoryCreation.OpenPinnedBoundary(scenario.RootPath);
+        using var targetMarker = targetParent.OpenExistingFile(
+            Path.GetFileName(targetSibling),
+            requireDeleteAccess: false);
+        using var sourceParent =
+            PinnedDirectoryCreation.OpenPinnedBoundary(sourceRoot);
+        var sourceSibling = Path.Join(
+            sourceRoot,
+            Path.GetFileName(targetSibling));
+        using var sourceMarker = targetMarker.CreateHardLinkTo(
+            sourceParent,
+            Path.GetFileName(targetSibling));
+        Assert.True(sourceMarker.IdentifiesSameEntry(targetMarker));
+        return (sourceSibling, targetSibling);
     }
 
     private sealed record OwnershipMigrationScenario(

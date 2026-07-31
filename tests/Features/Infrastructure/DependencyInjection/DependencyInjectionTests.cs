@@ -19,12 +19,16 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Hosting;
 using Listenarr.Infrastructure.DependencyInjection;
+using Listenarr.Tests.Common;
 using Listenarr.Tests.Mocks;
 
 namespace Listenarr.Tests.Features.Infrastructure.DependencyInjection
 {
-    public class DependencyInjectionTests(ListenarrWebApplicationFactory factory)
-        : IClassFixture<ListenarrWebApplicationFactory>
+    [Trait("Area", "DependencyInjection")]
+    [Trait("Name", "DependencyInjectionTests")]
+    [Trait("Category", "Infrastructure")]
+    public sealed class DependencyInjectionTests(ListenarrWebApplicationFactory factory)
+        : BaseTests, IClassFixture<ListenarrWebApplicationFactory>
     {
         [Fact]
         public void InfrastructureRegistrations_ResolveIAudiobookRepository()

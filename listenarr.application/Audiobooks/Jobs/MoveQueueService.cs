@@ -244,16 +244,18 @@ namespace Listenarr.Application.Audiobooks.Jobs
             CancellationToken cancellationToken = default) =>
             _persistence.GetHealthAsync(_timeProvider.GetUtcNow(), cancellationToken);
 
-        public async Task<MoveJob?> GetJobAsync(Guid id, CancellationToken cancellationToken = default)
+        public async Task<MoveJob?> GetJobAsync(
+            Guid id,
+            CancellationToken cancellationToken = default)
         {
             try
             {
                 return await _persistence.GetByIdAsync(id, cancellationToken);
             }
-            catch (Exception ex) when (ex is not OperationCanceledException && ex is not OutOfMemoryException && ex is not StackOverflowException)
+            catch (Exception ex) when (WorkerExceptionClassifier.IsNonFatal(ex))
             {
                 _logger.LogWarning(ex, "Failed to retrieve move job {JobId}", id);
-                return null;
+                throw;
             }
         }
 
@@ -272,7 +274,11 @@ namespace Listenarr.Application.Audiobooks.Jobs
                 status,
                 error,
                 cancellationToken);
-            await NotifyPersistedJobStateAsync(id, status, error, cancellationToken);
+            await NotifyCommittedJobStateAsync(
+                id,
+                status,
+                error,
+                cancellationToken);
         }
 
         public async Task UpdateJobStatusWithoutNotificationAsync(
@@ -346,15 +352,15 @@ namespace Listenarr.Application.Audiobooks.Jobs
                 LogStatusChange(id, currentStatus, currentError);
                 try
                 {
-                    await _hubBroadcaster.BroadcastAsync("MoveJobUpdate", new
-                    {
-                        jobId = id.ToString(),
-                        audiobookId = dbJob?.AudiobookId,
-                        status = currentStatus.ToString(),
-                        error = currentError,
-                        target = dbJob?.RequestedPath,
-                        updatedAt = dbJob?.UpdatedAt ?? _timeProvider.GetUtcNow().UtcDateTime
-                    }, cancellationToken);
+                    await _hubBroadcaster.BroadcastAsync(
+                        "MoveJobUpdate",
+                        MoveJobPublicProjection.CreateUpdate(
+                            id,
+                            status,
+                            error,
+                            _timeProvider.GetUtcNow().UtcDateTime,
+                            dbJob),
+                        cancellationToken);
                 }
                 catch (Exception ex) when (WorkerExceptionClassifier.IsNonFatal(ex))
                 {

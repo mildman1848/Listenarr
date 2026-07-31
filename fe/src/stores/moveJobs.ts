@@ -54,7 +54,7 @@ const terminalStatuses = new Set<MoveJobStatus>([
   'Superseded',
 ])
 
-function normalizeStatus(status: string | undefined): MoveJobStatus {
+function normalizeStatus(status: string | undefined): MoveJobStatus | null {
   switch ((status || '').trim().toLowerCase()) {
     case 'running':
       return 'Running'
@@ -69,8 +69,9 @@ function normalizeStatus(status: string | undefined): MoveJobStatus {
     case 'superseded':
       return 'Superseded'
     case 'queued':
-    default:
       return 'Queued'
+    default:
+      return null
   }
 }
 
@@ -135,6 +136,9 @@ export const useMoveJobsStore = defineStore('moveJobs', () => {
       }
 
       const currentStatus = normalizeStatus(current.status)
+      if (currentStatus == null) {
+        return
+      }
       if (existing.status !== 'Queued' && !terminalStatuses.has(currentStatus)) {
         return
       }
@@ -157,6 +161,10 @@ export const useMoveJobsStore = defineStore('moveJobs', () => {
     }
 
     const status = normalizeStatus(update.status)
+    if (status == null) {
+      return
+    }
+
     const next: TrackedMoveJob = {
       ...existing,
       audiobookId: update.audiobookId ?? existing.audiobookId,

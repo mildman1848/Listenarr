@@ -52,7 +52,7 @@ public partial class RenameService
                 || string.IsNullOrWhiteSpace(identity.OwnershipKey))
             {
                 return DirectoryMovePlanResult.Failed(
-                    identity.Reason ?? "A destination audiobook file identity is unavailable.");
+                    "A destination audiobook file identity is unavailable.");
             }
 
             if (!ownershipKeys.Add(identity.OwnershipKey))
@@ -68,8 +68,18 @@ public partial class RenameService
                 cancellationToken);
             if (ownership.Outcome != AudiobookFileOwnershipCheckOutcome.Available)
             {
+                var publicError = ownership.Outcome switch
+                {
+                    AudiobookFileOwnershipCheckOutcome.OwnedByOtherAudiobook =>
+                        "A destination audiobook file is owned by another audiobook.",
+                    AudiobookFileOwnershipCheckOutcome.AlreadyOwnedByAudiobook =>
+                        "A destination audiobook file is already owned by another file record for this audiobook.",
+                    AudiobookFileOwnershipCheckOutcome.IdentityConflict =>
+                        "A destination audiobook file identity conflicts with existing ownership data.",
+                    _ => "A destination audiobook file identity is unavailable."
+                };
                 return DirectoryMovePlanResult.Failed(
-                    ownership.Reason ?? "A destination audiobook file identity is already owned.",
+                    publicError,
                     ownership.Outcome is
                         AudiobookFileOwnershipCheckOutcome.OwnedByOtherAudiobook or
                         AudiobookFileOwnershipCheckOutcome.IdentityConflict);

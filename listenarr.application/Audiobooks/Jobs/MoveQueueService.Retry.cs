@@ -15,7 +15,7 @@ public partial class MoveQueueService
             leaseGeneration,
             error,
             cancellationToken);
-        await NotifyPersistedJobStateAsync(
+        await NotifyCommittedJobStateAsync(
             id,
             result.Status,
             BuildReportedRetryError(result.Status, error),

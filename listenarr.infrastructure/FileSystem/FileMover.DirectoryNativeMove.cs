@@ -4,10 +4,21 @@ namespace Listenarr.Infrastructure.FileSystem;
 
 public partial class FileMover
 {
-    private bool? TryPinnedSameVolumeDirectoryMove(
+    private enum PinnedDirectoryMoveOutcome
+    {
+        NotApplicable,
+        NotMoved,
+        Moved,
+        Indeterminate
+    }
+
+    private PinnedDirectoryMoveOutcome TryPinnedSameVolumeDirectoryMove(
         string sourceDirectory,
         string destinationDirectory)
     {
+        string? sourceObjectIdentity = null;
+        PinnedDirectoryCreation.PinnedFileEntry? renameJournal = null;
+        var namespaceMutationStarted = false;
         try
         {
             var source = Path.GetFullPath(sourceDirectory);
@@ -31,16 +42,17 @@ public partial class FileMover
                     Path.GetFileName(source));
             using var sourceAnchor =
                 sourcePublication.OpenCreatedDirectoryAnchor();
+            sourceObjectIdentity = sourceAnchor.GetDirectoryObjectIdentity();
             if (!sourceAnchor.IsOnSameVolume(destinationParent))
             {
-                return null;
+                return PinnedDirectoryMoveOutcome.NotApplicable;
             }
             using var occupied =
                 destinationParent.TryOpenExistingChildForPublication(
                     Path.GetFileName(destination));
             if (occupied != null || File.Exists(destination))
             {
-                return false;
+                return PinnedDirectoryMoveOutcome.NotMoved;
             }
 
             // Prove directory barriers are available before changing either
@@ -51,6 +63,15 @@ public partial class FileMover
             FlushFileMoveDirectory(
                 destinationParent,
                 "same-volume directory destination capability");
+            renameJournal = PublishDirectoryRenameJournal(
+                sourceParent,
+                destinationParent,
+                source,
+                destination,
+                sourceObjectIdentity);
+            AfterDirectoryRenameJournalPublishedForTest?.Invoke(
+                renameJournal.FileName);
+            namespaceMutationStarted = true;
             using var relocated = sourcePublication.MovePinnedDirectoryTo(
                 destinationParent,
                 Path.GetFileName(destination));
@@ -60,17 +81,104 @@ public partial class FileMover
             FlushFileMoveDirectory(
                 destinationParent,
                 "same-volume directory destination publication");
-            return relocated.VisiblePathMatches();
+            if (!relocated.VisiblePathMatches())
+            {
+                return PinnedDirectoryMoveOutcome.Indeterminate;
+            }
+
+            renameJournal.Delete(immediateWindows: true);
+            sourceParent.FlushDirectoryEntry();
+            renameJournal.Dispose();
+            renameJournal = null;
+            return PinnedDirectoryMoveOutcome.Moved;
         }
         catch (Exception exception) when (exception is not (
             OperationCanceledException or OutOfMemoryException or StackOverflowException))
         {
+            var reconciled = namespaceMutationStarted
+                && sourceObjectIdentity != null
+                ? ReconcilePinnedDirectoryMove(
+                    sourceDirectory,
+                    destinationDirectory,
+                    sourceObjectIdentity)
+                : PinnedDirectoryMoveOutcome.NotMoved;
+            if (reconciled != PinnedDirectoryMoveOutcome.Indeterminate
+                && renameJournal != null)
+            {
+                TryRetireDirectoryRenameJournal(
+                    sourceDirectory,
+                    renameJournal);
+            }
+
             _logger.LogWarning(
                 exception,
-                "Pinned same-volume directory rename failed: {Source} -> {Destination}",
+                "Pinned same-volume directory rename ended with outcome {Outcome}: {Source} -> {Destination}",
+                reconciled,
                 LogRedaction.SanitizeFilePath(sourceDirectory),
                 LogRedaction.SanitizeFilePath(destinationDirectory));
-            return false;
+            return reconciled;
+        }
+        finally
+        {
+            renameJournal?.Dispose();
+        }
+    }
+
+    private static PinnedDirectoryMoveOutcome ReconcilePinnedDirectoryMove(
+        string sourceDirectory,
+        string destinationDirectory,
+        string expectedSourceIdentity)
+    {
+        try
+        {
+            var source = Path.GetFullPath(sourceDirectory);
+            var destination = Path.GetFullPath(destinationDirectory);
+            var sourceIdentity = TryGetPinnedDirectoryIdentity(source);
+            var destinationIdentity = TryGetPinnedDirectoryIdentity(destination);
+            var sourceStillOwnsGeneration = string.Equals(
+                sourceIdentity,
+                expectedSourceIdentity,
+                StringComparison.Ordinal);
+            var destinationOwnsGeneration = string.Equals(
+                destinationIdentity,
+                expectedSourceIdentity,
+                StringComparison.Ordinal);
+
+            if (destinationOwnsGeneration && !sourceStillOwnsGeneration)
+            {
+                return PinnedDirectoryMoveOutcome.Moved;
+            }
+
+            if (sourceStillOwnsGeneration && !destinationOwnsGeneration)
+            {
+                return PinnedDirectoryMoveOutcome.NotMoved;
+            }
+
+            return PinnedDirectoryMoveOutcome.Indeterminate;
+        }
+        catch (Exception exception) when (exception is not (
+            OperationCanceledException or OutOfMemoryException or StackOverflowException))
+        {
+            return PinnedDirectoryMoveOutcome.Indeterminate;
+        }
+    }
+
+    private static string? TryGetPinnedDirectoryIdentity(string directory)
+    {
+        try
+        {
+            using var anchor =
+                PinnedDirectoryCreation.OpenPinnedHierarchyNoFollow(
+                    directory,
+                    createMissing: false);
+            return anchor.GetDirectoryObjectIdentity();
+        }
+        catch (Exception exception) when (exception is
+            IOException or UnauthorizedAccessException
+                or InvalidOperationException or PlatformNotSupportedException
+                or System.ComponentModel.Win32Exception)
+        {
+            return null;
         }
     }
 

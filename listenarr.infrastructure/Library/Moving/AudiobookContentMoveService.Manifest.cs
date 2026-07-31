@@ -88,7 +88,7 @@ internal sealed partial class AudiobookContentMoveService
         }
     }
 
-    private static async Task VerifyPublishedManifestAsync(
+    internal static async Task VerifyPublishedManifestAsync(
         string destinationRoot,
         IReadOnlyCollection<MoveJobEntry> manifest,
         FileSystemPathSemantics semantics,

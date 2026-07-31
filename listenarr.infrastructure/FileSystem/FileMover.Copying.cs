@@ -2,7 +2,6 @@
  * Listenarr - Audiobook Management System
  * Copyright (C) 2024-2026 Listenarr Contributors
  */
-using System.Diagnostics;
 using Listenarr.Domain.Audiobooks.Enumerations;
 using Microsoft.Extensions.Logging;
 
@@ -139,7 +138,9 @@ namespace Listenarr.Infrastructure.FileSystem
             FileAction action,
             string sourceFile,
             string destFile,
-            bool preferHardlink)
+            bool preferHardlink,
+            Action<IAudiobookFileRegistrationLease>? capturePublication = null,
+            Guid? registrationOperationId = null)
         {
             try
             {
@@ -156,6 +157,12 @@ namespace Listenarr.Infrastructure.FileSystem
 
                 if (await IsSameFilesystemPathAsync(sourceFile, destFile))
                 {
+                    if (capturePublication != null)
+                    {
+                        CapturePublishedRegistrationLease(
+                            PinnedAudiobookFileRegistrationLease.Open(destFile),
+                            capturePublication);
+                    }
                     LogMutation(
                         FileMutationOutcome.Skipped,
                         action,
@@ -222,6 +229,20 @@ namespace Listenarr.Infrastructure.FileSystem
                     return false;
                 }
 
+                if (capturePublication != null
+                    && action == FileAction.HardlinkCopy
+                    && registrationOperationId.HasValue
+                    && destinationEntry != null)
+                {
+                    LogMutation(
+                        FileMutationOutcome.Blocked,
+                        action,
+                        sourceFile,
+                        destFile,
+                        "A retryable hardlink registration destination is already owned by another publication state");
+                    return false;
+                }
+
                 if (AfterFileEntriesPinnedForTestAsync != null)
                 {
                     await AfterFileEntriesPinnedForTestAsync(
@@ -237,6 +258,54 @@ namespace Listenarr.Infrastructure.FileSystem
                         && !destinationEntry.VisiblePathMatches()))
                 {
                     return false;
+                }
+
+                var forceByteCopyAfterDurableFallback = false;
+                if (preferHardlink
+                    && capturePublication != null
+                    && registrationOperationId.HasValue
+                    && destinationEntry == null)
+                {
+                    var publication =
+                        await TryPublishHardlinkRegistrationAsync(
+                            lease,
+                            sourceEntry,
+                            destFile,
+                            registrationOperationId.Value);
+                    if (publication.Outcome
+                        == HardlinkRegistrationPublicationOutcome.Published)
+                    {
+                        CapturePublishedRegistrationLease(
+                            publication.Lease
+                                ?? throw new InvalidOperationException(
+                                    "Durable hardlink publication completed without a registration lease."),
+                            capturePublication);
+                        LogMutation(
+                            FileMutationOutcome.Success,
+                            action,
+                            sourceFile,
+                            destFile,
+                            "Published through an operation-scoped durable hardlink claim");
+                        return true;
+                    }
+
+                    if (publication.Outcome
+                        != HardlinkRegistrationPublicationOutcome.FallbackAllowed)
+                    {
+                        _logger.LogWarning(
+                            publication.Failure,
+                            "Durable hardlink publication requires reconciliation before another publication strategy can run: {Source} -> {Destination}",
+                            LogRedaction.SanitizeFilePath(sourceFile),
+                            LogRedaction.SanitizeFilePath(destFile));
+                        return false;
+                    }
+
+                    forceByteCopyAfterDurableFallback = true;
+                    _logger.LogInformation(
+                        publication.Failure,
+                        "Durable hardlink publication was unavailable before ownership evidence was retained; falling back to a pinned byte copy: {Source} -> {Destination}",
+                        LogRedaction.SanitizeFilePath(sourceFile),
+                        LogRedaction.SanitizeFilePath(destFile));
                 }
 
                 var sourceContent = await CaptureFileMoveContentAsync(sourceEntry);
@@ -256,6 +325,16 @@ namespace Listenarr.Infrastructure.FileSystem
                         sourceEntry,
                         sourceContent))
                 {
+                    if (capturePublication != null)
+                    {
+                        CapturePublishedRegistrationLease(
+                            PinnedAudiobookFileRegistrationLease.Create(
+                                destinationEntry.OpenStableRegistrationCopy(),
+                                destFile,
+                                sourcePhysicalObjectIdentity:
+                                    sourceEntry.GetObjectIdentity()),
+                            capturePublication);
+                    }
                     LogMutation(
                         FileMutationOutcome.Skipped,
                         action,
@@ -271,7 +350,8 @@ namespace Listenarr.Infrastructure.FileSystem
                 var published = false;
                 try
                 {
-                    if (preferHardlink)
+                    if (preferHardlink
+                        && !forceByteCopyAfterDurableFallback)
                     {
                         try
                         {
@@ -353,6 +433,16 @@ namespace Listenarr.Infrastructure.FileSystem
                             publicationStateName);
                     }
                     published = true;
+                    if (capturePublication != null)
+                    {
+                        CapturePublishedRegistrationLease(
+                            PinnedAudiobookFileRegistrationLease.Create(
+                                prepared.OpenStableRegistrationCopy(),
+                                destFile,
+                                sourcePhysicalObjectIdentity:
+                                    sourceEntry.GetObjectIdentity()),
+                            capturePublication);
+                    }
                     LogMutation(
                         FileMutationOutcome.Success,
                         action,
@@ -385,70 +475,5 @@ namespace Listenarr.Infrastructure.FileSystem
             }
         }
 
-        private static void PublishPinnedPreparedReplacingCapturedDestination(
-            PinnedDirectoryCreation.PinnedFileEntry prepared,
-            PinnedDirectoryCreation.PinnedDirectoryAnchor destinationParent,
-            string destinationName,
-            PinnedDirectoryCreation.PinnedFileEntry capturedDestination)
-        {
-            var capturedName =
-                $".listenarr-file-copy-previous-{Guid.NewGuid():N}.tmp";
-            capturedDestination.MoveWithinParent(capturedName);
-            try
-            {
-                using var appearedDestination =
-                    destinationParent.TryOpenExistingFile(
-                        destinationName,
-                        requireDeleteAccess: false);
-                if (appearedDestination != null)
-                {
-                    throw new IOException(
-                        "The destination was recreated after its captured generation was quarantined.");
-                }
-
-                prepared.MoveWithinParent(destinationName);
-                capturedDestination.Delete(immediateWindows: true);
-            }
-            catch
-            {
-                using var appearedDestination =
-                    destinationParent.TryOpenExistingFile(
-                        destinationName,
-                        requireDeleteAccess: false);
-                if (appearedDestination == null
-                    && capturedDestination.VisiblePathMatches())
-                {
-                    capturedDestination.MoveWithinParent(destinationName);
-                }
-
-                throw;
-            }
-        }
-
-        private static string Truncate(string? s, int max)
-        {
-            if (string.IsNullOrEmpty(s)) return string.Empty;
-            if (s.Length <= max) return s;
-            return s.Substring(0, max) + "...";
-        }
-
-        private static ProcessStartInfo CreateRobocopyStartInfo(params string[] arguments)
-        {
-            var startInfo = new ProcessStartInfo
-            {
-                FileName = "robocopy",
-                CreateNoWindow = true,
-                UseShellExecute = false,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true
-            };
-
-            foreach (var argument in arguments.Where(argument => !string.IsNullOrWhiteSpace(argument)))
-            {
-                startInfo.ArgumentList.Add(argument);
-            }
-
-            return startInfo;
-        }
     }
 }
