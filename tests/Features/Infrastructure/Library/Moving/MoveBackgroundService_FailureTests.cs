@@ -61,12 +61,12 @@ namespace Listenarr.Tests.Features.Infrastructure.Library.Moving
 
             await bg.StopAsync(CancellationToken.None);
 
-            Assert.NotNull(persisted);
-            Assert.Equal(MoveJobStatus.NeedsAttention, persisted!.Status);
-            Assert.Equal(0, persisted.AttemptCount);
-            Assert.Null(persisted.NextAttemptAt);
-            Assert.Null(persisted.LeaseOwner);
-            Assert.Null(persisted.LeaseExpiresAt);
+            var persistedJob = Assert.IsType<MoveJob>(persisted);
+            Assert.Equal(MoveJobStatus.NeedsAttention, persistedJob.Status);
+            Assert.Equal(0, persistedJob.AttemptCount);
+            Assert.Null(persistedJob.NextAttemptAt);
+            Assert.Null(persistedJob.LeaseOwner);
+            Assert.Null(persistedJob.LeaseExpiresAt);
         }
     }
 }

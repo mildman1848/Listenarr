@@ -28,11 +28,11 @@ public sealed class RootFolderRelocationStateTests : BaseTests
             PathIdentityState = PathIdentityState.Valid
         };
 
-        var persisted = RootFolderPathSemantics.ResolvePersisted(root);
+        var persisted = Assert.IsType<PersistedRootFolderPathSemantics>(
+            RootFolderPathSemantics.ResolvePersisted(root));
 
-        Assert.NotNull(persisted);
-        Assert.Equal(FileSystemCaseSensitivity.Sensitive, persisted.Value.Semantics.CaseSensitivity);
-        Assert.False(persisted.Value.DetectAmbiguousCaseMatches);
+        Assert.Equal(FileSystemCaseSensitivity.Sensitive, persisted.Semantics.CaseSensitivity);
+        Assert.False(persisted.DetectAmbiguousCaseMatches);
     }
 
     [Fact]
@@ -46,11 +46,11 @@ public sealed class RootFolderRelocationStateTests : BaseTests
             PathIdentityState = PathIdentityState.Unavailable
         };
 
-        var persisted = RootFolderPathSemantics.ResolvePersisted(root);
+        var persisted = Assert.IsType<PersistedRootFolderPathSemantics>(
+            RootFolderPathSemantics.ResolvePersisted(root));
 
-        Assert.NotNull(persisted);
-        Assert.Equal(FileSystemCaseSensitivity.Sensitive, persisted.Value.Semantics.CaseSensitivity);
-        Assert.True(persisted.Value.DetectAmbiguousCaseMatches);
+        Assert.Equal(FileSystemCaseSensitivity.Sensitive, persisted.Semantics.CaseSensitivity);
+        Assert.True(persisted.DetectAmbiguousCaseMatches);
     }
 
     [Fact]
