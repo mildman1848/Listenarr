@@ -89,6 +89,39 @@ public sealed class FileSystemSemanticsResolverTests : BaseTests
         }
     }
 
+    [DirectoryLinkFact]
+    public async Task AutoProbe_LinkedBoundary_ProbesPinnedPhysicalDirectoryAndRemovesProbeFiles()
+    {
+        var root = Path.Join(
+            Path.GetTempPath(),
+            "filesystem-semantics-link-" + Guid.NewGuid().ToString("N"));
+        var physical = Path.Join(root, "physical");
+        var linked = Path.Join(root, "linked");
+        Directory.CreateDirectory(physical);
+        Directory.CreateSymbolicLink(linked, physical);
+        var resolver = new FileSystemSemanticsResolver();
+        try
+        {
+            var resolution = await resolver.ResolveAsync(
+                linked,
+                FileSystemCaseSensitivityMode.Auto);
+
+            Assert.Equal(PathIdentityState.Valid, resolution.State);
+            Assert.NotEqual(
+                FileSystemCaseSensitivity.Unknown,
+                resolution.Semantics.CaseSensitivity);
+            Assert.Equal(Path.GetFullPath(linked), resolution.CanonicalPath);
+            Assert.Empty(Directory.EnumerateFileSystemEntries(
+                physical,
+                ".listenarr-case-probe-*"));
+        }
+        finally
+        {
+            Directory.Delete(linked);
+            Directory.Delete(root, true);
+        }
+    }
+
     [Fact]
     public async Task AutoProbe_ResolvesAndRemovesProbeFile()
     {

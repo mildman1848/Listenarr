@@ -61,7 +61,7 @@ public sealed class FileSystemSemanticsResolver : IFileSystemSemanticsResolver
         try
         {
             using var pinnedBoundary =
-                PinnedDirectoryCreation.OpenPinnedDirectoryNoFollow(boundary);
+                PinnedDirectoryCreation.OpenPinnedBoundary(boundary);
             primary = pinnedBoundary.CreateNewFile(probeName);
             AfterPrimaryProbeCreatedForTest?.Invoke(
                 primary.FullPath,
