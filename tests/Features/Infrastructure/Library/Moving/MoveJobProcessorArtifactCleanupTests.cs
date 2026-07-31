@@ -29,9 +29,9 @@ public partial class MoveJobProcessorTests
 
         await faultingProcessor.ProcessJobAsync(job, CancellationToken.None);
 
-        var retryJob = await queue.GetJobAsync(job.Id);
-        Assert.NotNull(retryJob);
-        Assert.Equal(MoveJobStatus.RetryScheduled, retryJob!.Status);
+        var retryJob = Assert.IsType<MoveJob>(
+            await queue.GetJobAsync(job.Id));
+        Assert.Equal(MoveJobStatus.RetryScheduled, retryJob.Status);
         Assert.Equal(MoveJobPhase.CleaningArtifacts, retryJob.Phase);
         var markerPath = Path.Join(target, $".listenarr-move-{job.Id:N}.pending");
         Assert.True(File.Exists(markerPath));
@@ -40,10 +40,10 @@ public partial class MoveJobProcessorTests
         Assert.Null(await queue.TryClaimJobAsync(job.Id, LeaseOwner));
         await MakeRetryDueAsync(job.Id);
 
-        var retryGeneration = await queue.TryClaimJobAsync(job.Id, LeaseOwner);
-        Assert.NotNull(retryGeneration);
+        var retryGeneration = Assert.IsType<int>(
+            await queue.TryClaimJobAsync(job.Id, LeaseOwner));
         retryJob.LeaseOwner = LeaseOwner;
-        retryJob.LeaseGeneration = retryGeneration.Value;
+        retryJob.LeaseGeneration = retryGeneration;
         var retryProcessor = _provider.GetRequiredService<IMoveJobProcessor>();
 
         await retryProcessor.ProcessJobAsync(retryJob, CancellationToken.None);
@@ -80,9 +80,9 @@ public partial class MoveJobProcessorTests
 
         await processor.ProcessJobAsync(job, CancellationToken.None);
 
-        var persisted = await queue.GetJobAsync(job.Id);
-        Assert.NotNull(persisted);
-        Assert.Equal(MoveJobStatus.Completed, persisted!.Status);
+        var persisted = Assert.IsType<MoveJob>(
+            await queue.GetJobAsync(job.Id));
+        Assert.Equal(MoveJobStatus.Completed, persisted.Status);
         Assert.Equal(
             "preserve me",
             await File.ReadAllTextAsync(Path.Join(source, "operator-note.txt")));
@@ -116,9 +116,9 @@ public partial class MoveJobProcessorTests
 
         await processor.ProcessJobAsync(job, CancellationToken.None);
 
-        var persisted = await queue.GetJobAsync(job.Id);
-        Assert.NotNull(persisted);
-        Assert.Equal(MoveJobStatus.NeedsAttention, persisted!.Status);
+        var persisted = Assert.IsType<MoveJob>(
+            await queue.GetJobAsync(job.Id));
+        Assert.Equal(MoveJobStatus.NeedsAttention, persisted.Status);
         Assert.Equal(
             "corrupted after cleanup validation",
             await File.ReadAllTextAsync(Path.Join(target, "book.m4b")));
@@ -152,9 +152,9 @@ public partial class MoveJobProcessorTests
 
         await processor.ProcessJobAsync(job, CancellationToken.None);
 
-        var persisted = await queue.GetJobAsync(job.Id);
-        Assert.NotNull(persisted);
-        Assert.Equal(MoveJobStatus.NeedsAttention, persisted!.Status);
+        var persisted = Assert.IsType<MoveJob>(
+            await queue.GetJobAsync(job.Id));
+        Assert.Equal(MoveJobStatus.NeedsAttention, persisted.Status);
         Assert.Equal(
             "preserve me",
             await File.ReadAllTextAsync(Path.Join(target, "operator-note.txt")));
@@ -193,9 +193,9 @@ public partial class MoveJobProcessorTests
 
         await faultingProcessor.ProcessJobAsync(job, CancellationToken.None);
 
-        var retryJob = await queue.GetJobAsync(job.Id);
-        Assert.NotNull(retryJob);
-        Assert.Equal(MoveJobStatus.RetryScheduled, retryJob!.Status);
+        var retryJob = Assert.IsType<MoveJob>(
+            await queue.GetJobAsync(job.Id));
+        Assert.Equal(MoveJobStatus.RetryScheduled, retryJob.Status);
         Assert.Equal(MoveJobPhase.Finalizing, retryJob.Phase);
         Assert.True(Directory.Exists(sourceParent));
         Assert.True(File.Exists(Path.Join(target, $".listenarr-move-{job.Id:N}.pending")));
@@ -203,10 +203,10 @@ public partial class MoveJobProcessorTests
         Assert.Null(await queue.TryClaimJobAsync(job.Id, LeaseOwner));
         await MakeRetryDueAsync(job.Id);
 
-        var retryGeneration = await queue.TryClaimJobAsync(job.Id, LeaseOwner);
-        Assert.NotNull(retryGeneration);
+        var retryGeneration = Assert.IsType<int>(
+            await queue.TryClaimJobAsync(job.Id, LeaseOwner));
         retryJob.LeaseOwner = LeaseOwner;
-        retryJob.LeaseGeneration = retryGeneration.Value;
+        retryJob.LeaseGeneration = retryGeneration;
         await _provider.GetRequiredService<IMoveJobProcessor>()
             .ProcessJobAsync(retryJob, CancellationToken.None);
 
@@ -245,9 +245,9 @@ public partial class MoveJobProcessorTests
 
         await processor.ProcessJobAsync(job, CancellationToken.None);
 
-        var persisted = await queue.GetJobAsync(job.Id);
-        Assert.NotNull(persisted);
-        Assert.Equal(MoveJobStatus.Completed, persisted!.Status);
+        var persisted = Assert.IsType<MoveJob>(
+            await queue.GetJobAsync(job.Id));
+        Assert.Equal(MoveJobStatus.Completed, persisted.Status);
         Assert.False(Directory.Exists(source));
         Assert.True(Directory.Exists(sourceParent));
         Assert.Equal(
@@ -289,9 +289,9 @@ public partial class MoveJobProcessorTests
         for (var attempt = 1; attempt <= MoveTimingPolicy.MaxTransientAttempts; attempt++)
         {
             await processor.ProcessJobAsync(currentJob, CancellationToken.None);
-            var persisted = await queue.GetJobAsync(initialJob.Id);
-            Assert.NotNull(persisted);
-            Assert.Equal(attempt, persisted!.AttemptCount);
+            var persisted = Assert.IsType<MoveJob>(
+                await queue.GetJobAsync(initialJob.Id));
+            Assert.Equal(attempt, persisted.AttemptCount);
             if (attempt == MoveTimingPolicy.MaxTransientAttempts)
             {
                 Assert.Equal(MoveJobStatus.NeedsAttention, persisted.Status);
@@ -303,14 +303,14 @@ public partial class MoveJobProcessorTests
             }
 
             Assert.Equal(MoveJobStatus.RetryScheduled, persisted.Status);
-            Assert.NotNull(persisted.NextAttemptAt);
-            Assert.NotNull(persisted.UpdatedAt);
-            retryDelays.Add(persisted.NextAttemptAt!.Value - persisted.UpdatedAt!.Value);
+            var nextAttemptAt = Assert.IsType<DateTime>(persisted.NextAttemptAt);
+            var updatedAt = Assert.IsType<DateTime>(persisted.UpdatedAt);
+            retryDelays.Add(nextAttemptAt - updatedAt);
             await MakeRetryDueAsync(initialJob.Id);
-            var generation = await queue.TryClaimJobAsync(initialJob.Id, LeaseOwner);
-            Assert.NotNull(generation);
+            var generation = Assert.IsType<int>(
+                await queue.TryClaimJobAsync(initialJob.Id, LeaseOwner));
             persisted.LeaseOwner = LeaseOwner;
-            persisted.LeaseGeneration = generation.Value;
+            persisted.LeaseGeneration = generation;
             currentJob = persisted;
         }
 
