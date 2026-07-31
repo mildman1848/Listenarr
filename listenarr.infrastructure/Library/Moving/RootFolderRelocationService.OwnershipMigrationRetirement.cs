@@ -51,6 +51,28 @@ public sealed partial class RootFolderRelocationService
                 Path.GetFileName(targetSiblingMarker));
             ValidateRetirementTarget(plan, targetParent, targetMarker);
 
+            if (!sourceParent.VisiblePathMatches())
+            {
+                throw new InvalidOperationException(
+                    "The retired ownership marker parent changed before source retirement.");
+            }
+
+            if (string.Equals(
+                    Path.GetFileName(sourceSiblingMarker),
+                    Path.GetFileName(targetSiblingMarker),
+                    StringComparison.Ordinal)
+                && string.Equals(
+                    sourceParent.GetDirectoryObjectIdentity(),
+                    targetParent.GetDirectoryObjectIdentity(),
+                    StringComparison.Ordinal))
+            {
+                // The source and target are lexical aliases for the same physical
+                // namespace entry. Opening the same Windows file for deletion while
+                // its stable-read handle is active would create a false sharing
+                // violation; there is no obsolete source name to retire.
+                continue;
+            }
+
             var sourceOpen = sourceParent.TryOpenExistingFileWithOutcome(
                 Path.GetFileName(sourceSiblingMarker),
                 requireDeleteAccess: true,
@@ -77,20 +99,6 @@ public sealed partial class RootFolderRelocationService
                 {
                     throw new InvalidOperationException(
                         "A shared ownership marker generation changed before source-name retirement.");
-                }
-
-                if (string.Equals(
-                        Path.GetFileName(sourceSiblingMarker),
-                        Path.GetFileName(targetSiblingMarker),
-                        StringComparison.Ordinal)
-                    && string.Equals(
-                        sourceParent.GetDirectoryObjectIdentity(),
-                        targetParent.GetDirectoryObjectIdentity(),
-                        StringComparison.Ordinal))
-                {
-                    // The source and target are lexical aliases for the same physical
-                    // marker name. There is no obsolete source name to retire.
-                    continue;
                 }
 
                 sourceMarker.Delete();
