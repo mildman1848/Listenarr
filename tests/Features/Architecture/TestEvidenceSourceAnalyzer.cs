@@ -25,7 +25,15 @@ internal static class TestEvidenceSourceAnalyzer
             "WindowsTheory",
             "WindowsTheoryAttribute",
             "LinuxTheory",
-            "LinuxTheoryAttribute"
+            "LinuxTheoryAttribute",
+            "DirectoryLinkFact",
+            "DirectoryLinkFactAttribute",
+            "FileLinkFact",
+            "FileLinkFactAttribute",
+            "DirectoryLinkTheory",
+            "DirectoryLinkTheoryAttribute",
+            "FileLinkTheory",
+            "FileLinkTheoryAttribute"
         };
 
     public static IReadOnlyList<TestEvidenceViolation> Analyze(string source)

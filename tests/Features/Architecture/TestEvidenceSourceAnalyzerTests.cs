@@ -114,4 +114,34 @@ public sealed class TestEvidenceSourceAnalyzerTests : BaseTests
 
         Assert.Empty(TestEvidenceSourceAnalyzer.Analyze(source));
     }
+
+    [Theory]
+    [InlineData("DirectoryLinkFact")]
+    [InlineData("DirectoryLinkFactAttribute")]
+    [InlineData("FileLinkFact")]
+    [InlineData("FileLinkFactAttribute")]
+    [InlineData("DirectoryLinkTheory")]
+    [InlineData("DirectoryLinkTheoryAttribute")]
+    [InlineData("FileLinkTheory")]
+    [InlineData("FileLinkTheoryAttribute")]
+    public void Analyze_LinkCapabilityAttributeReturn_IsReported(string attributeName)
+    {
+        var source = $$"""
+            public sealed class Example
+            {
+                [{{attributeName}}]
+                public void Test()
+                {
+                    if (!TryCreateLink())
+                    {
+                        return;
+                    }
+                    Assert.True(true);
+                }
+            }
+            """;
+
+        var violation = Assert.Single(TestEvidenceSourceAnalyzer.Analyze(source));
+        Assert.Contains("capability probe", violation.Reason);
+    }
 }
