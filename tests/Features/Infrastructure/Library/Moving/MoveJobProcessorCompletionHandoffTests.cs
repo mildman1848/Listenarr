@@ -29,16 +29,16 @@ public partial class MoveJobProcessorTests
 
         await processor.ProcessJobAsync(job, CancellationToken.None);
 
-        var retryJob = await queue.GetJobAsync(job.Id);
-        Assert.NotNull(retryJob);
-        Assert.Equal(MoveJobStatus.RetryScheduled, retryJob!.Status);
+        var retryJob = Assert.IsType<MoveJob>(
+            await queue.GetJobAsync(job.Id));
+        Assert.Equal(MoveJobStatus.RetryScheduled, retryJob.Status);
         Assert.Equal(MoveJobPhase.RecordingCompletion, retryJob.Phase);
         Assert.Empty(await _historyRepository.GetByCorrelationIdAsync($"move:{job.Id:N}"));
         await MakeRetryDueAsync(job.Id);
-        var generation = await queue.TryClaimJobAsync(job.Id, LeaseOwner);
-        Assert.NotNull(generation);
+        var generation = Assert.IsType<int>(
+            await queue.TryClaimJobAsync(job.Id, LeaseOwner));
         retryJob.LeaseOwner = LeaseOwner;
-        retryJob.LeaseGeneration = generation.Value;
+        retryJob.LeaseGeneration = generation;
 
         await _provider.GetRequiredService<IMoveJobProcessor>()
             .ProcessJobAsync(retryJob, CancellationToken.None);
@@ -77,9 +77,9 @@ public partial class MoveJobProcessorTests
             processor.ProcessJobAsync(job, CancellationToken.None));
 
         Assert.Empty(await _historyRepository.GetByCorrelationIdAsync($"move:{job.Id:N}"));
-        var persisted = await queue.GetJobAsync(job.Id);
-        Assert.NotNull(persisted);
-        Assert.Equal("replacement-completion-worker", persisted!.LeaseOwner);
+        var persisted = Assert.IsType<MoveJob>(
+            await queue.GetJobAsync(job.Id));
+        Assert.Equal("replacement-completion-worker", persisted.LeaseOwner);
         Assert.Equal(2, persisted.LeaseGeneration);
     }
 
@@ -113,9 +113,9 @@ public partial class MoveJobProcessorTests
         var correlated = await _historyRepository.GetByCorrelationIdAsync($"move:{job.Id:N}");
         Assert.Single(correlated, entry => entry.EventType == "Moved");
         scanQueue.VerifyNoOtherCalls();
-        var persisted = await queue.GetJobAsync(job.Id);
-        Assert.NotNull(persisted);
-        Assert.Equal(MoveJobStatus.Completed, persisted!.Status);
+        var persisted = Assert.IsType<MoveJob>(
+            await queue.GetJobAsync(job.Id));
+        Assert.Equal(MoveJobStatus.Completed, persisted.Status);
         Assert.Null(persisted.LeaseOwner);
         await using var db = await _provider
             .GetRequiredService<IDbContextFactory<ListenArrDbContext>>()

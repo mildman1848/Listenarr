@@ -42,18 +42,19 @@ namespace Listenarr.Tests.Features.Infrastructure.Library.Moving
             await _provider.GetRequiredService<IMoveJobProcessor>()
                 .ProcessJobAsync(job, CancellationToken.None);
 
-            var completed = await queue.GetJobAsync(job.Id);
-            Assert.NotNull(completed);
+            var completed = Assert.IsType<MoveJob>(
+                await queue.GetJobAsync(job.Id));
             Assert.True(
-                completed!.Status == MoveJobStatus.Completed,
+                completed.Status == MoveJobStatus.Completed,
                 completed.Error ?? $"Unexpected status: {completed.Status}");
             Assert.False(Directory.Exists(source));
             Assert.Equal("foreign audio", await File.ReadAllTextAsync(siblingFile));
             Assert.Equal(
                 "owned audio",
                 await File.ReadAllTextAsync(Path.Join(target, "Book One.m4b")));
-            var persisted = await _audiobookRepository.GetByIdSnapshotAsync(audiobook.Id);
-            Assert.Equal(target, persisted!.BasePath);
+            var persisted = Assert.IsType<Audiobook>(
+                await _audiobookRepository.GetByIdSnapshotAsync(audiobook.Id));
+            Assert.Equal(target, persisted.BasePath);
             var tracked = Assert.Single(
                 await _audiobookFileRepository.GetByAudiobookIdAsync(audiobook.Id));
             Assert.Equal(Path.Join(target, "Book One.m4b"), tracked.Path);
@@ -86,18 +87,19 @@ namespace Listenarr.Tests.Features.Infrastructure.Library.Moving
             await _provider.GetRequiredService<IMoveJobProcessor>()
                 .ProcessJobAsync(job, CancellationToken.None);
 
-            var completed = await queue.GetJobAsync(job.Id);
-            Assert.NotNull(completed);
+            var completed = Assert.IsType<MoveJob>(
+                await queue.GetJobAsync(job.Id));
             Assert.True(
-                completed!.Status == MoveJobStatus.Completed,
+                completed.Status == MoveJobStatus.Completed,
                 completed.Error ?? $"Unexpected status: {completed.Status}");
             Assert.False(Directory.Exists(source));
             Assert.Equal(
                 "owned audio",
                 await File.ReadAllTextAsync(
                     Path.Join(target, "Metadata Only Book.m4b")));
-            var persisted = await _audiobookRepository.GetByIdSnapshotAsync(audiobook.Id);
-            Assert.Equal(target, persisted!.BasePath);
+            var persisted = Assert.IsType<Audiobook>(
+                await _audiobookRepository.GetByIdSnapshotAsync(audiobook.Id));
+            Assert.Equal(target, persisted.BasePath);
         }
 
         [Fact]
@@ -134,23 +136,24 @@ namespace Listenarr.Tests.Features.Infrastructure.Library.Moving
             var processor = _provider.GetRequiredService<IMoveJobProcessor>();
             await processor.ProcessJobAsync(job!, CancellationToken.None);
 
-            var completedJob = await queue.GetJobAsync(jobId);
-            Assert.NotNull(completedJob);
-            Assert.Equal(MoveJobStatus.Completed, completedJob!.Status);
+            var completedJob = Assert.IsType<MoveJob>(
+                await queue.GetJobAsync(jobId));
+            Assert.Equal(MoveJobStatus.Completed, completedJob.Status);
             Assert.True(File.Exists(Path.Join(target, "book.m4b")));
             Assert.True(File.Exists(Path.Join(target, "extras", "chapter2.mp3")));
 
             using var verificationScope = _provider.CreateScope();
             var repository = verificationScope.ServiceProvider.GetRequiredService<IAudiobookRepository>();
-            var updatedAudiobook = await repository.GetByIdAsync(audiobook.Id);
-            Assert.NotNull(updatedAudiobook);
-            Assert.Equal(Path.GetFullPath(target), updatedAudiobook!.BasePath);
+            var updatedAudiobook = Assert.IsType<Audiobook>(
+                await repository.GetByIdAsync(audiobook.Id));
+            Assert.Equal(Path.GetFullPath(target), updatedAudiobook.BasePath);
             Assert.Equal(Path.GetFullPath(target), updatedAudiobook.FilePath);
-            Assert.NotNull(updatedAudiobook.Files);
-            Assert.Contains(updatedAudiobook.Files!, file => file.Path == Path.Join(target, "book.m4b"));
-            Assert.Contains(updatedAudiobook.Files!, file => file.Path == Path.Join(target, "extras", "chapter2.mp3"));
+            var updatedFiles = Assert.IsAssignableFrom<ICollection<AudiobookFile>>(
+                updatedAudiobook.Files);
+            Assert.Contains(updatedFiles, file => file.Path == Path.Join(target, "book.m4b"));
+            Assert.Contains(updatedFiles, file => file.Path == Path.Join(target, "extras", "chapter2.mp3"));
             Assert.DoesNotContain(
-                updatedAudiobook.Files!,
+                updatedFiles,
                 file => file.Path?.StartsWith(source, StringComparison.Ordinal) == true);
         }
 
@@ -179,10 +182,10 @@ namespace Listenarr.Tests.Features.Infrastructure.Library.Moving
                 target,
                 targetIdentity,
                 DeleteEmptySource: true));
-            var job = await queue.GetJobAsync(jobId);
-            Assert.NotNull(job);
-            await PrepareJobForProcessingAsync(queue, job!);
-            return (queue, job!);
+            var job = Assert.IsType<MoveJob>(
+                await queue.GetJobAsync(jobId));
+            await PrepareJobForProcessingAsync(queue, job);
+            return (queue, job);
         }
 
         private async Task AddTrackedFileAsync(
@@ -204,10 +207,10 @@ namespace Listenarr.Tests.Features.Infrastructure.Library.Moving
 
         private static async Task PrepareJobForProcessingAsync(IMoveQueueService queue, MoveJob job)
         {
-            var leaseGeneration = await queue.TryClaimJobAsync(job.Id, LeaseOwner);
-            Assert.NotNull(leaseGeneration);
+            var leaseGeneration = Assert.IsType<int>(
+                await queue.TryClaimJobAsync(job.Id, LeaseOwner));
             job.LeaseOwner = LeaseOwner;
-            job.LeaseGeneration = leaseGeneration.Value;
+            job.LeaseGeneration = leaseGeneration;
         }
     }
 }

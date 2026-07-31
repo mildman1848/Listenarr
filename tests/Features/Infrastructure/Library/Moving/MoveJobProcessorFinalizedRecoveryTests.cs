@@ -34,15 +34,15 @@ public partial class MoveJobProcessorTests
 
         await processor.ProcessJobAsync(state.Job, CancellationToken.None);
 
-        var retryJob = await state.Queue.GetJobAsync(state.Job.Id);
-        Assert.NotNull(retryJob);
-        Assert.Equal(MoveJobStatus.RetryScheduled, retryJob!.Status);
+        var retryJob = Assert.IsType<MoveJob>(
+            await state.Queue.GetJobAsync(state.Job.Id));
+        Assert.Equal(MoveJobStatus.RetryScheduled, retryJob.Status);
         Assert.NotNull(retryJob.NextAttemptAt);
         await MakeRetryDueAsync(state.Job.Id);
-        var generation = await state.Queue.TryClaimJobAsync(state.Job.Id, LeaseOwner);
-        Assert.NotNull(generation);
+        var generation = Assert.IsType<int>(
+            await state.Queue.TryClaimJobAsync(state.Job.Id, LeaseOwner));
         retryJob.LeaseOwner = LeaseOwner;
-        retryJob.LeaseGeneration = generation.Value;
+        retryJob.LeaseGeneration = generation;
 
         await _provider.GetRequiredService<IMoveJobProcessor>()
             .ProcessJobAsync(retryJob, CancellationToken.None);
@@ -191,9 +191,9 @@ public partial class MoveJobProcessorTests
         var request = CreateMoveRequest(source, target, job, deleteEmptySource: false);
         var result = await service.MoveContentsAsync(request, CancellationToken.None);
         File.Delete(result.RecoveryMarkerPath);
-        var persistedJob = await queue.GetJobAsync(job.Id);
-        Assert.NotNull(persistedJob);
-        Assert.Equal(MoveJobPhase.Finalizing, persistedJob!.Phase);
+        var persistedJob = Assert.IsType<MoveJob>(
+            await queue.GetJobAsync(job.Id));
+        Assert.Equal(MoveJobPhase.Finalizing, persistedJob.Phase);
         var processor = _provider.GetRequiredService<IMoveJobProcessor>();
 
         await processor.ProcessJobAsync(persistedJob, CancellationToken.None);
@@ -204,9 +204,11 @@ public partial class MoveJobProcessorTests
         using var verificationScope = _provider.CreateScope();
         var verificationRepository = verificationScope.ServiceProvider
             .GetRequiredService<IAudiobookRepository>();
-        var updated = await verificationRepository.GetByIdAsync(audiobook.Id);
-        Assert.NotNull(updated);
-        Assert.Equal(Path.GetFullPath(target), Path.GetFullPath(updated!.BasePath!));
+        var updated = Assert.IsType<Audiobook>(
+            await verificationRepository.GetByIdAsync(audiobook.Id));
+        Assert.Equal(
+            Path.GetFullPath(target),
+            Path.GetFullPath(Assert.IsType<string>(updated.BasePath)));
         Assert.False(File.Exists(Path.Join(target, ".listenarr-temp-owner.json")));
         Assert.False(File.Exists(result.RecoveryMarkerPath));
         Assert.Single(
