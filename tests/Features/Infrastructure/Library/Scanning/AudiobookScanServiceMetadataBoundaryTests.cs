@@ -44,17 +44,20 @@ public sealed class AudiobookScanServiceMetadataBoundaryTests : BaseTests
             .GetRequiredService<IScanPathAuthorizationService>()
             .AuthorizeAsync(root);
         Assert.True(authorization.IsAuthorized, authorization.Error);
+        var pathIdentity = Assert.IsType<PathIdentitySnapshot>(authorization.Identity);
+        var physicalIdentity = Assert.IsType<ScanPathPhysicalIdentity>(
+            authorization.PhysicalIdentity);
         Assert.Equal(
             FileSystemCaseSensitivity.Sensitive,
-            authorization.Identity!.Value.CaseSensitivity);
+            pathIdentity.CaseSensitivity);
 
         var result = await _provider
             .GetRequiredService<IAudiobookScanService>()
             .ScanAsync(new AudiobookScanCommand(
                 audiobook.Id,
                 root,
-                authorization.Identity.Value,
-                authorization.PhysicalIdentity!.Value));
+                pathIdentity,
+                physicalIdentity));
 
         Assert.Empty(result.AttributedFiles);
         Assert.Empty(await _audiobookFileRepository.GetByAudiobookIdAsync(audiobook.Id));

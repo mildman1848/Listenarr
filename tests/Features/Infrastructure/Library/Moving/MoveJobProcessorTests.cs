@@ -20,10 +20,10 @@ namespace Listenarr.Tests.Features.Infrastructure.Library.Moving
             var processor = _provider.GetRequiredService<IMoveJobProcessor>();
             await processor.ProcessJobAsync(job, CancellationToken.None);
 
-            var updatedJob = await queue.GetJobAsync(job.Id);
-            Assert.NotNull(updatedJob);
+            var updatedJob = Assert.IsType<MoveJob>(
+                await queue.GetJobAsync(job.Id));
             Assert.True(
-                updatedJob!.Status == MoveJobStatus.Completed,
+                updatedJob.Status == MoveJobStatus.Completed,
                 updatedJob.Error ?? $"Unexpected move status: {updatedJob.Status}");
             Assert.False(Directory.Exists(src));
             Assert.True(File.Exists(Path.Join(dst, "book.m4b")));
@@ -85,9 +85,9 @@ namespace Listenarr.Tests.Features.Infrastructure.Library.Moving
             var processor = _provider.GetRequiredService<IMoveJobProcessor>();
             await processor.ProcessJobAsync(job, CancellationToken.None);
 
-            var updatedJob = await queue.GetJobAsync(job.Id);
-            Assert.NotNull(updatedJob);
-            Assert.Equal(MoveJobStatus.Completed, updatedJob!.Status);
+            var updatedJob = Assert.IsType<MoveJob>(
+                await queue.GetJobAsync(job.Id));
+            Assert.Equal(MoveJobStatus.Completed, updatedJob.Status);
             Assert.False(Directory.Exists(source));
             Assert.False(Directory.Exists(oldTitle));
             Assert.True(Directory.Exists(series));
@@ -168,14 +168,15 @@ namespace Listenarr.Tests.Features.Infrastructure.Library.Moving
                 target,
                 $".listenarr-move-{job.Id:N}.pending",
                 SearchOption.TopDirectoryOnly));
-            var persistedJob = await durableQueue.GetJobAsync(job.Id);
-            Assert.Equal(MoveJobPhase.RecordingCompletion, persistedJob?.Phase);
+            var persistedJob = Assert.IsType<MoveJob>(
+                await durableQueue.GetJobAsync(job.Id));
+            Assert.Equal(MoveJobPhase.RecordingCompletion, persistedJob.Phase);
             Assert.Empty(await _historyRepository.GetByEventTypeAsync("MoveFailed"));
             Assert.Empty(
                 await _historyRepository.GetByCorrelationIdAsync($"move:{job.Id:N}"));
 
             var retryProcessor = _provider.GetRequiredService<IMoveJobProcessor>();
-            await retryProcessor.ProcessJobAsync(persistedJob!, CancellationToken.None);
+            await retryProcessor.ProcessJobAsync(persistedJob, CancellationToken.None);
 
             var completedJob = await durableQueue.GetJobAsync(job.Id);
             Assert.True(
@@ -205,9 +206,9 @@ namespace Listenarr.Tests.Features.Infrastructure.Library.Moving
             var processor = _provider.GetRequiredService<IMoveJobProcessor>();
             await processor.ProcessJobAsync(job, CancellationToken.None);
 
-            var updatedJob = await queue.GetJobAsync(job.Id);
-            Assert.NotNull(updatedJob);
-            Assert.Equal(MoveJobStatus.Completed, updatedJob!.Status);
+            var updatedJob = Assert.IsType<MoveJob>(
+                await queue.GetJobAsync(job.Id));
+            Assert.Equal(MoveJobStatus.Completed, updatedJob.Status);
             Assert.True(Directory.Exists(src));
             Assert.True(Directory.Exists(dst));
             Assert.False(File.Exists(Path.Join(src, "book.m4b")));
@@ -217,9 +218,9 @@ namespace Listenarr.Tests.Features.Infrastructure.Library.Moving
 
             using var verificationScope = _provider.CreateScope();
             var verificationRepository = verificationScope.ServiceProvider.GetRequiredService<IAudiobookRepository>();
-            var updatedAudiobook = await verificationRepository.GetByIdAsync(audiobook.Id);
-            Assert.NotNull(updatedAudiobook);
-            Assert.Equal(dst, updatedAudiobook!.BasePath);
+            var updatedAudiobook = Assert.IsType<Audiobook>(
+                await verificationRepository.GetByIdAsync(audiobook.Id));
+            Assert.Equal(dst, updatedAudiobook.BasePath);
         }
 
         [Fact]
@@ -239,9 +240,9 @@ namespace Listenarr.Tests.Features.Infrastructure.Library.Moving
             var processor = _provider.GetRequiredService<IMoveJobProcessor>();
             await processor.ProcessJobAsync(job, CancellationToken.None);
 
-            var updatedJob = await queue.GetJobAsync(job.Id);
-            Assert.NotNull(updatedJob);
-            Assert.Equal(MoveJobStatus.Completed, updatedJob!.Status);
+            var updatedJob = Assert.IsType<MoveJob>(
+                await queue.GetJobAsync(job.Id));
+            Assert.Equal(MoveJobStatus.Completed, updatedJob.Status);
             Assert.False(Directory.Exists(src));
             Assert.False(Directory.Exists(sourceParent));
             Assert.True(Directory.Exists(Path.GetDirectoryName(sourceParent)!));
@@ -261,9 +262,9 @@ namespace Listenarr.Tests.Features.Infrastructure.Library.Moving
             var processor = _provider.GetRequiredService<IMoveJobProcessor>();
             await processor.ProcessJobAsync(job, CancellationToken.None);
 
-            var updatedJob = await queue.GetJobAsync(job.Id);
-            Assert.NotNull(updatedJob);
-            Assert.Equal(MoveJobStatus.Completed, updatedJob!.Status);
+            var updatedJob = Assert.IsType<MoveJob>(
+                await queue.GetJobAsync(job.Id));
+            Assert.Equal(MoveJobStatus.Completed, updatedJob.Status);
             Assert.False(Directory.Exists(src));
             Assert.True(Directory.Exists(dst));
             Assert.True(File.Exists(Path.Join(dst, "book.m4b")));
@@ -284,9 +285,9 @@ namespace Listenarr.Tests.Features.Infrastructure.Library.Moving
             var processor = _provider.GetRequiredService<IMoveJobProcessor>();
             await processor.ProcessJobAsync(job, CancellationToken.None);
 
-            var updatedJob = await queue.GetJobAsync(job.Id);
-            Assert.NotNull(updatedJob);
-            Assert.Equal(MoveJobStatus.Completed, updatedJob!.Status);
+            var updatedJob = Assert.IsType<MoveJob>(
+                await queue.GetJobAsync(job.Id));
+            Assert.Equal(MoveJobStatus.Completed, updatedJob.Status);
             Assert.False(Directory.Exists(src));
             Assert.True(File.Exists(Path.Join(dst, "book.m4b")));
         }
@@ -311,9 +312,9 @@ namespace Listenarr.Tests.Features.Infrastructure.Library.Moving
             var processor = _provider.GetRequiredService<IMoveJobProcessor>();
             await processor.ProcessJobAsync(job, CancellationToken.None);
 
-            var updatedJob = await queue.GetJobAsync(job.Id);
-            Assert.NotNull(updatedJob);
-            Assert.Equal(MoveJobStatus.Completed, updatedJob!.Status);
+            var updatedJob = Assert.IsType<MoveJob>(
+                await queue.GetJobAsync(job.Id));
+            Assert.Equal(MoveJobStatus.Completed, updatedJob.Status);
             Assert.True(Directory.Exists(src));
             Assert.Empty(Directory.EnumerateFileSystemEntries(src));
             Assert.True(File.Exists(Path.Join(dst, "book.m4b")));
@@ -341,9 +342,9 @@ namespace Listenarr.Tests.Features.Infrastructure.Library.Moving
             var requeuedJobId = await queue.RequeueMoveAsync(job.Id);
 
             Assert.Null(requeuedJobId);
-            var completedJob = await queue.GetJobAsync(job.Id);
-            Assert.NotNull(completedJob);
-            Assert.Equal(MoveJobStatus.Completed, completedJob!.Status);
+            var completedJob = Assert.IsType<MoveJob>(
+                await queue.GetJobAsync(job.Id));
+            Assert.Equal(MoveJobStatus.Completed, completedJob.Status);
             Assert.True(Directory.Exists(src));
             Assert.Empty(Directory.EnumerateFileSystemEntries(src));
             Assert.True(File.Exists(Path.Join(dst, "book.m4b")));
@@ -362,9 +363,9 @@ namespace Listenarr.Tests.Features.Infrastructure.Library.Moving
             var processor = _provider.GetRequiredService<IMoveJobProcessor>();
             await processor.ProcessJobAsync(job, CancellationToken.None);
 
-            var updatedJob = await queue.GetJobAsync(job.Id);
-            Assert.NotNull(updatedJob);
-            Assert.Equal(MoveJobStatus.NeedsAttention, updatedJob!.Status);
+            var updatedJob = Assert.IsType<MoveJob>(
+                await queue.GetJobAsync(job.Id));
+            Assert.Equal(MoveJobStatus.NeedsAttention, updatedJob.Status);
             Assert.Equal(0, updatedJob.AttemptCount);
             Assert.True(Directory.Exists(src));
 
@@ -439,9 +440,9 @@ namespace Listenarr.Tests.Features.Infrastructure.Library.Moving
             var processor = _provider.GetRequiredService<IMoveJobProcessor>();
             await Assert.ThrowsAsync<OperationCanceledException>(() => processor.ProcessJobAsync(job, cts.Token));
 
-            var updatedJob = await queue.GetJobAsync(job.Id);
-            Assert.NotNull(updatedJob);
-            Assert.Equal(MoveJobStatus.Running, updatedJob!.Status);
+            var updatedJob = Assert.IsType<MoveJob>(
+                await queue.GetJobAsync(job.Id));
+            Assert.Equal(MoveJobStatus.Running, updatedJob.Status);
         }
 
         [Fact]
@@ -479,16 +480,16 @@ namespace Listenarr.Tests.Features.Infrastructure.Library.Moving
             }
 
             var queue = _provider.GetRequiredService<IMoveQueueService>();
-            var job = await queue.GetJobAsync(legacyJob.Id);
-            Assert.NotNull(job);
-            await PrepareJobForProcessingAsync(queue, job!);
+            var job = Assert.IsType<MoveJob>(
+                await queue.GetJobAsync(legacyJob.Id));
+            await PrepareJobForProcessingAsync(queue, job);
 
             await _provider.GetRequiredService<IMoveJobProcessor>()
-                .ProcessJobAsync(job!, CancellationToken.None);
+                .ProcessJobAsync(job, CancellationToken.None);
 
-            var updatedJob = await queue.GetJobAsync(legacyJob.Id);
-            Assert.NotNull(updatedJob);
-            Assert.Equal(MoveJobStatus.Superseded, updatedJob!.Status);
+            var updatedJob = Assert.IsType<MoveJob>(
+                await queue.GetJobAsync(legacyJob.Id));
+            Assert.Equal(MoveJobStatus.Superseded, updatedJob.Status);
             Assert.Contains("identical", updatedJob.Error, StringComparison.OrdinalIgnoreCase);
             Assert.Null(updatedJob.ActiveDeduplicationKey);
             Assert.Null(updatedJob.LeaseOwner);
@@ -555,16 +556,16 @@ namespace Listenarr.Tests.Features.Infrastructure.Library.Moving
                 }
 
                 var queue = _provider.GetRequiredService<IMoveQueueService>();
-                var job = await queue.GetJobAsync(legacyJob.Id);
-                Assert.NotNull(job);
-                await PrepareJobForProcessingAsync(queue, job!);
+                var job = Assert.IsType<MoveJob>(
+                    await queue.GetJobAsync(legacyJob.Id));
+                await PrepareJobForProcessingAsync(queue, job);
 
                 await _provider.GetRequiredService<IMoveJobProcessor>()
-                    .ProcessJobAsync(job!, CancellationToken.None);
+                    .ProcessJobAsync(job, CancellationToken.None);
 
-                var updatedJob = await queue.GetJobAsync(legacyJob.Id);
-                Assert.NotNull(updatedJob);
-                Assert.Equal(MoveJobStatus.NeedsAttention, updatedJob!.Status);
+                var updatedJob = Assert.IsType<MoveJob>(
+                    await queue.GetJobAsync(legacyJob.Id));
+                Assert.Equal(MoveJobStatus.NeedsAttention, updatedJob.Status);
                 Assert.Contains("sibling artifacts", updatedJob.Error, StringComparison.OrdinalIgnoreCase);
                 Assert.True(File.Exists(sourceFile));
                 Assert.True(File.Exists(evidencePath));
@@ -623,16 +624,16 @@ namespace Listenarr.Tests.Features.Infrastructure.Library.Moving
             }
 
             var queue = _provider.GetRequiredService<IMoveQueueService>();
-            var job = await queue.GetJobAsync(legacyJob.Id);
-            Assert.NotNull(job);
-            await PrepareJobForProcessingAsync(queue, job!);
+            var job = Assert.IsType<MoveJob>(
+                await queue.GetJobAsync(legacyJob.Id));
+            await PrepareJobForProcessingAsync(queue, job);
 
             await _provider.GetRequiredService<IMoveJobProcessor>()
-                .ProcessJobAsync(job!, CancellationToken.None);
+                .ProcessJobAsync(job, CancellationToken.None);
 
-            var updatedJob = await queue.GetJobAsync(legacyJob.Id);
-            Assert.NotNull(updatedJob);
-            Assert.Equal(MoveJobStatus.NeedsAttention, updatedJob!.Status);
+            var updatedJob = Assert.IsType<MoveJob>(
+                await queue.GetJobAsync(legacyJob.Id));
+            Assert.Equal(MoveJobStatus.NeedsAttention, updatedJob.Status);
             Assert.Contains("durable move execution state", updatedJob.Error, StringComparison.OrdinalIgnoreCase);
             Assert.Null(updatedJob.ActiveDeduplicationKey);
             Assert.Null(updatedJob.LeaseOwner);
@@ -678,15 +679,15 @@ namespace Listenarr.Tests.Features.Infrastructure.Library.Moving
             var processor = _provider.GetRequiredService<IMoveJobProcessor>();
             await processor.ProcessJobAsync(job, CancellationToken.None);
 
-            var updatedJob = await queue.GetJobAsync(job.Id);
-            Assert.NotNull(updatedJob);
-            Assert.Equal(MoveJobStatus.NeedsAttention, updatedJob!.Status);
+            var updatedJob = Assert.IsType<MoveJob>(
+                await queue.GetJobAsync(job.Id));
+            Assert.Equal(MoveJobStatus.NeedsAttention, updatedJob.Status);
 
             using var verificationScope = _provider.CreateScope();
             var verificationRepository = verificationScope.ServiceProvider.GetRequiredService<IAudiobookRepository>();
-            var updatedAudiobook = await verificationRepository.GetByIdAsync(audiobook.Id);
-            Assert.NotNull(updatedAudiobook);
-            Assert.Equal(src, updatedAudiobook!.BasePath);
+            var updatedAudiobook = Assert.IsType<Audiobook>(
+                await verificationRepository.GetByIdAsync(audiobook.Id));
+            Assert.Equal(src, updatedAudiobook.BasePath);
             Assert.True(File.Exists(Path.Join(dst, "book.m4b")));
             Assert.Equal("do not delete", await File.ReadAllTextAsync(Path.Join(src, "new-content.txt")));
             Assert.Single(Directory.EnumerateFiles(dst, ".listenarr-move-*.pending"));
@@ -712,9 +713,9 @@ namespace Listenarr.Tests.Features.Infrastructure.Library.Moving
             var processor = _provider.GetRequiredService<IMoveJobProcessor>();
             await processor.ProcessJobAsync(job, CancellationToken.None);
 
-            var completedJob = await queue.GetJobAsync(job.Id);
-            Assert.NotNull(completedJob);
-            Assert.Equal(MoveJobStatus.NeedsAttention, completedJob!.Status);
+            var completedJob = Assert.IsType<MoveJob>(
+                await queue.GetJobAsync(job.Id));
+            Assert.Equal(MoveJobStatus.NeedsAttention, completedJob.Status);
             Assert.True(Directory.Exists(src));
             Assert.True(File.Exists(Path.Join(dst, "book.m4b")));
         }
@@ -734,9 +735,9 @@ namespace Listenarr.Tests.Features.Infrastructure.Library.Moving
             var processor = _provider.GetRequiredService<IMoveJobProcessor>();
             await processor.ProcessJobAsync(job, CancellationToken.None);
 
-            var updatedJob = await queue.GetJobAsync(job.Id);
-            Assert.NotNull(updatedJob);
-            Assert.Equal(MoveJobStatus.NeedsAttention, updatedJob!.Status);
+            var updatedJob = Assert.IsType<MoveJob>(
+                await queue.GetJobAsync(job.Id));
+            Assert.Equal(MoveJobStatus.NeedsAttention, updatedJob.Status);
         }
 
         [Fact]
@@ -759,13 +760,15 @@ namespace Listenarr.Tests.Features.Infrastructure.Library.Moving
             var processor = _provider.GetRequiredService<IMoveJobProcessor>();
             await processor.ProcessJobAsync(job, CancellationToken.None);
 
-            var updatedJob = await queue.GetJobAsync(job.Id);
-            Assert.NotNull(updatedJob);
-            Assert.Equal(MoveJobStatus.Superseded, updatedJob!.Status);
+            var updatedJob = Assert.IsType<MoveJob>(
+                await queue.GetJobAsync(job.Id));
+            Assert.Equal(MoveJobStatus.Superseded, updatedJob.Status);
             Assert.True(File.Exists(Path.Join(queuedSource, "queued.m4b")));
             Assert.True(File.Exists(Path.Join(newerSource, "current.m4b")));
             Assert.False(Directory.Exists(target));
-            Assert.Equal(newerSource, (await _audiobookRepository.GetByIdAsync(audiobook.Id))!.BasePath);
+            var persistedAudiobook = Assert.IsType<Audiobook>(
+                await _audiobookRepository.GetByIdAsync(audiobook.Id));
+            Assert.Equal(newerSource, persistedAudiobook.BasePath);
             var history = await _historyRepository.GetByAudiobookIdAsync(audiobook.Id);
             Assert.DoesNotContain(history, entry => entry.EventType == "Moved");
         }
@@ -788,12 +791,14 @@ namespace Listenarr.Tests.Features.Infrastructure.Library.Moving
             var processor = _provider.GetRequiredService<IMoveJobProcessor>();
             await processor.ProcessJobAsync(job, CancellationToken.None);
 
-            var updatedJob = await queue.GetJobAsync(job.Id);
-            Assert.NotNull(updatedJob);
-            Assert.Equal(MoveJobStatus.Superseded, updatedJob!.Status);
+            var updatedJob = Assert.IsType<MoveJob>(
+                await queue.GetJobAsync(job.Id));
+            Assert.Equal(MoveJobStatus.Superseded, updatedJob.Status);
             Assert.True(File.Exists(Path.Join(queuedSource, "queued.m4b")));
             Assert.False(File.Exists(Path.Join(target, "queued.m4b")));
-            Assert.Equal(target, (await _audiobookRepository.GetByIdAsync(audiobook.Id))!.BasePath);
+            var persistedAudiobook = Assert.IsType<Audiobook>(
+                await _audiobookRepository.GetByIdAsync(audiobook.Id));
+            Assert.Equal(target, persistedAudiobook.BasePath);
             var history = await _historyRepository.GetByAudiobookIdAsync(audiobook.Id);
             Assert.DoesNotContain(history, entry => entry.EventType == "Moved");
         }
@@ -816,9 +821,9 @@ namespace Listenarr.Tests.Features.Infrastructure.Library.Moving
             var processor = _provider.GetRequiredService<IMoveJobProcessor>();
             await processor.ProcessJobAsync(job, CancellationToken.None);
 
-            var updatedJob = await queue.GetJobAsync(job.Id);
-            Assert.NotNull(updatedJob);
-            Assert.Equal(MoveJobStatus.NeedsAttention, updatedJob!.Status);
+            var updatedJob = Assert.IsType<MoveJob>(
+                await queue.GetJobAsync(job.Id));
+            Assert.Equal(MoveJobStatus.NeedsAttention, updatedJob.Status);
             Assert.Contains("malformed", updatedJob.Error, StringComparison.OrdinalIgnoreCase);
             Assert.True(File.Exists(Path.Join(queuedSource, "book.m4b")));
             Assert.False(Directory.Exists(target));
@@ -841,15 +846,17 @@ namespace Listenarr.Tests.Features.Infrastructure.Library.Moving
             var processor = _provider.GetRequiredService<IMoveJobProcessor>();
             await processor.ProcessJobAsync(job, CancellationToken.None);
 
-            var updatedJob = await queue.GetJobAsync(job.Id);
-            Assert.NotNull(updatedJob);
-            Assert.Equal(MoveJobStatus.Superseded, updatedJob!.Status);
+            var updatedJob = Assert.IsType<MoveJob>(
+                await queue.GetJobAsync(job.Id));
+            Assert.Equal(MoveJobStatus.Superseded, updatedJob.Status);
             Assert.Contains("source path changed", updatedJob.Error, StringComparison.OrdinalIgnoreCase);
             Assert.True(File.Exists(Path.Join(currentBasePath, "current.m4b")));
             Assert.False(Directory.Exists(target));
             using var verificationScope = _provider.CreateScope();
             var repository = verificationScope.ServiceProvider.GetRequiredService<IAudiobookRepository>();
-            Assert.Equal(currentBasePath, (await repository.GetByIdAsync(audiobook.Id))!.BasePath);
+            var persistedAudiobook = Assert.IsType<Audiobook>(
+                await repository.GetByIdAsync(audiobook.Id));
+            Assert.Equal(currentBasePath, persistedAudiobook.BasePath);
         }
 
         [Fact]
@@ -952,9 +959,9 @@ namespace Listenarr.Tests.Features.Infrastructure.Library.Moving
             var processor = _provider.GetRequiredService<IMoveJobProcessor>();
             await processor.ProcessJobAsync(job, CancellationToken.None);
 
-            var updatedJob = await queue.GetJobAsync(job.Id);
-            Assert.NotNull(updatedJob);
-            Assert.Equal(MoveJobStatus.NeedsAttention, updatedJob!.Status);
+            var updatedJob = Assert.IsType<MoveJob>(
+                await queue.GetJobAsync(job.Id));
+            Assert.Equal(MoveJobStatus.NeedsAttention, updatedJob.Status);
             Assert.Contains("persisted", updatedJob.Error, StringComparison.OrdinalIgnoreCase);
             Assert.True(File.Exists(Path.Join(source, "book.m4b")));
             Assert.False(Directory.Exists(target));
@@ -976,7 +983,7 @@ namespace Listenarr.Tests.Features.Infrastructure.Library.Moving
                 target,
                 source);
             var jobId = job.Id;
-            job!.SourcePath = null;
+            job.SourcePath = null;
             job.SourcePathSyntax = null;
             job.SourceCaseSensitivity = null;
             job.SourceCaseSensitivityMode = null;
@@ -985,9 +992,9 @@ namespace Listenarr.Tests.Features.Infrastructure.Library.Moving
             var processor = _provider.GetRequiredService<IMoveJobProcessor>();
             await processor.ProcessJobAsync(job, CancellationToken.None);
 
-            var updatedJob = await queue.GetJobAsync(jobId);
-            Assert.NotNull(updatedJob);
-            Assert.Equal(MoveJobStatus.NeedsAttention, updatedJob!.Status);
+            var updatedJob = Assert.IsType<MoveJob>(
+                await queue.GetJobAsync(jobId));
+            Assert.Equal(MoveJobStatus.NeedsAttention, updatedJob.Status);
             Assert.Contains("persisted source path", updatedJob.Error, StringComparison.OrdinalIgnoreCase);
             Assert.True(File.Exists(Path.Join(source, "book.m4b")));
             Assert.False(Directory.Exists(target));
@@ -1080,10 +1087,10 @@ namespace Listenarr.Tests.Features.Infrastructure.Library.Moving
 
         private static async Task PrepareJobForProcessingAsync(IMoveQueueService queue, MoveJob job)
         {
-            var leaseGeneration = await queue.TryClaimJobAsync(job.Id, LeaseOwner);
-            Assert.NotNull(leaseGeneration);
+            var leaseGeneration = Assert.IsType<int>(
+                await queue.TryClaimJobAsync(job.Id, LeaseOwner));
             job.LeaseOwner = LeaseOwner;
-            job.LeaseGeneration = leaseGeneration.Value;
+            job.LeaseGeneration = leaseGeneration;
         }
 
         private async Task RecordOwnedDirectoryHierarchyAsync(
@@ -1165,10 +1172,10 @@ namespace Listenarr.Tests.Features.Infrastructure.Library.Moving
                     requestedPath,
                     targetIdentity,
                     deleteEmptySource));
-            var job = await queue.GetJobAsync(jobId);
-            Assert.NotNull(job);
-            await PrepareJobForProcessingAsync(queue, job!);
-            return (queue, job!);
+            var job = Assert.IsType<MoveJob>(
+                await queue.GetJobAsync(jobId));
+            await PrepareJobForProcessingAsync(queue, job);
+            return (queue, job);
         }
 
         private async Task EnsureTrackedManifestRowsAsync(
@@ -1210,8 +1217,7 @@ namespace Listenarr.Tests.Features.Infrastructure.Library.Moving
                 tracked.ApplyPathIdentity(fullPath, identity);
                 var claim = await _audiobookFileRepository.ClaimAsync(tracked);
                 Assert.Equal(AudiobookFileClaimOutcome.Created, claim.Outcome);
-                Assert.NotNull(claim.File);
-                existing.Add(claim.File!);
+                existing.Add(Assert.IsType<AudiobookFile>(claim.File));
             }
         }
 
