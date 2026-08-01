@@ -41,6 +41,8 @@ namespace Listenarr.Tests.Features.Infrastructure.Persistence
     [Trait("Category", "Infrastructure")]
     public class SqliteMigrationSchemaTests : BaseTests
     {
+        private const string CanaryMigrationFrontierId =
+            "20260621002226_AddApplicationSettingsConcurrency";
         private const string PhysicalIdentityMigrationId =
             "20260730033245_AddPhysicalFileIdentityAndMoveCleanupProtection";
         private const string PhysicalIdentityMigrationPredecessorId =
@@ -57,6 +59,7 @@ namespace Listenarr.Tests.Features.Infrastructure.Persistence
             "20260708224705_AddMoveJobLeaseGeneration",
             "20260708224900_AddRootFolderRelocationSkippedItems",
             "20260708225028_MakeRootFolderRelocationRootNullable",
+            "20260708225100_DropRootFolderRelocationRootForeignKey",
             "20260708225144_SetRootFolderRelocationRootDeleteBehavior",
             "20260710172532_AddMoveJobSourceCleanupBoundary",
             "20260713181804_HardenMoveExecutionAndScanHandoffs",
@@ -136,8 +139,8 @@ namespace Listenarr.Tests.Features.Infrastructure.Persistence
         }
 
         [Fact]
-        [Trait("Scenario", "OwnershipRecoveryMigrationOperationsAreTransactional")]
-        public async Task OwnershipRecoveryAndLaterMigrations_HaveNoNonTransactionalOperationWarnings()
+        [Trait("Scenario", "PullRequestMigrationsHaveNoNonTransactionalOperationWarnings")]
+        public async Task PullRequestMigrations_AfterCanaryFrontier_HaveNoNonTransactionalOperationWarnings()
         {
             await using var connection = new SqliteConnection("DataSource=:memory:");
             await connection.OpenAsync();
@@ -149,7 +152,7 @@ namespace Listenarr.Tests.Features.Infrastructure.Persistence
             await using (var baseline = new ListenArrDbContext(baselineOptions))
             {
                 await baseline.GetService<IMigrator>().MigrateAsync(
-                    "20260726042801_AddDirectoryObjectIdentityAuthorization");
+                    CanaryMigrationFrontierId);
             }
 
             var guardedOptions = new DbContextOptionsBuilder<ListenArrDbContext>()
@@ -919,6 +922,163 @@ namespace Listenarr.Tests.Features.Infrastructure.Persistence
             Assert.Equal(FileSystemCaseSensitivity.Unknown, root.ResolvedCaseSensitivity);
             Assert.Equal(MoveFailureKind.None, moveJob.FailureKind);
             Assert.Equal(MoveJobPhase.None, moveJob.Phase);
+        }
+
+        [Fact]
+        [Trait("Scenario", "RootRelocationForeignKeySplitRestart")]
+        public async Task RootRelocationForeignKeySplit_RestartPreservesRowsAndFinalSetNullContract()
+        {
+            var databasePath = Path.Join(
+                FileService.GetTempPath(),
+                $"relocation-fk-split-{Guid.NewGuid():N}.db");
+            var options = new DbContextOptionsBuilder<ListenArrDbContext>()
+                .UseSqlite(
+                    $"Data Source={databasePath}",
+                    sqlite => sqlite.MigrationsAssembly(
+                        typeof(ListenArrDbContext).Assembly.GetName().Name))
+                .Options;
+            var relocationId = Guid.NewGuid();
+            var moveJobId = Guid.NewGuid();
+            var skippedItemId = Guid.NewGuid();
+
+            try
+            {
+                await using (var beforeRestart = new ListenArrDbContext(options))
+                {
+                    var migrator = beforeRestart.GetService<IMigrator>();
+                    await migrator.MigrateAsync(
+                        "20260708225028_MakeRootFolderRelocationRootNullable");
+                    await beforeRestart.Database.ExecuteSqlInterpolatedAsync(
+                        $"""
+                        INSERT INTO "RootFolders" ("Id", "Name", "Path", "IsDefault", "CreatedAt")
+                        VALUES ({101}, {"Library"}, {"/library"}, {true}, {DateTime.UtcNow});
+                        """);
+                    await beforeRestart.Database.ExecuteSqlInterpolatedAsync(
+                        $"""
+                        INSERT INTO "RootFolderRelocations" (
+                            "Id", "RootFolderId", "SourcePath", "TargetPath", "Mode", "Status",
+                            "DesiredName", "DesiredIsDefault", "CreatedAt", "CompletedJobs",
+                            "DeleteEmptySource", "SourceCaseSensitivityMode",
+                            "TargetCaseSensitivityMode", "TotalJobs")
+                        VALUES (
+                            {relocationId}, {101}, {"/library"}, {"/library-new"},
+                            {nameof(RootFolderRelocationMode.Relocate)},
+                            {nameof(RootFolderRelocationStatus.Running)},
+                            {"Library"}, {true}, {DateTime.UtcNow}, {0}, {false},
+                            {nameof(FileSystemCaseSensitivityMode.Auto)},
+                            {nameof(FileSystemCaseSensitivityMode.Auto)}, {1});
+                        """);
+                    await beforeRestart.Database.ExecuteSqlInterpolatedAsync(
+                        $"""
+                        INSERT INTO "MoveJobs" (
+                            "Id", "AudiobookId", "EnqueuedAt", "Status", "AttemptCount",
+                            "DeleteEmptySource", "FailureKind", "IdentityKeyVersion", "Phase",
+                            "RelocationId")
+                        VALUES (
+                            {moveJobId}, {501}, {DateTime.UtcNow},
+                            {nameof(MoveJobStatus.Queued)}, {0}, {false},
+                            {nameof(MoveFailureKind.None)}, {0}, {nameof(MoveJobPhase.None)},
+                            {relocationId});
+                        """);
+                    await beforeRestart.Database.ExecuteSqlInterpolatedAsync(
+                        $"""
+                        INSERT INTO "RootFolderRelocationSkippedItems" (
+                            "Id", "RelocationId", "AudiobookId", "Reason", "CreatedAt")
+                        VALUES (
+                            {skippedItemId}, {relocationId}, {502}, {"Skipped for test"},
+                            {DateTimeOffset.UtcNow});
+                        """);
+
+                    await migrator.MigrateAsync(
+                        "20260708225100_DropRootFolderRelocationRootForeignKey");
+                    await beforeRestart.Database.OpenConnectionAsync();
+                    var beforeRestartConnection =
+                        (SqliteConnection)beforeRestart.Database.GetDbConnection();
+
+                    Assert.Equal(
+                        0L,
+                        (long)(await ExecuteScalarAsync(
+                            beforeRestartConnection,
+                            """
+                            SELECT COUNT(*)
+                            FROM pragma_foreign_key_list('RootFolderRelocations')
+                            WHERE "table" = 'RootFolders'
+                              AND "from" = 'RootFolderId';
+                            """))!);
+                    Assert.Equal(
+                        1L,
+                        (long)(await ExecuteScalarAsync(
+                            beforeRestartConnection,
+                            "SELECT COUNT(*) FROM \"RootFolderRelocations\";"))!);
+                }
+
+                await using var afterRestart = new ListenArrDbContext(options);
+                var resumedMigrator = afterRestart.GetService<IMigrator>();
+                await resumedMigrator.MigrateAsync(
+                    "20260708225144_SetRootFolderRelocationRootDeleteBehavior");
+                await afterRestart.Database.OpenConnectionAsync();
+                var afterRestartConnection =
+                    (SqliteConnection)afterRestart.Database.GetDbConnection();
+
+                Assert.Equal(
+                    "SET NULL",
+                    (await ExecuteScalarAsync(
+                        afterRestartConnection,
+                        """
+                        SELECT "on_delete"
+                        FROM pragma_foreign_key_list('RootFolderRelocations')
+                        WHERE "table" = 'RootFolders'
+                          AND "from" = 'RootFolderId';
+                        """))?.ToString());
+                Assert.Equal(
+                    relocationId,
+                    Guid.Parse((await ExecuteScalarAsync(
+                        afterRestartConnection,
+                        "SELECT \"Id\" FROM \"RootFolderRelocations\" LIMIT 1;"))!.ToString()!));
+                Assert.Equal(
+                    moveJobId,
+                    Guid.Parse((await ExecuteScalarAsync(
+                        afterRestartConnection,
+                        "SELECT \"Id\" FROM \"MoveJobs\" WHERE \"RelocationId\" IS NOT NULL LIMIT 1;"))!.ToString()!));
+                Assert.Equal(
+                    skippedItemId,
+                    Guid.Parse((await ExecuteScalarAsync(
+                        afterRestartConnection,
+                        "SELECT \"Id\" FROM \"RootFolderRelocationSkippedItems\" LIMIT 1;"))!.ToString()!));
+
+                await afterRestart.Database.ExecuteSqlRawAsync(
+                    "DELETE FROM \"RootFolders\" WHERE \"Id\" = 101;");
+                Assert.Equal(
+                    DBNull.Value,
+                    await ExecuteScalarAsync(
+                        afterRestartConnection,
+                        "SELECT \"RootFolderId\" FROM \"RootFolderRelocations\" LIMIT 1;"));
+                Assert.Equal(
+                    1L,
+                    (long)(await ExecuteScalarAsync(
+                        afterRestartConnection,
+                        "SELECT COUNT(*) FROM \"MoveJobs\" WHERE \"Id\" IS NOT NULL;"))!);
+                Assert.Equal(
+                    1L,
+                    (long)(await ExecuteScalarAsync(
+                        afterRestartConnection,
+                        "SELECT COUNT(*) FROM \"RootFolderRelocationSkippedItems\";"))!);
+                Assert.Equal(
+                    0L,
+                    (long)(await ExecuteScalarAsync(
+                        afterRestartConnection,
+                        "SELECT COUNT(*) FROM pragma_foreign_key_check;"))!);
+                Assert.Equal(
+                    "ok",
+                    (await ExecuteScalarAsync(
+                        afterRestartConnection,
+                        "PRAGMA integrity_check;"))?.ToString());
+            }
+            finally
+            {
+                SqliteConnection.ClearAllPools();
+                File.Delete(databasePath);
+            }
         }
 
         [Fact]

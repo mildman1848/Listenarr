@@ -1,6 +1,8 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging.Abstractions;
 
+using Listenarr.Infrastructure.Library.Files;
+
 using Listenarr.Tests.Common;
 
 namespace Listenarr.Tests.Features.Infrastructure.Persistence;
@@ -51,6 +53,56 @@ public sealed class AudiobookFileIdentityReconcilerTests : BaseTests
         Assert.All(firstState.Where(file => file.AudiobookId is 1 or 2), file => Assert.Equal(PathIdentityState.Conflict, file.State));
         Assert.Equal(PathIdentityState.Valid, Assert.Single(firstState, file => file.AudiobookId == 3).State);
         Assert.Equal(PathIdentityState.Unavailable, Assert.Single(firstState, file => file.AudiobookId == 4).State);
+    }
+
+    [Fact]
+    public async Task ReconcileAsync_ForeignHostPaths_AreUnavailableWithoutPerFileWarning()
+    {
+        var foreignBasePath = OperatingSystem.IsWindows()
+            ? "/server/mnt/drive/Audiobooks/Author/Book"
+            : "C:\\Audiobooks\\Author\\Book";
+        var foreignFilePath = OperatingSystem.IsWindows()
+            ? "Disc 1/Book.m4b"
+            : "Disc 1\\Book.m4b";
+        var options = new DbContextOptionsBuilder<ListenArrDbContext>()
+            .UseInMemoryDatabase(Guid.NewGuid().ToString())
+            .Options;
+        await using (var setup = new ListenArrDbContext(options))
+        {
+            setup.Audiobooks.Add(BuildAudiobook(10, foreignBasePath, foreignFilePath));
+            await setup.SaveChangesAsync();
+        }
+
+        var roots = new Mock<IRootFolderRepository>(MockBehavior.Strict);
+        roots.Setup(repository => repository.GetAllAsync()).ReturnsAsync([]);
+        var semantics = new Mock<IFileSystemSemanticsResolver>(MockBehavior.Strict);
+        semantics.Setup(resolver => resolver.ResolveAsync(
+                It.IsAny<string>(),
+                It.IsAny<FileSystemCaseSensitivityMode>(),
+                It.IsAny<CancellationToken>()))
+            .Throws(new ArgumentException("Filesystem semantics require an absolute path."));
+        var identityResolver = new AudiobookFilePathIdentityResolver(
+            roots.Object,
+            semantics.Object);
+        var logger = new Mock<ILogger<AudiobookFileIdentityReconciler>>();
+        var reconciler = new AudiobookFileIdentityReconciler(
+            new TestDbContextFactory(options),
+            identityResolver,
+            logger.Object);
+
+        var result = await reconciler.ReconcileAsync();
+        var state = Assert.Single(await ReadStateAsync(options));
+
+        Assert.Equal(new AudiobookFileIdentityReconciliationResult(1, 0, 0, 1), result);
+        Assert.Equal(PathIdentityState.Unavailable, state.State);
+        Assert.Null(state.OwnershipKey);
+        Assert.NotNull(state.LookupKey);
+        Assert.Contains("cannot be validated", state.Reason, StringComparison.OrdinalIgnoreCase);
+        semantics.VerifyNoOtherCalls();
+        Assert.DoesNotContain(
+            logger.Invocations,
+            invocation => invocation.Arguments.Count > 0
+                && invocation.Arguments[0] is LogLevel.Warning);
     }
 
     private static Audiobook BuildAudiobook(int id, string basePath, string filePath) =>

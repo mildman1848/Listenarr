@@ -20,6 +20,19 @@ public sealed class AudiobookFilePathIdentityResolver(
 
         var absolutePath = ResolveAbsolutePath(audiobook, path, out var syntax);
         var canonicalPath = FileSystemPathIdentity.Canonicalize(absolutePath, syntax);
+        var hostSyntax = OperatingSystem.IsWindows()
+            ? FileSystemPathSyntax.Windows
+            : FileSystemPathSyntax.Unix;
+        if (syntax != hostSyntax)
+        {
+            return AudiobookFilePathIdentity.CreateUnavailable(
+                canonicalPath,
+                syntax,
+                FileSystemCaseSensitivityMode.Auto,
+                canonicalPath,
+                $"The persisted path uses {syntax} filesystem syntax, which cannot be validated on the current {hostSyntax} host.");
+        }
+
         var rootMatch = await FindAuthoritativeRootAsync(
             canonicalPath,
             syntax,

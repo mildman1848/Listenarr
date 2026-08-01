@@ -8,7 +8,7 @@ namespace Listenarr.Tests.Features.Infrastructure.Library.Files;
 [Trait("Category", "Infrastructure")]
 public sealed class AudiobookFilePathIdentityResolverTests : BaseTests
 {
-    [Fact]
+    [WindowsFact]
     public async Task ResolveAsync_WindowsInsensitiveVariants_CreateSameOwnershipIdentity()
     {
         var resolver = BuildResolver(new RootFolder { Path = "C:\\Library", CaseSensitivityMode = FileSystemCaseSensitivityMode.Insensitive, ResolvedCaseSensitivity = FileSystemCaseSensitivity.Insensitive, PathIdentityState = PathIdentityState.Valid });
@@ -23,7 +23,7 @@ public sealed class AudiobookFilePathIdentityResolverTests : BaseTests
         Assert.Equal("C:\\Library", first.BoundaryPath);
     }
 
-    [Fact]
+    [LinuxFact]
     public async Task ResolveAsync_UnixSensitiveCaseVariants_CreateDifferentOwnershipIdentities()
     {
         var resolver = BuildResolver(new RootFolder { Path = "/library", CaseSensitivityMode = FileSystemCaseSensitivityMode.Sensitive, ResolvedCaseSensitivity = FileSystemCaseSensitivity.Sensitive, PathIdentityState = PathIdentityState.Valid });
@@ -34,7 +34,7 @@ public sealed class AudiobookFilePathIdentityResolverTests : BaseTests
         Assert.Equal(upper.LookupKey, lower.LookupKey);
     }
 
-    [Fact]
+    [LinuxFact]
     public async Task ResolveAsync_UnixConfiguredInsensitiveCaseVariants_CreateSameOwnershipIdentity()
     {
         var resolver = BuildResolver(new RootFolder { Path = "/library", CaseSensitivityMode = FileSystemCaseSensitivityMode.Insensitive, ResolvedCaseSensitivity = FileSystemCaseSensitivity.Insensitive, PathIdentityState = PathIdentityState.Valid });
@@ -44,7 +44,7 @@ public sealed class AudiobookFilePathIdentityResolverTests : BaseTests
         Assert.Equal(upper.OwnershipKey, lower.OwnershipKey);
     }
 
-    [Fact]
+    [WindowsFact]
     public async Task ResolveAsync_UncVariants_CreateSameOwnershipIdentity()
     {
         var resolver = BuildResolver(new RootFolder { Path = "\\\\server\\share", CaseSensitivityMode = FileSystemCaseSensitivityMode.Insensitive, ResolvedCaseSensitivity = FileSystemCaseSensitivity.Insensitive, PathIdentityState = PathIdentityState.Valid });
@@ -87,6 +87,60 @@ public sealed class AudiobookFilePathIdentityResolverTests : BaseTests
     }
 
     [Fact]
+    public async Task ResolveAsync_ForeignAbsolutePath_ReturnsUnavailableWithoutNativeProbe()
+    {
+        var foreign = GetForeignPathFixture();
+        var roots = new Mock<IRootFolderRepository>(MockBehavior.Strict);
+        roots.Setup(repository => repository.GetAllAsync()).ReturnsAsync([]);
+        var semantics = new Mock<IFileSystemSemanticsResolver>(MockBehavior.Strict);
+        var resolver = new AudiobookFilePathIdentityResolver(roots.Object, semantics.Object);
+
+        var identity = await resolver.ResolveAsync(
+            new Audiobook { BasePath = foreign.BasePath },
+            foreign.AbsoluteFilePath);
+
+        Assert.Equal(PathIdentityState.Unavailable, identity.State);
+        Assert.Equal(foreign.Syntax, identity.Syntax);
+        Assert.Equal(
+            FileSystemPathIdentity.Canonicalize(foreign.AbsoluteFilePath, foreign.Syntax),
+            identity.CanonicalPath);
+        Assert.Equal(FileSystemCaseSensitivity.Unknown, identity.CaseSensitivity);
+        Assert.Null(identity.OwnershipKey);
+        Assert.NotNull(identity.LookupKey);
+        Assert.Contains("cannot be validated", identity.Reason, StringComparison.OrdinalIgnoreCase);
+        semantics.VerifyNoOtherCalls();
+    }
+
+    [Fact]
+    public async Task ResolveAsync_ForeignRelativePath_DoesNotTrustPersistedRootAuthority()
+    {
+        var foreign = GetForeignPathFixture();
+        var root = new RootFolder
+        {
+            Path = foreign.RootPath,
+            CaseSensitivityMode = FileSystemCaseSensitivityMode.Insensitive,
+            ResolvedCaseSensitivity = FileSystemCaseSensitivity.Insensitive,
+            PathIdentityState = PathIdentityState.Valid
+        };
+        var roots = new Mock<IRootFolderRepository>(MockBehavior.Strict);
+        roots.Setup(repository => repository.GetAllAsync()).ReturnsAsync([root]);
+        var semantics = new Mock<IFileSystemSemanticsResolver>(MockBehavior.Strict);
+        var resolver = new AudiobookFilePathIdentityResolver(roots.Object, semantics.Object);
+
+        var identity = await resolver.ResolveAsync(
+            new Audiobook { BasePath = foreign.BasePath },
+            foreign.RelativeFilePath);
+
+        Assert.Equal(PathIdentityState.Unavailable, identity.State);
+        Assert.Equal(foreign.Syntax, identity.Syntax);
+        Assert.Null(identity.OwnershipKey);
+        Assert.NotNull(identity.LookupKey);
+        Assert.Contains("cannot be validated", identity.Reason, StringComparison.OrdinalIgnoreCase);
+        roots.Verify(repository => repository.GetAllAsync(), Times.Never);
+        semantics.VerifyNoOtherCalls();
+    }
+
+    [LinuxFact]
     public async Task ResolveAsync_SameRelativePathUnderDifferentBases_IsDistinct()
     {
         var resolver = BuildResolver(new RootFolder { Path = "/library", CaseSensitivityMode = FileSystemCaseSensitivityMode.Sensitive, ResolvedCaseSensitivity = FileSystemCaseSensitivity.Sensitive, PathIdentityState = PathIdentityState.Valid });
@@ -97,7 +151,7 @@ public sealed class AudiobookFilePathIdentityResolverTests : BaseTests
         Assert.Equal("/library/second/book.m4b", second.CanonicalPath);
     }
 
-    [Fact]
+    [LinuxFact]
     public async Task ResolveAsync_MultipleFiles_LoadsRootFoldersOncePerResolverScope()
     {
         var root = new RootFolder
@@ -120,7 +174,7 @@ public sealed class AudiobookFilePathIdentityResolverTests : BaseTests
         roots.Verify(repository => repository.GetAllAsync(), Times.Once);
     }
 
-    [Fact]
+    [LinuxFact]
     public async Task ResolveAsync_UnavailableFilesystemSemantics_ReturnsUnavailableIdentity()
     {
         var roots = new Mock<IRootFolderRepository>(MockBehavior.Strict);
@@ -134,6 +188,28 @@ public sealed class AudiobookFilePathIdentityResolverTests : BaseTests
         Assert.Null(identity.OwnershipKey);
         Assert.NotNull(identity.LookupKey);
     }
+
+    private static ForeignPathFixture GetForeignPathFixture() =>
+        OperatingSystem.IsWindows()
+            ? new ForeignPathFixture(
+                FileSystemPathSyntax.Unix,
+                "/server/mnt/drive/Audiobooks",
+                "/server/mnt/drive/Audiobooks/Author/Book",
+                "Disc 1/Book.m4b",
+                "/server/mnt/drive/Audiobooks/Author/Book/Disc 1/Book.m4b")
+            : new ForeignPathFixture(
+                FileSystemPathSyntax.Windows,
+                "C:\\Audiobooks",
+                "C:\\Audiobooks\\Author\\Book",
+                "Disc 1\\Book.m4b",
+                "C:\\Audiobooks\\Author\\Book\\Disc 1\\Book.m4b");
+
+    private sealed record ForeignPathFixture(
+        FileSystemPathSyntax Syntax,
+        string RootPath,
+        string BasePath,
+        string RelativeFilePath,
+        string AbsoluteFilePath);
 
     private static AudiobookFilePathIdentityResolver BuildResolver(RootFolder root)
     {

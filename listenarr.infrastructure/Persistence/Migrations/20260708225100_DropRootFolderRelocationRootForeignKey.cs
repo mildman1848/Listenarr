@@ -5,10 +5,18 @@ using Microsoft.EntityFrameworkCore.Migrations;
 namespace Listenarr.Infrastructure.Persistence.Migrations
 {
     /// <inheritdoc />
-    public partial class SetRootFolderRelocationRootDeleteBehavior : Migration
+    public partial class DropRootFolderRelocationRootForeignKey : Migration
     {
         /// <inheritdoc />
         protected override void Up(MigrationBuilder migrationBuilder)
+        {
+            migrationBuilder.DropForeignKey(
+                name: "FK_RootFolderRelocations_RootFolders_RootFolderId",
+                table: "RootFolderRelocations");
+        }
+
+        /// <inheritdoc />
+        protected override void Down(MigrationBuilder migrationBuilder)
         {
             migrationBuilder.AddForeignKey(
                 name: "FK_RootFolderRelocations_RootFolders_RootFolderId",
@@ -16,15 +24,7 @@ namespace Listenarr.Infrastructure.Persistence.Migrations
                 column: "RootFolderId",
                 principalTable: "RootFolders",
                 principalColumn: "Id",
-                onDelete: ReferentialAction.SetNull);
-        }
-
-        /// <inheritdoc />
-        protected override void Down(MigrationBuilder migrationBuilder)
-        {
-            migrationBuilder.DropForeignKey(
-                name: "FK_RootFolderRelocations_RootFolders_RootFolderId",
-                table: "RootFolderRelocations");
+                onDelete: ReferentialAction.Restrict);
         }
     }
 }
