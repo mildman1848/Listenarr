@@ -124,7 +124,9 @@ public sealed class TestEvidenceSourceAnalyzerTests : BaseTests
     [InlineData("DirectoryLinkTheoryAttribute")]
     [InlineData("FileLinkTheory")]
     [InlineData("FileLinkTheoryAttribute")]
-    public void Analyze_LinkCapabilityAttributeReturn_IsReported(string attributeName)
+    [InlineData("FutureCapabilityFact")]
+    [InlineData("FutureCapabilityTheoryAttribute")]
+    public void Analyze_CustomTestAttributeReturn_IsReported(string attributeName)
     {
         var source = $$"""
             public sealed class Example

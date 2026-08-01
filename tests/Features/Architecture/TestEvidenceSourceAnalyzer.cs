@@ -11,31 +11,6 @@ internal sealed record TestEvidenceViolation(
 
 internal static class TestEvidenceSourceAnalyzer
 {
-    private static readonly IReadOnlySet<string> TestAttributeNames =
-        new HashSet<string>(StringComparer.Ordinal)
-        {
-            "Fact",
-            "FactAttribute",
-            "Theory",
-            "TheoryAttribute",
-            "WindowsFact",
-            "WindowsFactAttribute",
-            "LinuxFact",
-            "LinuxFactAttribute",
-            "WindowsTheory",
-            "WindowsTheoryAttribute",
-            "LinuxTheory",
-            "LinuxTheoryAttribute",
-            "DirectoryLinkFact",
-            "DirectoryLinkFactAttribute",
-            "FileLinkFact",
-            "FileLinkFactAttribute",
-            "DirectoryLinkTheory",
-            "DirectoryLinkTheoryAttribute",
-            "FileLinkTheory",
-            "FileLinkTheoryAttribute"
-        };
-
     public static IReadOnlyList<TestEvidenceViolation> Analyze(string source)
     {
         ArgumentNullException.ThrowIfNull(source);
@@ -75,7 +50,13 @@ internal static class TestEvidenceSourceAnalyzer
         method.AttributeLists
             .SelectMany(list => list.Attributes)
             .Select(attribute => GetAttributeName(attribute.Name))
-            .Any(TestAttributeNames.Contains);
+            .Any(IsTestAttributeName);
+
+    private static bool IsTestAttributeName(string name) =>
+        name.EndsWith("Fact", StringComparison.Ordinal)
+        || name.EndsWith("FactAttribute", StringComparison.Ordinal)
+        || name.EndsWith("Theory", StringComparison.Ordinal)
+        || name.EndsWith("TheoryAttribute", StringComparison.Ordinal);
 
     private static string GetAttributeName(NameSyntax name) => name switch
     {
