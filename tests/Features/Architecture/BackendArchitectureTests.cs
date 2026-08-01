@@ -933,7 +933,7 @@ public sealed class BackendArchitectureTests : BaseTests
             "listenarr.infrastructure"
         };
         var rawPhaseToken = new Regex(
-            @"\b(?:var|CancellationToken)\s+(?:mutationToken|commitToken|completionToken)\s*=\s*CancellationToken\.None\b",
+            @"\b(?:mutationToken|commitToken|completionToken)\s*=\s*CancellationToken\.None\b",
             RegexOptions.CultureInvariant);
         var violations = roots
             .SelectMany(root => Directory.EnumerateFiles(
