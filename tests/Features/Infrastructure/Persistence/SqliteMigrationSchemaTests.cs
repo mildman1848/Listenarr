@@ -64,6 +64,7 @@ namespace Listenarr.Tests.Features.Infrastructure.Persistence
             "20260717143713_AddLibraryDirectoryOwnership",
             "20260720122500_EnforceSingleDefaultRootFolder",
             "20260726042801_AddDirectoryObjectIdentityAuthorization",
+            "20260726500000_AddLibraryDirectoryOwnershipRootForeignKey",
             "20260727000644_AddOwnershipRecoveryProtocols",
             PhysicalIdentityMigrationId
         };
@@ -132,6 +133,34 @@ namespace Listenarr.Tests.Features.Infrastructure.Persistence
                 "Model maps columns the migrated SQLite schema does not have — a migration is missing, "
                 + "not discovered (missing [Migration] attribute / Designer), or out of sync:\n"
                 + string.Join("\n", failures));
+        }
+
+        [Fact]
+        [Trait("Scenario", "OwnershipRecoveryMigrationOperationsAreTransactional")]
+        public async Task OwnershipRecoveryAndLaterMigrations_HaveNoNonTransactionalOperationWarnings()
+        {
+            await using var connection = new SqliteConnection("DataSource=:memory:");
+            await connection.OpenAsync();
+
+            var baselineOptions = new DbContextOptionsBuilder<ListenArrDbContext>()
+                .UseSqlite(connection, sqlite =>
+                    sqlite.MigrationsAssembly(typeof(ListenArrDbContext).Assembly.GetName().Name))
+                .Options;
+            await using (var baseline = new ListenArrDbContext(baselineOptions))
+            {
+                await baseline.GetService<IMigrator>().MigrateAsync(
+                    "20260726042801_AddDirectoryObjectIdentityAuthorization");
+            }
+
+            var guardedOptions = new DbContextOptionsBuilder<ListenArrDbContext>()
+                .UseSqlite(connection, sqlite =>
+                    sqlite.MigrationsAssembly(typeof(ListenArrDbContext).Assembly.GetName().Name))
+                .ConfigureWarnings(warnings => warnings.Throw(
+                    RelationalEventId.NonTransactionalMigrationOperationWarning))
+                .Options;
+            await using var guarded = new ListenArrDbContext(guardedOptions);
+
+            await guarded.Database.MigrateAsync();
         }
 
         [Fact]
@@ -463,8 +492,8 @@ namespace Listenarr.Tests.Features.Infrastructure.Persistence
         }
 
         [Fact]
-        [Trait("Scenario", "OwnershipRecoveryProtocolUpgrade")]
-        public async Task OwnershipRecoveryMigration_ClassifiesAndBackfillsBeforeRestrictiveForeignKey()
+        [Trait("Scenario", "OwnershipRootForeignKeyUpgrade")]
+        public async Task OwnershipRootForeignKeyMigration_AddsSetNullRelationship()
         {
             await using var connection = new SqliteConnection("DataSource=:memory:");
             await connection.OpenAsync();
@@ -482,103 +511,182 @@ namespace Listenarr.Tests.Features.Infrastructure.Persistence
                 INSERT INTO "RootFolders" ("Id", "Name", "Path", "IsDefault")
                 VALUES (1, 'Library', '/library', 0);
 
-                INSERT INTO "RootFolderRelocations" (
-                    "Id", "SourcePath", "TargetPath", "Mode", "Status",
-                    "DeleteEmptySource", "DesiredName", "DesiredIsDefault",
-                    "TargetCaseSensitivityMode", "TotalJobs", "CompletedJobs",
-                    "CreatedAt", "TargetDirectoryObjectIdentityVersion",
-                    "TargetDirectoryObjectIdentity",
-                    "TargetDirectoryObjectIdentityUnavailableReason")
-                VALUES
-                    ('00000000-0000-0000-0000-000000000001',
-                     '/a', '/b', 'Relocate', 'Completed', 1, 'A', 0,
-                     'Auto', 0, 0, '2026-07-27T00:00:00Z', NULL, NULL, NULL),
-                    ('00000000-0000-0000-0000-000000000002',
-                     '/c', '/d', 'Relocate', 'Pending', 1, 'B', 0,
-                     'Auto', 0, 0, '2026-07-27T00:00:00Z', 1, 'object-2', NULL),
-                    ('00000000-0000-0000-0000-000000000003',
-                     '/e', '/f', 'Relocate', 'Running', 1, 'C', 0,
-                     'Auto', 0, 0, '2026-07-27T00:00:00Z', NULL, NULL, NULL),
-                    ('00000000-0000-0000-0000-000000000004',
-                     '/g', '/h', 'Relocate', 'NeedsAttention', 1, 'D', 0,
-                     'Auto', 0, 0, '2026-07-27T00:00:00Z', 1, NULL, 'failed');
-
                 INSERT INTO "LibraryDirectoryOwnerships" (
                     "Id", "Path", "CanonicalPath", "PathSyntax",
                     "PathCaseSensitivity", "PathCaseSensitivityMode",
                     "PathIdentityBoundary", "PathIdentityLookupKey",
                     "PathOwnershipKey", "OwnershipToken", "State",
                     "CreationWorkflow", "CreatedAt", "UpdatedAt",
-                    "ManagedRootFolderId", "DirectoryObjectIdentityVersion",
-                    "DirectoryObjectIdentity")
-                VALUES
-                    (10, '/library/removed', '/library/removed', 'Unix',
-                     'Sensitive', 'Sensitive', '/library/removed', 'lookup-10',
-                     NULL, '10101010101010101010101010101010', 'Removed',
-                     'test', '2026-07-27T00:00:00Z',
-                     '2026-07-27T00:00:00Z', 1, 1, 'object-10'),
-                    (20, '/orphan/live', '/orphan/live', 'Unix',
-                     'Sensitive', 'Sensitive', '/orphan/live', 'lookup-20',
-                     'ownership-20', '20202020202020202020202020202020',
-                     'Owned', 'test', '2026-07-27T00:00:00Z',
-                     '2026-07-27T00:00:00Z', 999, 1, 'object-20');
+                    "ManagedRootFolderId")
+                VALUES (
+                    10, '/library/book', '/library/book', 'Unix',
+                    'Sensitive', 'Sensitive', '/library/book', 'lookup-10',
+                    'ownership-10', '10101010101010101010101010101010',
+                    'Owned', 'test', '2026-07-27T00:00:00Z',
+                    '2026-07-27T00:00:00Z', 1);
                 """);
 
             await migrator.MigrateAsync(
-                "20260727000644_AddOwnershipRecoveryProtocols");
+                "20260726500000_AddLibraryDirectoryOwnershipRootForeignKey");
 
-            async Task<string?> ScalarAsync(string sql)
+            await using (var foreignKeyCommand = connection.CreateCommand())
             {
-                await using var command = connection.CreateCommand();
-                command.CommandText = sql;
-                return (await command.ExecuteScalarAsync())?.ToString();
+                foreignKeyCommand.CommandText =
+                    """
+                    SELECT "on_delete"
+                    FROM pragma_foreign_key_list('LibraryDirectoryOwnerships')
+                    WHERE "table" = 'RootFolders'
+                      AND "from" = 'ManagedRootFolderId'
+                    """;
+                Assert.Equal(
+                    "SET NULL",
+                    (await foreignKeyCommand.ExecuteScalarAsync())?.ToString());
             }
 
+            await context.Database.ExecuteSqlRawAsync(
+                "DELETE FROM \"RootFolders\" WHERE \"Id\" = 1");
+            await using var ownershipCommand = connection.CreateCommand();
+            ownershipCommand.CommandText =
+                "SELECT \"ManagedRootFolderId\" FROM \"LibraryDirectoryOwnerships\" WHERE \"Id\" = 10";
+            Assert.Equal(DBNull.Value, await ownershipCommand.ExecuteScalarAsync());
+        }
+
+        [Fact]
+        [Trait("Scenario", "IntermediatePrDatabaseOrphanRepair")]
+        public async Task MigrationPreflight_RepairsOrphanOwnershipReferencesBeforeForeignKey()
+        {
+            await using var connection = new SqliteConnection("DataSource=:memory:");
+            await connection.OpenAsync();
+            var options = new DbContextOptionsBuilder<ListenArrDbContext>()
+                .UseSqlite(connection, sqlite =>
+                    sqlite.MigrationsAssembly(
+                        typeof(ListenArrDbContext).Assembly.GetName().Name))
+                .Options;
+            await using var context = new ListenArrDbContext(options);
+            await context.GetService<IMigrator>().MigrateAsync(
+                LibraryDirectoryOwnershipMigrationPreflight.PredecessorMigrationId);
+            await context.Database.ExecuteSqlRawAsync(
+                """
+                INSERT INTO "LibraryDirectoryOwnerships" (
+                    "Id", "Path", "CanonicalPath", "PathSyntax",
+                    "PathCaseSensitivity", "PathCaseSensitivityMode",
+                    "PathIdentityBoundary", "PathIdentityLookupKey",
+                    "PathOwnershipKey", "OwnershipToken", "State",
+                    "CreationWorkflow", "CreatedAt", "UpdatedAt",
+                    "ManagedRootFolderId")
+                VALUES
+                    (101, '/removed', '/removed', 'Unix', 'Sensitive',
+                     'Sensitive', '/removed', 'lookup-101', NULL,
+                     '10110110110110110110110110110110', 'Removed', 'test',
+                     '2026-08-01T00:00:00Z', '2026-08-01T00:00:00Z', 999),
+                    (202, '/owned', '/owned', 'Unix', 'Sensitive',
+                     'Sensitive', '/owned', 'lookup-202', 'ownership-202',
+                     '20220220220220220220220220220220', 'Owned', 'test',
+                     '2026-08-01T00:00:00Z', '2026-08-01T00:00:00Z', 999);
+                """);
+
             Assert.Equal(
-                "NotRequired,Authorized,LegacyUnenrolled,Unavailable",
-                await ScalarAsync(
+                2,
+                LibraryDirectoryOwnershipMigrationPreflight
+                    .RepairLegacyForeignKeyReferences(context));
+            Assert.Equal(
+                0,
+                LibraryDirectoryOwnershipMigrationPreflight
+                    .RepairLegacyForeignKeyReferences(context));
+
+            await using (var verifyCommand = connection.CreateCommand())
+            {
+                verifyCommand.CommandText =
                     """
-                    SELECT group_concat("TargetIdentityEnrollmentState", ',')
+                    SELECT group_concat(
+                        "Id" || ':' || "State" || ':'
+                        || coalesce("ManagedRootFolderId", '') || ':'
+                        || coalesce("PathOwnershipKey", ''), ',')
                     FROM (
-                        SELECT "TargetIdentityEnrollmentState"
-                        FROM "RootFolderRelocations"
+                        SELECT "Id", "State", "ManagedRootFolderId",
+                               "PathOwnershipKey"
+                        FROM "LibraryDirectoryOwnerships"
                         ORDER BY "Id")
-                    """));
-            Assert.Equal(
-                "Pending|/library/removed|1|object-10",
-                await ScalarAsync(
+                    """;
+                Assert.Equal(
+                    "101:Removed::,202:Unavailable::",
+                    (await verifyCommand.ExecuteScalarAsync())?.ToString());
+            }
+
+            var guardedOptions = new DbContextOptionsBuilder<ListenArrDbContext>()
+                .UseSqlite(connection, sqlite =>
+                    sqlite.MigrationsAssembly(
+                        typeof(ListenArrDbContext).Assembly.GetName().Name))
+                .ConfigureWarnings(warnings => warnings.Throw(
+                    RelationalEventId.NonTransactionalMigrationOperationWarning))
+                .Options;
+            await using var guarded = new ListenArrDbContext(guardedOptions);
+            await guarded.Database.MigrateAsync();
+
+            await using var foreignKeyCheckCommand = connection.CreateCommand();
+            foreignKeyCheckCommand.CommandText = "PRAGMA foreign_key_check;";
+            await using var reader = await foreignKeyCheckCommand.ExecuteReaderAsync();
+            Assert.False(await reader.ReadAsync());
+        }
+
+        [Fact]
+        [Trait("Scenario", "IntermediatePrDatabaseCompatibility")]
+        public async Task IntermediatePrDatabase_MissingIsolatedForeignKeyHistory_ReappliesCleanly()
+        {
+            await using var connection = new SqliteConnection("DataSource=:memory:");
+            await connection.OpenAsync();
+
+            var baselineOptions = new DbContextOptionsBuilder<ListenArrDbContext>()
+                .UseSqlite(connection, sqlite =>
+                    sqlite.MigrationsAssembly(
+                        typeof(ListenArrDbContext).Assembly.GetName().Name))
+                .Options;
+            await using (var baseline = new ListenArrDbContext(baselineOptions))
+            {
+                await baseline.Database.MigrateAsync();
+                await baseline.Database.ExecuteSqlRawAsync(
                     """
-                    SELECT "State" || '|' || "CanonicalOwnershipPath" || '|'
-                        || "OriginalManagedRootFolderId" || '|'
-                        || "DirectoryObjectIdentity"
-                    FROM "LibraryDirectoryOwnershipRetiredMarkers"
-                    WHERE "OwnershipId" = 10
-                    """));
-            Assert.Equal(
-                "Unavailable||",
-                await ScalarAsync(
-                    """
-                    SELECT "State" || '|' || coalesce("PathOwnershipKey", '')
-                        || '|' || coalesce("ManagedRootFolderId", '')
-                    FROM "LibraryDirectoryOwnerships"
-                    WHERE "Id" = 20
-                    """));
-            Assert.Equal(
-                string.Empty,
-                await ScalarAsync(
-                    """
-                    SELECT coalesce("ManagedRootFolderId", '')
-                    FROM "LibraryDirectoryOwnerships"
-                    WHERE "Id" = 10
-                    """));
-            await Assert.ThrowsAnyAsync<Exception>(() =>
-                migrator.MigrateAsync(
-                    "20260726042801_AddDirectoryObjectIdentityAuthorization"));
+                    DELETE FROM "__EFMigrationsHistory"
+                    WHERE "MigrationId" =
+                        '20260726500000_AddLibraryDirectoryOwnershipRootForeignKey';
+                    """);
+            }
+
+            var guardedOptions = new DbContextOptionsBuilder<ListenArrDbContext>()
+                .UseSqlite(connection, sqlite =>
+                    sqlite.MigrationsAssembly(
+                        typeof(ListenArrDbContext).Assembly.GetName().Name))
+                .ConfigureWarnings(warnings => warnings.Throw(
+                    RelationalEventId.NonTransactionalMigrationOperationWarning))
+                .Options;
+            await using (var guarded = new ListenArrDbContext(guardedOptions))
+            {
+                await guarded.Database.MigrateAsync();
+            }
+
+            await using var historyCommand = connection.CreateCommand();
+            historyCommand.CommandText =
+                """
+                SELECT COUNT(*)
+                FROM "__EFMigrationsHistory"
+                WHERE "MigrationId" =
+                    '20260726500000_AddLibraryDirectoryOwnershipRootForeignKey'
+                """;
+            Assert.Equal(1L, (long)(await historyCommand.ExecuteScalarAsync())!);
+
+            await using var integrityCommand = connection.CreateCommand();
+            integrityCommand.CommandText = "PRAGMA integrity_check;";
+            Assert.Equal("ok", (await integrityCommand.ExecuteScalarAsync())?.ToString());
+
+            await using var foreignKeyCheckCommand = connection.CreateCommand();
+            foreignKeyCheckCommand.CommandText = "PRAGMA foreign_key_check;";
+            await using var reader = await foreignKeyCheckCommand.ExecuteReaderAsync();
+            Assert.False(await reader.ReadAsync());
         }
 
         [Fact]
         [Trait("Scenario", "OwnershipRecoveryProtocolRetry")]
-        public async Task OwnershipRecoveryMigration_InterruptedAfterRebuild_RetriesCleanly()
+        public async Task OwnershipRecoveryMigration_InterruptedSchemaTransaction_RetriesCleanly()
         {
             await using var connection =
                 new SqliteConnection("DataSource=:memory:");
@@ -593,7 +701,7 @@ namespace Listenarr.Tests.Features.Infrastructure.Persistence
             await using var context = new ListenArrDbContext(options);
             var migrator = context.GetService<IMigrator>();
             await migrator.MigrateAsync(
-                "20260726042801_AddDirectoryObjectIdentityAuthorization");
+                "20260726500000_AddLibraryDirectoryOwnershipRootForeignKey");
 
             await Assert.ThrowsAsync<InvalidOperationException>(() =>
                 migrator.MigrateAsync(
@@ -621,7 +729,7 @@ namespace Listenarr.Tests.Features.Infrastructure.Persistence
 
         [Fact]
         [Trait("Scenario", "OwnershipRecoveryProtocolDowngrade")]
-        public async Task OwnershipRecoveryMigration_DownRestoresRemovedOwnershipRootAssociation()
+        public async Task OwnershipRecoveryMigration_DowngradeKeepsIsolatedOwnershipForeignKey()
         {
             await using var connection =
                 new SqliteConnection("DataSource=:memory:");
@@ -634,45 +742,33 @@ namespace Listenarr.Tests.Features.Infrastructure.Persistence
             await using var context = new ListenArrDbContext(options);
             var migrator = context.GetService<IMigrator>();
             await migrator.MigrateAsync(
-                "20260726042801_AddDirectoryObjectIdentityAuthorization");
-            await context.Database.ExecuteSqlRawAsync(
+                "20260727000644_AddOwnershipRecoveryProtocols");
+
+            await migrator.MigrateAsync(
+                "20260726500000_AddLibraryDirectoryOwnershipRootForeignKey");
+
+            Assert.False(await ColumnExistsAsync(
+                connection,
+                "RootFolderRelocations",
+                "TargetIdentityEnrollmentState"));
+            Assert.False(await TableExistsAsync(
+                connection,
+                "LibraryDirectoryOwnershipRetiredMarkers"));
+            await using var foreignKeyCommand = connection.CreateCommand();
+            foreignKeyCommand.CommandText =
                 """
-                INSERT INTO "RootFolders" ("Id", "Name", "Path", "IsDefault")
-                VALUES (41, 'Library', '/library', 0);
-                INSERT INTO "LibraryDirectoryOwnerships" (
-                    "Id", "Path", "CanonicalPath", "PathSyntax",
-                    "PathCaseSensitivity", "PathCaseSensitivityMode",
-                    "PathIdentityBoundary", "PathIdentityLookupKey",
-                    "PathOwnershipKey", "OwnershipToken", "State",
-                    "CreationWorkflow", "CreatedAt", "UpdatedAt",
-                    "ManagedRootFolderId")
-                VALUES (
-                    42, '/library/removed', '/library/removed', 'Unix',
-                    'Sensitive', 'Sensitive', '/library/removed', 'lookup-42',
-                    NULL, '42424242424242424242424242424242', 'Removed',
-                    'test', '2026-07-27T00:00:00Z',
-                    '2026-07-27T00:00:00Z', 41);
-                """);
+                SELECT "on_delete"
+                FROM pragma_foreign_key_list('LibraryDirectoryOwnerships')
+                WHERE "table" = 'RootFolders'
+                  AND "from" = 'ManagedRootFolderId'
+                """;
+            Assert.Equal(
+                "SET NULL",
+                (await foreignKeyCommand.ExecuteScalarAsync())?.ToString());
+
             await migrator.MigrateAsync(
                 "20260727000644_AddOwnershipRecoveryProtocols");
-            await context.Database.ExecuteSqlRawAsync(
-                """
-                UPDATE "LibraryDirectoryOwnershipRetiredMarkers"
-                SET "State" = 'Removed';
-                """);
-
-            await migrator.MigrateAsync(
-                "20260726042801_AddDirectoryObjectIdentityAuthorization");
-
-            await using var command = connection.CreateCommand();
-            command.CommandText =
-                """
-                SELECT "ManagedRootFolderId"
-                FROM "LibraryDirectoryOwnerships"
-                WHERE "Id" = 42
-                """;
-            Assert.Equal(41L, (long)(await command.ExecuteScalarAsync())!);
-            Assert.False(await TableExistsAsync(
+            Assert.True(await TableExistsAsync(
                 connection,
                 "LibraryDirectoryOwnershipRetiredMarkers"));
         }

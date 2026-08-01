@@ -848,6 +848,65 @@ public sealed class EfLibraryDirectoryOwnershipStoreTests : BaseTests
     }
 
     [Fact]
+    public async Task Reconciler_LegacyRemovedRowWithoutEvidence_BackfillsAndRetiresSiblingMarker()
+    {
+        var directory = Path.Join(_root, "LegacyRemovedWithoutEvidence");
+        Directory.CreateDirectory(directory);
+        var ownership = await _store.RecordCreatedAsync(
+            new LibraryDirectoryOwnershipClaim(
+                directory,
+                FileSystemPathSemantics.CurrentHostDefault,
+                "legacy-test"));
+        var originalRootId = Assert.IsType<int>(ownership.ManagedRootFolderId);
+        var ownershipKey = Assert.IsType<string>(ownership.PathOwnershipKey);
+        var siblingMarker = LibraryDirectoryOwnershipMarker
+            .GetMarkerPaths(ownership)[1];
+
+        await _store.BeginRemovalAsync(ownership.Id, ownershipKey);
+        LibraryDirectoryOwnershipMarker.DeleteInsideMarker(ownership, directory);
+        Directory.Delete(directory);
+        await using (var db = await _factory.CreateDbContextAsync())
+        {
+            var legacy = await db.LibraryDirectoryOwnerships.SingleAsync(
+                candidate => candidate.Id == ownership.Id);
+            legacy.State = LibraryDirectoryOwnershipState.Removed;
+            legacy.PathOwnershipKey = null;
+            await db.SaveChangesAsync();
+            Assert.Empty(await db.LibraryDirectoryOwnershipRetiredMarkers
+                .Where(marker => marker.OwnershipId == ownership.Id)
+                .ToListAsync());
+        }
+        Assert.True(File.Exists(siblingMarker));
+
+        await CreateOwnershipReconciler().ReconcileAsync();
+
+        await using (var verification = await _factory.CreateDbContextAsync())
+        {
+            var persisted = await verification.LibraryDirectoryOwnerships
+                .SingleAsync(candidate => candidate.Id == ownership.Id);
+            Assert.Equal(LibraryDirectoryOwnershipState.Removed, persisted.State);
+            Assert.Null(persisted.ManagedRootFolderId);
+            var evidence = await verification
+                .LibraryDirectoryOwnershipRetiredMarkers
+                .SingleAsync(marker => marker.OwnershipId == ownership.Id);
+            Assert.Equal(originalRootId, evidence.OriginalManagedRootFolderId);
+            Assert.Equal(
+                LibraryDirectoryOwnershipMarker.Version,
+                evidence.PayloadVersion);
+            Assert.Equal(
+                LibraryDirectoryOwnershipRetiredMarkerState.Removed,
+                evidence.State);
+        }
+        Assert.False(File.Exists(siblingMarker));
+
+        await CreateOwnershipReconciler().ReconcileAsync();
+        await using var repeated = await _factory.CreateDbContextAsync();
+        Assert.Single(await repeated.LibraryDirectoryOwnershipRetiredMarkers
+            .Where(marker => marker.OwnershipId == ownership.Id)
+            .ToListAsync());
+    }
+
+    [Fact]
     public async Task Reconciler_LegacyMissingBothProofMarksOnlyDatabaseRowRemoved()
     {
         var fixture = await PrepareLegacyMissingBothAsync("LegacyMissingBoth");

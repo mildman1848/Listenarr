@@ -123,6 +123,38 @@ internal sealed partial class EfLibraryDirectoryOwnershipStore
 
 internal static class LibraryDirectoryOwnershipRetiredMarkerEvidence
 {
+    public static LibraryDirectoryOwnershipRetiredMarker CreateLegacyPending(
+        LibraryDirectoryOwnership ownership)
+    {
+        ArgumentNullException.ThrowIfNull(ownership);
+        var payloadVersion = ownership.ManagedRootFolderId.HasValue
+            && ownership.DirectoryObjectIdentityVersion.HasValue
+            && !string.IsNullOrWhiteSpace(ownership.DirectoryObjectIdentity)
+                ? LibraryDirectoryOwnershipMarker.Version
+                : 1;
+        return new LibraryDirectoryOwnershipRetiredMarker
+        {
+            OwnershipId = ownership.Id,
+            OwnershipToken = ownership.OwnershipToken,
+            CanonicalMarkerPath = null,
+            CanonicalOwnershipPath = ownership.CanonicalPath,
+            PathSyntax = ownership.PathSyntax,
+            PathCaseSensitivity = ownership.PathCaseSensitivity,
+            PathCaseSensitivityMode = ownership.PathCaseSensitivityMode,
+            PathIdentityBoundary = ownership.PathIdentityBoundary,
+            CanonicalPayload = null,
+            PayloadSha256 = null,
+            PayloadVersion = payloadVersion,
+            OriginalManagedRootFolderId = ownership.ManagedRootFolderId,
+            DirectoryObjectIdentityVersion =
+                ownership.DirectoryObjectIdentityVersion,
+            DirectoryObjectIdentity = ownership.DirectoryObjectIdentity,
+            State = LibraryDirectoryOwnershipRetiredMarkerState.Pending,
+            CreatedAt = ownership.CreatedAt,
+            UpdatedAt = ownership.UpdatedAt
+        };
+    }
+
     public static LibraryDirectoryOwnershipRetiredMarker Create(
         LibraryDirectoryOwnership ownership,
         LibraryDirectoryOwnershipMarker.MarkerPayload payload,

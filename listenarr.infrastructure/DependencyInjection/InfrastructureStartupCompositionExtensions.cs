@@ -62,12 +62,23 @@ public static class InfrastructureStartupCompositionExtensions
             using var migrateScope = serviceProvider.CreateScope();
             var factory = migrateScope.ServiceProvider.GetRequiredService<IDbContextFactory<ListenArrDbContext>>();
             using var ctx = factory.CreateDbContext();
+            var repairedOwnershipReferences =
+                LibraryDirectoryOwnershipMigrationPreflight
+                    .RepairLegacyForeignKeyReferences(ctx);
+            if (repairedOwnershipReferences > 0)
+            {
+                Log.Logger.Warning(
+                    "[Startup] Repaired {Count} legacy directory ownership root reference(s) before applying the ownership foreign key migration",
+                    repairedOwnershipReferences);
+            }
+
             ctx.Database.Migrate();
             Log.Logger.Information("[Startup] EF Core migrations applied successfully");
         }
         catch (Exception ex) when (ex is not OperationCanceledException && ex is not OutOfMemoryException && ex is not StackOverflowException)
         {
-            Log.Logger.Error(ex, "[Startup] Failed to apply EF Core migrations at startup. You can run 'dotnet ef database update' manually to apply migrations.");
+            Log.Logger.Error(ex, "[Startup] Failed to apply EF Core migrations at startup. Listenarr cannot start safely with an unknown database schema.");
+            throw;
         }
     }
 

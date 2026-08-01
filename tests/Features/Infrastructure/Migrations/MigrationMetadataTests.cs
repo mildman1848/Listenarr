@@ -61,34 +61,65 @@ namespace Listenarr.Tests.Features.Infrastructure.Migrations
         }
 
         [Fact]
-        public void OwnershipRecoveryProtocols_DownBlocksAnyPathMigrationJournal()
+        public void AddLibraryDirectoryOwnershipRootForeignKeyMigration_IsDiscoverableByEf()
+        {
+            var attribute = typeof(AddLibraryDirectoryOwnershipRootForeignKey)
+                .GetCustomAttribute<MigrationAttribute>();
+
+            Assert.NotNull(attribute);
+            Assert.Equal(
+                "20260726500000_AddLibraryDirectoryOwnershipRootForeignKey",
+                attribute!.Id);
+        }
+
+        [Fact]
+        public void AddLibraryDirectoryOwnershipRootForeignKey_ContainsOnlyForeignKeyOperation()
+        {
+            var migration = new AddLibraryDirectoryOwnershipRootForeignKey();
+            var upBuilder = new MigrationBuilder(
+                "Microsoft.EntityFrameworkCore.Sqlite");
+            var downBuilder = new MigrationBuilder(
+                "Microsoft.EntityFrameworkCore.Sqlite");
+
+            typeof(AddLibraryDirectoryOwnershipRootForeignKey)
+                .GetMethod(
+                    "Up",
+                    BindingFlags.Instance | BindingFlags.NonPublic)!
+                .Invoke(migration, [upBuilder]);
+            typeof(AddLibraryDirectoryOwnershipRootForeignKey)
+                .GetMethod(
+                    "Down",
+                    BindingFlags.Instance | BindingFlags.NonPublic)!
+                .Invoke(migration, [downBuilder]);
+
+            Assert.Single(upBuilder.Operations);
+            Assert.IsType<AddForeignKeyOperation>(upBuilder.Operations[0]);
+            Assert.Single(downBuilder.Operations);
+            Assert.IsType<DropForeignKeyOperation>(downBuilder.Operations[0]);
+        }
+
+        [Fact]
+        public void OwnershipRecoveryProtocols_ContainsNoRawSqlOperations()
         {
             var migration = new AddOwnershipRecoveryProtocols();
-            var builder = new MigrationBuilder(
+            var upBuilder = new MigrationBuilder(
                 "Microsoft.EntityFrameworkCore.Sqlite");
+            var downBuilder = new MigrationBuilder(
+                "Microsoft.EntityFrameworkCore.Sqlite");
+
+            typeof(AddOwnershipRecoveryProtocols)
+                .GetMethod(
+                    "Up",
+                    BindingFlags.Instance | BindingFlags.NonPublic)!
+                .Invoke(migration, [upBuilder]);
             typeof(AddOwnershipRecoveryProtocols)
                 .GetMethod(
                     "Down",
                     BindingFlags.Instance | BindingFlags.NonPublic)!
-                .Invoke(migration, [builder]);
+                .Invoke(migration, [downBuilder]);
 
-            var sql = string.Join(
-                Environment.NewLine,
-                builder.Operations
-                    .OfType<SqlOperation>()
-                    .Select(operation => operation.Sql));
-
-            Assert.Contains(
-                "FROM \"LibraryDirectoryOwnershipPathMigrations\"",
-                sql,
-                StringComparison.Ordinal);
-            Assert.DoesNotContain(
-                """
-                FROM "LibraryDirectoryOwnershipPathMigrations"
-                        WHERE
-                """,
-                sql,
-                StringComparison.Ordinal);
+            Assert.Empty(upBuilder.Operations.OfType<SqlOperation>());
+            Assert.Empty(downBuilder.Operations.OfType<SqlOperation>());
         }
     }
 }

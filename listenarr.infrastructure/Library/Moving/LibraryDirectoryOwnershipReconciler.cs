@@ -19,6 +19,7 @@ public sealed class LibraryDirectoryOwnershipReconciler(
     private async Task ReconcileCoreAsync(CancellationToken cancellationToken)
     {
         await using var db = await dbContextFactory.CreateDbContextAsync(cancellationToken);
+        await BackfillLegacyRemovedOwnershipEvidenceAsync(db, cancellationToken);
         var retiredMarkers = await db.LibraryDirectoryOwnershipRetiredMarkers
             .Where(marker =>
                 marker.State
@@ -227,6 +228,66 @@ public sealed class LibraryDirectoryOwnershipReconciler(
             }
         }
 
+    }
+
+    private async Task BackfillLegacyRemovedOwnershipEvidenceAsync(
+        ListenArrDbContext db,
+        CancellationToken cancellationToken)
+    {
+        var legacyRemoved = await db.LibraryDirectoryOwnerships
+            .Where(ownership =>
+                ownership.State == LibraryDirectoryOwnershipState.Removed
+                && (ownership.ManagedRootFolderId != null
+                    || !db.LibraryDirectoryOwnershipRetiredMarkers.Any(
+                        marker => marker.OwnershipId == ownership.Id)))
+            .ToListAsync(cancellationToken);
+
+        foreach (var ownership in legacyRemoved)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var evidenceExists = await db.LibraryDirectoryOwnershipRetiredMarkers
+                .AnyAsync(
+                    marker => marker.OwnershipId == ownership.Id,
+                    cancellationToken);
+            if (!evidenceExists)
+            {
+                db.LibraryDirectoryOwnershipRetiredMarkers.Add(
+                    LibraryDirectoryOwnershipRetiredMarkerEvidence
+                        .CreateLegacyPending(ownership));
+            }
+
+            ownership.ManagedRootFolderId = null;
+            try
+            {
+                await db.SaveChangesAsync(cancellationToken);
+            }
+            catch (DbUpdateException)
+            {
+                // A second process may have materialized the same unique evidence
+                // row after our read. Reload and accept that race only when the
+                // evidence now exists; otherwise preserve the original failure.
+                db.ChangeTracker.Clear();
+                var persistedEvidence = await db
+                    .LibraryDirectoryOwnershipRetiredMarkers
+                    .AnyAsync(
+                        marker => marker.OwnershipId == ownership.Id,
+                        cancellationToken);
+                if (!persistedEvidence)
+                {
+                    throw;
+                }
+
+                var persistedOwnership = await db.LibraryDirectoryOwnerships
+                    .SingleAsync(
+                        candidate => candidate.Id == ownership.Id,
+                        cancellationToken);
+                if (persistedOwnership.ManagedRootFolderId.HasValue)
+                {
+                    persistedOwnership.ManagedRootFolderId = null;
+                    await db.SaveChangesAsync(cancellationToken);
+                }
+            }
+        }
     }
 
     private static LibraryDirectoryOwnership CloneForIdentityMigration(
