@@ -1,4 +1,5 @@
 using System.Text.Json;
+using Listenarr.Tests.Common;
 
 namespace Listenarr.Tests.Features.Infrastructure.Library.Moving;
 
@@ -35,7 +36,7 @@ public partial class AudiobookContentMoveServiceTests
         Assert.False(Directory.Exists(target));
     }
 
-    [Fact]
+    [DirectoryLinkFact]
     public async Task MoveContentsAsync_OwnedTempWithLinkedChild_IsPreserved()
     {
         var source = FileService.GetTempDirectory("content-move-temp-linked-src");

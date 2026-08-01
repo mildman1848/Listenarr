@@ -1,3 +1,4 @@
+using Listenarr.Tests.Common;
 using Microsoft.EntityFrameworkCore;
 
 namespace Listenarr.Tests.Features.Infrastructure.Library.Moving;
@@ -110,7 +111,7 @@ public partial class AudiobookContentMoveServiceTests
         Assert.Equal("preserve me", await File.ReadAllTextAsync(unexpectedFile));
     }
 
-    [Fact]
+    [DirectoryLinkFact]
     public async Task ResumeSourceCleanup_LinkedQuarantineRoot_PreservesExternalFile()
     {
         var source = FileService.GetTempDirectory("content-move-linked-quarantine-root-src");
@@ -162,7 +163,7 @@ public partial class AudiobookContentMoveServiceTests
         }
     }
 
-    [Fact]
+    [DirectoryLinkFact]
     public async Task ResumeSourceCleanup_LinkedQuarantineEntry_PreservesExternalFile()
     {
         var source = FileService.GetTempDirectory("content-move-linked-quarantine-src");

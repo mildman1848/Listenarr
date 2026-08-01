@@ -1,10 +1,11 @@
+using Listenarr.Tests.Common;
 using Microsoft.EntityFrameworkCore;
 
 namespace Listenarr.Tests.Features.Infrastructure.Library.Moving;
 
 public partial class AudiobookContentMoveServiceTests
 {
-    [Fact]
+    [DirectoryLinkFact]
     public async Task MoveContentsAsync_ScaffoldParentReplacedAfterHandleOpen_DoesNotCreateOutsideBoundary()
     {
         var root = FileService.GetTempDirectory("content-move-scaffold-parent-race-root");
@@ -95,7 +96,7 @@ public partial class AudiobookContentMoveServiceTests
         Assert.False(Directory.Exists(Path.Join(scaffoldParent, "Author")));
     }
 
-    [Fact]
+    [DirectoryLinkFact]
     public async Task MoveContentsAsync_ScaffoldParentReplacedAtPublication_DoesNotPublishSubstituteTree()
     {
         var root = FileService.GetTempDirectory("content-move-scaffold-publication-race-root");

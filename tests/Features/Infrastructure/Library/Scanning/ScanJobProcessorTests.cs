@@ -170,7 +170,7 @@ namespace Listenarr.Tests.Features.Infrastructure.Library.Scanning
                 await _audiobookFileRepository.GetByAudiobookIdAsync(audiobook.Id));
         }
 
-        [LinuxFact]
+        [DirectoryLinkFact]
         public async Task ProcessJobAsync_LinkedChildDirectory_DoesNotImportOutsideFiles()
         {
 
@@ -196,7 +196,7 @@ namespace Listenarr.Tests.Features.Infrastructure.Library.Scanning
             Assert.Equal(basePath, persistedAudiobook.BasePath);
         }
 
-        [LinuxFact]
+        [DirectoryLinkFact]
         public async Task ProcessJobAsync_LinkedScanRoot_FailsWithoutDeletingTrackedFiles()
         {
 

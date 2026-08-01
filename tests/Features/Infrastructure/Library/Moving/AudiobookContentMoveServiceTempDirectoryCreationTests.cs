@@ -1,10 +1,11 @@
+using Listenarr.Tests.Common;
 using Microsoft.EntityFrameworkCore;
 
 namespace Listenarr.Tests.Features.Infrastructure.Library.Moving;
 
 public partial class AudiobookContentMoveServiceTests
 {
-    [Fact]
+    [DirectoryLinkFact]
     public async Task MoveContentsAsync_TempParentReplacedAfterHandleOpen_DoesNotCreateOutsideBoundary()
     {
         var root = FileService.GetTempDirectory("content-move-temp-parent-race-root");
@@ -70,7 +71,7 @@ public partial class AudiobookContentMoveServiceTests
         }
     }
 
-    [Fact]
+    [DirectoryLinkFact]
     public async Task MoveContentsAsync_TempParentReplacedAtPublication_DoesNotPublishSubstituteTree()
     {
         var root = FileService.GetTempDirectory("content-move-temp-publication-race-root");
@@ -140,7 +141,7 @@ public partial class AudiobookContentMoveServiceTests
         }
     }
 
-    [Fact]
+    [DirectoryLinkFact]
     public async Task MoveContentsAsync_TempParentReplacedBeforeMarkerCreation_DoesNotWriteOutsideBoundary()
     {
         var root = FileService.GetTempDirectory("content-move-temp-marker-parent-race-root");

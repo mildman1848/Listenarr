@@ -533,7 +533,7 @@ namespace Listenarr.Tests.Features.Application.Audiobooks.Renaming
             Assert.False(Directory.Exists(targetFolder));
         }
 
-        [LinuxFact]
+        [DirectoryLinkFact]
         public async Task ExecuteRename_SymbolicLinkDestinationOutsideRoot_IsRejected()
         {
 

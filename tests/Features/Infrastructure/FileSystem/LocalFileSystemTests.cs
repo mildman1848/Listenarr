@@ -6,7 +6,7 @@ namespace Listenarr.Tests.Features.Infrastructure.FileSystem;
 [Trait("Category", "Infrastructure")]
 public sealed class LocalFileSystemTests : BaseTests
 {
-    [Fact]
+    [DirectoryLinkFact]
     public void DeleteEmptyDirectories_AncestorLinkSwap_PreservesExternalDirectory()
     {
         var root = Path.Join(
@@ -62,7 +62,7 @@ public sealed class LocalFileSystemTests : BaseTests
         }
     }
 
-    [Fact]
+    [DirectoryLinkFact]
     public void DeleteEmptyDirectories_RootLinkSwap_PreservesCapturedAndExternalDirectories()
     {
         var container = Path.Join(
@@ -115,7 +115,7 @@ public sealed class LocalFileSystemTests : BaseTests
         }
     }
 
-    [Fact]
+    [DirectoryLinkFact]
     public void DeleteEmptyDirectories_ReplacementAfterPin_PreservesBothGenerations()
     {
         var root = Path.Join(
@@ -217,7 +217,7 @@ public sealed class LocalFileSystemTests : BaseTests
         }
     }
 
-    [LinuxFact]
+    [LinuxDirectoryAndFileLinkFact]
     public void IsReparsePoint_DetectsLinuxSymbolicLinksOnly()
     {
 

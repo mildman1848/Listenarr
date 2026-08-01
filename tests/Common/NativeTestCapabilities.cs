@@ -86,27 +86,57 @@ internal static class NativeTestCapabilityPolicy
     internal static NativeTestExecutionDecision GetExecutionDecision(
         NativeTestCapability capability) =>
         GetExecutionDecision(
-            capability,
+            new[] { capability },
+            GetRequiredCapabilities(),
+            Probe);
+
+    internal static NativeTestExecutionDecision GetExecutionDecision(
+        params NativeTestCapability[] capabilities) =>
+        GetExecutionDecision(
+            capabilities,
             GetRequiredCapabilities(),
             Probe);
 
     internal static NativeTestExecutionDecision GetExecutionDecision(
         NativeTestCapability capability,
         IReadOnlySet<NativeTestCapability> requiredCapabilities,
+        Func<NativeTestCapability, NativeTestCapabilityProbeResult> probe) =>
+        GetExecutionDecision(
+            new[] { capability },
+            requiredCapabilities,
+            probe);
+
+    internal static NativeTestExecutionDecision GetExecutionDecision(
+        IReadOnlyCollection<NativeTestCapability> capabilities,
+        IReadOnlySet<NativeTestCapability> requiredCapabilities,
         Func<NativeTestCapability, NativeTestCapabilityProbeResult> probe)
     {
-        if (requiredCapabilities.Contains(capability))
+        ArgumentNullException.ThrowIfNull(capabilities);
+        if (capabilities.Count == 0)
         {
-            return new NativeTestExecutionDecision(true, null);
+            throw new ArgumentException(
+                "At least one native test capability is required.",
+                nameof(capabilities));
         }
 
-        var result = probe(capability);
-        return result.IsAvailable
-            ? new NativeTestExecutionDecision(true, null)
-            : new NativeTestExecutionDecision(
-                false,
-                $"{GetDisplayName(capability)} are unavailable on this optional test runner: "
-                + result.FailureReason);
+        foreach (var capability in capabilities.Distinct().Order())
+        {
+            if (requiredCapabilities.Contains(capability))
+            {
+                continue;
+            }
+
+            var result = probe(capability);
+            if (!result.IsAvailable)
+            {
+                return new NativeTestExecutionDecision(
+                    false,
+                    $"{GetDisplayName(capability)} are unavailable on this optional test runner: "
+                    + result.FailureReason);
+            }
+        }
+
+        return new NativeTestExecutionDecision(true, null);
     }
 
     internal static IReadOnlyList<NativeTestCapabilityProbeResult>

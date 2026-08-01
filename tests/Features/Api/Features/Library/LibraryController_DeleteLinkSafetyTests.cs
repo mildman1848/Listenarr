@@ -19,7 +19,7 @@ namespace Listenarr.Tests.Features.Api.Features.Library;
 [Trait("Category", "LibraryController")]
 public class LibraryController_DeleteLinkSafetyTests : BaseTests
 {
-    [Fact]
+    [DirectoryLinkFact]
     public async Task FilesystemDelete_LinkedDirectoryDoesNotDeleteExternalFiles()
     {
         var tempRoot = FileService.GetTempDirectory("listenarr-delete-link-root");
@@ -106,7 +106,7 @@ public class LibraryController_DeleteLinkSafetyTests : BaseTests
             || warning.Contains("reparse point", StringComparison.OrdinalIgnoreCase));
     }
 
-    [Fact]
+    [DirectoryLinkFact]
     public async Task FilesystemDelete_ParentReplacedAfterValidation_PreservesBothGenerations()
     {
         var tempRoot = FileService.GetTempDirectory("listenarr-delete-parent-race");

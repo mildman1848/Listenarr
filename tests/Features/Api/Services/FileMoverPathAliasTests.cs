@@ -32,7 +32,7 @@ public sealed class FileMoverPathAliasTests : BaseTests, IDisposable
         Directory.CreateDirectory(_root);
     }
 
-    [LinuxFact]
+    [DirectoryLinkFact]
     public async Task MoveDirectoryAsync_DestinationSymbolicLinkAlias_IsBlockedBeforeMutation()
     {
 
@@ -52,7 +52,7 @@ public sealed class FileMoverPathAliasTests : BaseTests, IDisposable
         Assert.Equal("audio", await File.ReadAllTextAsync(Path.Join(source, "book.m4b")));
     }
 
-    [LinuxFact]
+    [DirectoryLinkFact]
     public async Task MoveDirectoryAsync_SourceSymbolicLinkAlias_IsBlockedBeforeMutation()
     {
 
@@ -72,7 +72,7 @@ public sealed class FileMoverPathAliasTests : BaseTests, IDisposable
         Assert.Equal("audio", await File.ReadAllTextAsync(Path.Join(destination, "book.m4b")));
     }
 
-    [LinuxFact]
+    [DirectoryLinkFact]
     public async Task MoveDirectoryAsync_SymbolicLinkAncestorAlias_IsBlockedBeforeMutation()
     {
 

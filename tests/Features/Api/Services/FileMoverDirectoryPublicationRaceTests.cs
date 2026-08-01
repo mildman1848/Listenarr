@@ -53,7 +53,7 @@ public sealed class FileMoverDirectoryPublicationRaceTests : BaseTests
         Assert.True(File.Exists(Path.Join(source, "book.m4b")));
     }
 
-    [LinuxFact]
+    [DirectoryLinkFact]
     public async Task CopyDirectoryAsync_NestedStagingDirectoryReplacedBeforeFileCopy_DoesNotWriteThroughLink()
     {
         var root = FileService.GetTempDirectory("directory-copy-nested-staging-race");
@@ -113,7 +113,7 @@ public sealed class FileMoverDirectoryPublicationRaceTests : BaseTests
         }
     }
 
-    [LinuxFact]
+    [DirectoryLinkFact]
     public async Task CopyDirectoryAsync_StagingRootReplacedBeforePublication_IsBlocked()
     {
         var root = FileService.GetTempDirectory("directory-copy-publication-race");

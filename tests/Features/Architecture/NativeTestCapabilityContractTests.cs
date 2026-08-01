@@ -127,6 +127,67 @@ public sealed class NativeTestCapabilityContractTests : BaseTests
             },
             probes);
     }
+
+    [Fact]
+    public void GetExecutionDecision_CombinedOptionalCapabilities_ReportsMissingFileLinks()
+    {
+        var probes = new List<NativeTestCapability>();
+        var decision = NativeTestCapabilityPolicy.GetExecutionDecision(
+            new[]
+            {
+                NativeTestCapability.DirectorySymbolicLinks,
+                NativeTestCapability.FileSymbolicLinks
+            },
+            new HashSet<NativeTestCapability>(),
+            capability =>
+            {
+                probes.Add(capability);
+                return capability == NativeTestCapability.DirectorySymbolicLinks
+                    ? NativeTestCapabilityProbeResult.Available(capability)
+                    : NativeTestCapabilityProbeResult.Unavailable(
+                        capability,
+                        "file links unavailable");
+            });
+
+        Assert.False(decision.ShouldRun);
+        Assert.Contains("File symbolic links", decision.SkipReason);
+        Assert.Equal(
+            new[]
+            {
+                NativeTestCapability.DirectorySymbolicLinks,
+                NativeTestCapability.FileSymbolicLinks
+            },
+            probes);
+    }
+
+    [Fact]
+    public void GetExecutionDecision_CombinedRequiredCapabilities_RunWithoutDiscoveryProbe()
+    {
+        var required = new HashSet<NativeTestCapability>
+        {
+            NativeTestCapability.DirectorySymbolicLinks,
+            NativeTestCapability.FileSymbolicLinks
+        };
+
+        var decision = NativeTestCapabilityPolicy.GetExecutionDecision(
+            required.ToArray(),
+            required,
+            _ => throw new InvalidOperationException(
+                "Required capabilities must be proved by the suite preflight, not discovery."));
+
+        Assert.True(decision.ShouldRun);
+        Assert.Null(decision.SkipReason);
+    }
+
+    [Fact]
+    public void GetExecutionDecision_EmptyCapabilitySet_FailsClosed()
+    {
+        Assert.Throws<ArgumentException>(() =>
+            NativeTestCapabilityPolicy.GetExecutionDecision(
+                Array.Empty<NativeTestCapability>(),
+                new HashSet<NativeTestCapability>(),
+                NativeTestCapabilityPolicy.Probe));
+    }
 }
 
 [Trait("Name", "NativeTestWorkflowContractTests")]
@@ -262,23 +323,16 @@ public sealed class NativeTestWorkflowContractTests : BaseTests
             "tests",
             "Common",
             "PlatformFactAttributes.cs"));
-        var attributeNames = new[]
-        {
-            string.Concat("DirectoryLink", "FactAttribute"),
-            string.Concat("DirectoryLink", "TheoryAttribute"),
-            string.Concat("FileLink", "FactAttribute"),
-            string.Concat("FileLink", "TheoryAttribute")
-        };
+        var declarationPattern = new Regex(
+            @"\bclass\s+\w*(?:Directory|File)\w*Link\w*(?:Fact|Theory)Attribute\b",
+            RegexOptions.CultureInvariant);
         var violations = EnumerateContractSourceFiles(repositoryRoot)
             .Where(path => path.EndsWith(".cs", StringComparison.OrdinalIgnoreCase))
             .Where(path => !string.Equals(
                 Path.GetFullPath(path),
                 platformAttributesPath,
                 StringComparison.OrdinalIgnoreCase))
-            .Where(path => attributeNames.Any(attributeName =>
-                File.ReadAllText(path).Contains(
-                    $"class {attributeName}",
-                    StringComparison.Ordinal)))
+            .Where(path => declarationPattern.IsMatch(File.ReadAllText(path)))
             .Select(path => Path.GetRelativePath(repositoryRoot, path))
             .Order(StringComparer.Ordinal)
             .ToArray();
@@ -286,6 +340,39 @@ public sealed class NativeTestWorkflowContractTests : BaseTests
         Assert.True(
             violations.Length == 0,
             "Link capability attributes must delegate through tests/Common/PlatformFactAttributes.cs:"
+            + Environment.NewLine
+            + string.Join(Environment.NewLine, violations));
+    }
+
+    [Fact]
+    public void SymbolicLinkTests_DeclareExactNativeCapabilities()
+    {
+        var repositoryRoot = FindRepositoryRoot();
+        var testsRoot = Path.Join(repositoryRoot, "tests");
+        var sources = Directory
+            .EnumerateFiles(testsRoot, "*.cs", SearchOption.AllDirectories)
+            .Where(path => !path.Contains(
+                $"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}",
+                StringComparison.OrdinalIgnoreCase))
+            .Where(path => !path.Contains(
+                $"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}",
+                StringComparison.OrdinalIgnoreCase))
+            .Select(path => new NativeCapabilityTestSourceAnalyzer.NativeCapabilitySource(
+                Path.GetRelativePath(repositoryRoot, path),
+                File.ReadAllText(path)))
+            .ToArray();
+        var violations = NativeCapabilityTestSourceAnalyzer
+            .AnalyzeSources(sources)
+            .Select(violation =>
+                $"{violation.SourcePath}:{violation.Line} "
+                + $"{violation.MethodName}: missing {violation.MissingCapability} capability attribute")
+            .Order(StringComparer.Ordinal)
+            .ToArray();
+
+        Assert.True(
+            violations.Length == 0,
+            "Tests that create symbolic links must declare the exact native capability, "
+            + "including link creation reached through local helper methods:"
             + Environment.NewLine
             + string.Join(Environment.NewLine, violations));
     }

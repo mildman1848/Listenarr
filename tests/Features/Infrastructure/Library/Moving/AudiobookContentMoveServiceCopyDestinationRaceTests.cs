@@ -1,3 +1,4 @@
+using Listenarr.Tests.Common;
 using Microsoft.EntityFrameworkCore;
 
 namespace Listenarr.Tests.Features.Infrastructure.Library.Moving;
@@ -38,7 +39,7 @@ public partial class AudiobookContentMoveServiceTests
         Assert.True(File.Exists(Path.Join(target, "book.m4b")));
     }
 
-    [Fact]
+    [DirectoryLinkFact]
     public async Task MoveContentsAsync_CopyParentReplacedBeforePartialCreation_DoesNotWriteExternalPartial()
     {
         var root = FileService.GetTempDirectory("content-move-copy-parent-race-root");
@@ -98,7 +99,7 @@ public partial class AudiobookContentMoveServiceTests
         }
     }
 
-    [Fact]
+    [DirectoryLinkFact]
     public async Task MoveContentsAsync_DirectCopyParentReplacedAfterHandleOpen_DoesNotCreateExternalTarget()
     {
         var source = FileService.GetTempDirectory("content-move-direct-root-race-source");

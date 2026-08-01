@@ -95,3 +95,23 @@ public sealed class FileLinkTheoryAttribute : TheoryAttribute
         }
     }
 }
+
+public sealed class LinuxDirectoryAndFileLinkFactAttribute : FactAttribute
+{
+    public LinuxDirectoryAndFileLinkFactAttribute()
+    {
+        if (!OperatingSystem.IsLinux())
+        {
+            Skip = "This test requires native Linux behavior.";
+            return;
+        }
+
+        var decision = NativeTestCapabilityPolicy.GetExecutionDecision(
+            NativeTestCapability.DirectorySymbolicLinks,
+            NativeTestCapability.FileSymbolicLinks);
+        if (!decision.ShouldRun)
+        {
+            Skip = decision.SkipReason;
+        }
+    }
+}

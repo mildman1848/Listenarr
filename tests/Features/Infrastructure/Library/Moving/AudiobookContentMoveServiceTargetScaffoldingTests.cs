@@ -1,3 +1,4 @@
+using Listenarr.Tests.Common;
 using Microsoft.EntityFrameworkCore;
 
 namespace Listenarr.Tests.Features.Infrastructure.Library.Moving;
@@ -404,7 +405,7 @@ public partial class AudiobookContentMoveServiceTests
         await AssertScaffoldingNotRemovedAsync(state.Request.JobId);
     }
 
-    [Fact]
+    [DirectoryLinkFact]
     public async Task CleanupTerminalTargetScaffoldingAsync_DanglingQuarantineLink_IsNotTreatedAsRemoved()
     {
         var state = await CreateQuarantinedTargetScaffoldAsync();
@@ -431,7 +432,7 @@ public partial class AudiobookContentMoveServiceTests
         }
     }
 
-    [Fact]
+    [DirectoryLinkFact]
     public async Task CleanupTerminalTargetScaffoldingAsync_LinkInsideQuarantine_PreservesExternalTree()
     {
         var state = await CreateQuarantinedTargetScaffoldAsync();

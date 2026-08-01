@@ -211,7 +211,7 @@ public sealed class ScanFileDiscoveryTests : BaseTests, IDisposable
         Assert.Equal(expected, result);
     }
 
-    [LinuxFact]
+    [DirectoryLinkFact]
     public void Discover_LinkedDirectoryInsideIdentifierBoundary_IsNotTraversed()
     {
 

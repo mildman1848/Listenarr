@@ -290,7 +290,7 @@ namespace Listenarr.Tests.Features.Api.Features.Library
             Assert.Equal(audioPath, retained.Path);
         }
 
-        [LinuxFact]
+        [DirectoryLinkFact]
         public async Task ScanAudiobook_SymlinkedDirectoryOutsideRoot_IsNotTraversed()
         {
 

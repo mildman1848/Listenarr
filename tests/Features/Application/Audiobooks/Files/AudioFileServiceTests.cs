@@ -154,7 +154,7 @@ namespace Listenarr.Tests.Features.Application.Audiobooks.Files
             Assert.Empty(await _audiobookFileRepository.GetByAudiobookIdAsync(_audiobook.Id));
         }
 
-        [LinuxFact]
+        [FileLinkFact]
         public async Task CheckAudiobookFileOwnershipAsync_BrokenSymlinkDestination_FailsClosed()
         {
 
@@ -346,7 +346,7 @@ namespace Listenarr.Tests.Features.Application.Audiobooks.Files
             Assert.Equal(expectedOutcome, result.Outcome);
         }
 
-        [LinuxFact]
+        [DirectoryLinkFact]
         public async Task EnsureAudiobookFileAsync_CaseInsensitiveAliasSymlinkToSibling_FailsClosed()
         {
 
@@ -358,7 +358,7 @@ namespace Listenarr.Tests.Features.Application.Audiobooks.Files
             Assert.False(created);
         }
 
-        [LinuxFact]
+        [DirectoryLinkFact]
         public async Task CheckAudiobookFileOwnershipAsync_CaseInsensitiveAliasSymlinkToSibling_FailsClosed()
         {
 
@@ -370,7 +370,7 @@ namespace Listenarr.Tests.Features.Application.Audiobooks.Files
             Assert.Equal(AudiobookFileOwnershipCheckOutcome.IdentityUnavailable, result.Outcome);
         }
 
-        [LinuxFact]
+        [DirectoryLinkFact]
         public async Task EnsureAudiobookFileAsync_CaseInsensitiveAliasRootSymlinkToSibling_FailsClosed()
         {
 
@@ -382,7 +382,7 @@ namespace Listenarr.Tests.Features.Application.Audiobooks.Files
             Assert.False(created);
         }
 
-        [LinuxFact]
+        [DirectoryLinkFact]
         public async Task CheckAudiobookFileOwnershipAsync_CaseInsensitiveAliasRootSymlinkToSibling_FailsClosed()
         {
 
@@ -458,7 +458,7 @@ namespace Listenarr.Tests.Features.Application.Audiobooks.Files
             Assert.True(created);
         }
 
-        [LinuxFact]
+        [DirectoryLinkFact]
         public async Task EnsureAudiobookFileAsync_SymlinkedDirectoryEscapesBasePath_FailsClosed()
         {
             var basePath = FileService.GetTempDirectory("audio-file-link-base");

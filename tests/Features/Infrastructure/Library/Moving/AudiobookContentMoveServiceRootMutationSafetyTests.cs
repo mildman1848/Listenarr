@@ -4,7 +4,7 @@ namespace Listenarr.Tests.Features.Infrastructure.Library.Moving;
 
 public partial class AudiobookContentMoveServiceTests
 {
-    [Fact]
+    [DirectoryLinkFact]
     public async Task MoveContentsAsync_ExistingLinkedTarget_DoesNotWriteExternalRecoveryMarker()
     {
         var source = FileService.GetTempDirectory("content-move-linked-target-src");
@@ -63,7 +63,7 @@ public partial class AudiobookContentMoveServiceTests
         }
     }
 
-    [Fact]
+    [DirectoryLinkFact]
     public async Task MoveContentsAsync_LinkedSource_PreservesExternalOrphanMarkerWriteFile()
     {
         var externalSource = FileService.GetTempDirectory("content-move-orphan-linked-source-external");
@@ -98,7 +98,7 @@ public partial class AudiobookContentMoveServiceTests
         }
     }
 
-    [Fact]
+    [DirectoryLinkFact]
     public async Task MoveContentsAsync_LinkedTarget_PreservesExternalOrphanMarkerWriteFile()
     {
         var source = FileService.GetTempDirectory("content-move-orphan-linked-target-src");

@@ -255,7 +255,7 @@ public partial class AudiobookContentMoveServiceTests
         }
     }
 
-    [Fact]
+    [DirectoryLinkFact]
     public async Task GetRecoverableMoveAsync_AtomicMarkerWithLinkedTarget_RequiresAttention()
     {
         var source = FileService.GetTempDirectory("content-move-atomic-linked-src");

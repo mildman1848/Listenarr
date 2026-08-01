@@ -88,7 +88,7 @@ public partial class MoveJobProcessorTests
         Assert.Equal("preserve me", await File.ReadAllTextAsync(unownedFile));
     }
 
-    [LinuxFact]
+    [DirectoryLinkFact]
     public async Task ProcessJobAsync_MarkerlessCopyWithLinkedTarget_RequiresAttention()
     {
         var state = await CreateMarkerlessFinalizedCopyStateAsync();

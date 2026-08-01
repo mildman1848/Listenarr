@@ -6,7 +6,7 @@ namespace Listenarr.Tests.Features.Infrastructure.Library.Moving;
 
 public partial class AudiobookContentMoveServiceTests
 {
-    [Fact]
+    [DirectoryLinkFact]
     public async Task MoveContentsAsync_SourceDirectoryLink_BlocksAtomicRename()
     {
         var externalSource = FileService.GetTempDirectory("content-move-root-link-external");
@@ -68,7 +68,7 @@ public partial class AudiobookContentMoveServiceTests
         }
     }
 
-    [Fact]
+    [DirectoryLinkFact]
     public async Task MoveContentsAsync_NestedDirectoryLink_BlocksAtomicRename()
     {
         var source = FileService.GetTempDirectory("content-move-nested-link-src");

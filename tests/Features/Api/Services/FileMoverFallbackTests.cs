@@ -1203,7 +1203,7 @@ namespace Listenarr.Tests.Features.Api.Services
             Assert.Equal("audio", await File.ReadAllTextAsync(Path.Join(source, "book.m4b")));
         }
 
-        [LinuxFact]
+        [DirectoryLinkFact]
         public async Task MoveDirectoryAsync_SymbolicLinkAlias_BlocksCopyDeleteFallback()
         {
 
@@ -1437,7 +1437,7 @@ namespace Listenarr.Tests.Features.Api.Services
             Assert.Equal("audio", await File.ReadAllTextAsync(Path.Join(source, "book.m4b")));
         }
 
-        [LinuxFact]
+        [DirectoryLinkFact]
         public async Task CopyDirectoryAsync_MissingDestinationBelowSymlinkedParent_IsRejected()
         {
 
@@ -1458,7 +1458,7 @@ namespace Listenarr.Tests.Features.Api.Services
             Assert.Equal("audio", await File.ReadAllTextAsync(Path.Join(source, "book.m4b")));
         }
 
-        [LinuxFact]
+        [DirectoryLinkFact]
         public async Task CopyDirectoryAsync_SymbolicLinkAlias_IsRejectedWhereSupported()
         {
 
@@ -1505,7 +1505,7 @@ namespace Listenarr.Tests.Features.Api.Services
             Assert.Equal("content", await File.ReadAllTextAsync(sourceFile));
         }
 
-        [LinuxFact]
+        [FileLinkFact]
         public async Task MoveFileAsync_SymbolicLinkDestinationToSource_PreservesFileContent()
         {
 
@@ -2400,7 +2400,7 @@ namespace Listenarr.Tests.Features.Api.Services
                 SearchOption.AllDirectories));
         }
 
-        [LinuxFact]
+        [DirectoryLinkFact]
         public async Task MoveFileAsync_LinkedParentAliasRetryRecoversSameCrashState()
         {
 
@@ -2439,7 +2439,7 @@ namespace Listenarr.Tests.Features.Api.Services
                 SearchOption.AllDirectories));
         }
 
-        [LinuxFact]
+        [DirectoryLinkFact]
         public async Task MoveFileAsync_LinkedParentReplacedAfterEndpointResolution_BlocksBothTargets()
         {
             var firstDirectory = Path.Join(_root, "linked-race-first");

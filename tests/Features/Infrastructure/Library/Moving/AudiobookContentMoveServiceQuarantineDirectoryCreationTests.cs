@@ -1,10 +1,11 @@
+using Listenarr.Tests.Common;
 using Microsoft.EntityFrameworkCore;
 
 namespace Listenarr.Tests.Features.Infrastructure.Library.Moving;
 
 public partial class AudiobookContentMoveServiceTests
 {
-    [Fact]
+    [DirectoryLinkFact]
     public async Task MoveContentsAsync_QuarantineParentReplacedAfterHandleOpen_DoesNotCreateOutsideBoundary()
     {
         var root = FileService.GetTempDirectory("content-move-quarantine-parent-race-root");
@@ -72,7 +73,7 @@ public partial class AudiobookContentMoveServiceTests
         }
     }
 
-    [Fact]
+    [DirectoryLinkFact]
     public async Task MoveContentsAsync_QuarantineParentReplacedBeforeMarkerCreation_DoesNotWriteOutsideBoundary()
     {
         var root = FileService.GetTempDirectory("content-move-quarantine-marker-race-root");
