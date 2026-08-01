@@ -1,5 +1,4 @@
 using Listenarr.Tests.Common;
-using Xunit.Sdk;
 
 namespace Listenarr.Tests.Features.Infrastructure.Library.Moving;
 
@@ -23,7 +22,7 @@ public sealed class DirectoryCreationParentReplacementTests : BaseTests
         var physicalBoundary = Path.Join(root, "physical");
         var linkedBoundary = Path.Join(root, "linked");
         Directory.CreateDirectory(physicalBoundary);
-        RequireDirectoryLinkCapability(root);
+        RequireDirectoryLinkCapability();
         Directory.CreateSymbolicLink(linkedBoundary, physicalBoundary);
         await AddAuthorizedRootAsync(linkedBoundary, "Linked Boundary Test Root");
 
@@ -66,7 +65,7 @@ public sealed class DirectoryCreationParentReplacementTests : BaseTests
         var physicalBoundary = Path.Join(root, "physical");
         var linkedBoundary = Path.Join(root, "linked");
         Directory.CreateDirectory(physicalBoundary);
-        RequireDirectoryLinkCapability(root);
+        RequireDirectoryLinkCapability();
         Directory.CreateSymbolicLink(linkedBoundary, physicalBoundary);
         await AddAuthorizedRootAsync(linkedBoundary, "Linked Top-Level Test Root");
 
@@ -104,7 +103,7 @@ public sealed class DirectoryCreationParentReplacementTests : BaseTests
         var physicalBoundary = Path.Join(root, "physical");
         var linkedBoundary = Path.Join(root, "linked");
         Directory.CreateDirectory(physicalBoundary);
-        RequireDirectoryLinkCapability(root);
+        RequireDirectoryLinkCapability();
         Directory.CreateSymbolicLink(linkedBoundary, physicalBoundary);
         var fileName = "retire.tmp";
 
@@ -152,7 +151,7 @@ public sealed class DirectoryCreationParentReplacementTests : BaseTests
         var displacedParent = Path.Join(root, "Author.original");
         var external = FileService.GetTempDirectory($"directory-create-parent-race-external-{suffix}");
         Directory.CreateDirectory(parent);
-        RequireDirectoryLinkCapability(root);
+        RequireDirectoryLinkCapability();
         await AddAuthorizedRootAsync(root, "Parent Replacement Test Root");
 
         var destination = Path.Join(parent, "Book");
@@ -219,49 +218,10 @@ public sealed class DirectoryCreationParentReplacementTests : BaseTests
         }
     }
 
-    private static void RequireDirectoryLinkCapability(string root)
+    private static void RequireDirectoryLinkCapability()
     {
-        var targetPath = Path.Join(root, $"link-capability-target-{Guid.NewGuid():N}");
-        var linkPath = Path.Join(root, $"link-capability-link-{Guid.NewGuid():N}");
-        Directory.CreateDirectory(targetPath);
-        try
-        {
-            Directory.CreateSymbolicLink(linkPath, targetPath);
-            var attributes = File.GetAttributes(linkPath);
-            Assert.True(
-                (attributes & FileAttributes.ReparsePoint) != 0,
-                "The directory-link capability probe did not create a reparse point.");
-            Assert.NotNull(Directory.ResolveLinkTarget(linkPath, returnFinalTarget: true));
-        }
-        catch (Exception exception) when (exception is
-            IOException or UnauthorizedAccessException or PlatformNotSupportedException)
-        {
-            var reason =
-                $"Directory symbolic links are unavailable on this test runner: {exception.Message}";
-            if (string.Equals(
-                Environment.GetEnvironmentVariable("LISTENARR_REQUIRE_DIRECTORY_LINK_TESTS"),
-                "true",
-                StringComparison.OrdinalIgnoreCase))
-            {
-                throw new XunitException(reason);
-            }
-
-            throw new XunitException(
-                $"{reason} The capability changed after test discovery.");
-        }
-        finally
-        {
-            TryDeleteDirectoryLink(linkPath);
-            try
-            {
-                Directory.Delete(targetPath);
-            }
-            catch (Exception exception) when (exception is
-                IOException or UnauthorizedAccessException)
-            {
-                // Best effort test cleanup. The per-test temporary root is removed by BaseTests.
-            }
-        }
+        NativeTestCapabilityPolicy.RequireAvailable(
+            NativeTestCapability.DirectorySymbolicLinks);
     }
 
     private static void TryDeleteDirectoryLink(string path)

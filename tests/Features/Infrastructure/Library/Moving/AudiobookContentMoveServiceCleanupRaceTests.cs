@@ -30,17 +30,11 @@ public partial class AudiobookContentMoveServiceTests
         Assert.True(File.Exists(Path.Join(target, "book.m4b")));
     }
 
-    [Fact]
+    [DirectoryLinkFact]
     public async Task MoveContentsAsync_SourceRootReplacedBeforeQuarantineMove_PreservesExternalFile()
     {
-        var capabilityParent = FileService.GetTempDirectory("content-move-cleanup-race-capability");
-        var capabilityTarget = FileService.GetTempDirectory("content-move-cleanup-race-capability-target");
-        var capabilityLink = Path.Join(capabilityParent, "link");
-        Assert.True(
-            TryCreateDirectoryLink(capabilityLink, capabilityTarget),
-            "The required directory link could not be created.");
-
-        TryRemoveDirectoryLink(capabilityLink);
+        NativeTestCapabilityPolicy.RequireAvailable(
+            NativeTestCapability.DirectorySymbolicLinks);
         var source = FileService.GetTempDirectory("content-move-cleanup-race-src");
         await FileService.GetFileAsync(source, "book.m4b", "verified audio");
         var sourceBackup = source + $"-backup-{Guid.NewGuid():N}";
@@ -82,17 +76,11 @@ public partial class AudiobookContentMoveServiceTests
         }
     }
 
-    [Fact]
+    [DirectoryLinkFact]
     public async Task MoveContentsAsync_NestedSourceParentReplacedAfterRevalidation_DoesNotConsumeExternalFile()
     {
-        var capabilityParent = FileService.GetTempDirectory("content-move-nested-cleanup-race-capability");
-        var capabilityTarget = FileService.GetTempDirectory("content-move-nested-cleanup-race-capability-target");
-        var capabilityLink = Path.Join(capabilityParent, "link");
-        Assert.True(
-            TryCreateDirectoryLink(capabilityLink, capabilityTarget),
-            "The required directory link could not be created.");
-
-        TryRemoveDirectoryLink(capabilityLink);
+        NativeTestCapabilityPolicy.RequireAvailable(
+            NativeTestCapability.DirectorySymbolicLinks);
         var source = FileService.GetTempDirectory("content-move-nested-cleanup-race-src");
         var nestedSource = Path.Join(source, "extras");
         Directory.CreateDirectory(nestedSource);
@@ -217,24 +205,8 @@ public partial class AudiobookContentMoveServiceTests
     [FileLinkFact]
     public async Task MoveContentsAsync_TargetFileReplacedBeforeQuarantineDelete_PreservesQuarantineAndExternalFile()
     {
-        var capabilityRoot = FileService.GetTempDirectory("content-move-target-race-capability");
-        var capabilityTarget = await FileService.GetFileAsync(
-            capabilityRoot,
-            "target.bin",
-            "capability");
-        var capabilityLink = Path.Join(capabilityRoot, "link.bin");
-        try
-        {
-            File.CreateSymbolicLink(capabilityLink, capabilityTarget);
-        }
-        catch (Exception exception) when (exception is
-            IOException or UnauthorizedAccessException or PlatformNotSupportedException)
-        {
-            throw new Xunit.Sdk.XunitException(
-                $"This native filesystem regression requires symbolic-link support: {exception.Message}");
-        }
-
-        File.Delete(capabilityLink);
+        NativeTestCapabilityPolicy.RequireAvailable(
+            NativeTestCapability.FileSymbolicLinks);
         var source = FileService.GetTempDirectory("content-move-target-race-src");
         await FileService.GetFileAsync(source, "book.m4b", "verified audio");
         var target = Path.Join(
