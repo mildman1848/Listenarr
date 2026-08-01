@@ -573,16 +573,18 @@ namespace Listenarr.Tests.Features.Infrastructure.Persistence
                     "PathIdentityBoundary", "PathIdentityLookupKey",
                     "PathOwnershipKey", "OwnershipToken", "State",
                     "CreationWorkflow", "CreatedAt", "UpdatedAt",
-                    "ManagedRootFolderId")
+                    "ManagedRootFolderId", "StateReason")
                 VALUES
                     (101, '/removed', '/removed', 'Unix', 'Sensitive',
                      'Sensitive', '/removed', 'lookup-101', NULL,
                      '10110110110110110110110110110110', 'Removed', 'test',
-                     '2026-08-01T00:00:00Z', '2026-08-01T00:00:00Z', 999),
+                     '2026-08-01T00:00:00Z', '2026-08-01T00:00:00Z', 999,
+                     'Legacy diagnostic' || char(10) || 'second line'),
                     (202, '/owned', '/owned', 'Unix', 'Sensitive',
                      'Sensitive', '/owned', 'lookup-202', 'ownership-202',
                      '20220220220220220220220220220220', 'Owned', 'test',
-                     '2026-08-01T00:00:00Z', '2026-08-01T00:00:00Z', 999);
+                     '2026-08-01T00:00:00Z', '2026-08-01T00:00:00Z', 999,
+                     NULL);
                 """);
 
             Assert.Equal(
@@ -601,15 +603,18 @@ namespace Listenarr.Tests.Features.Infrastructure.Persistence
                     SELECT group_concat(
                         "Id" || ':' || "State" || ':'
                         || coalesce("ManagedRootFolderId", '') || ':'
-                        || coalesce("PathOwnershipKey", ''), ',')
+                        || coalesce("PathOwnershipKey", '') || ':'
+                        || coalesce("StateReason", ''), ',')
                     FROM (
                         SELECT "Id", "State", "ManagedRootFolderId",
-                               "PathOwnershipKey"
+                               "PathOwnershipKey", "StateReason"
                         FROM "LibraryDirectoryOwnerships"
                         ORDER BY "Id")
                     """;
                 Assert.Equal(
-                    "101:Removed::,202:Unavailable::",
+                    "101:Removed:::migration:original-managed-root:999\n"
+                    + "Legacy diagnostic\nsecond line,"
+                    + "202:Unavailable:::The persisted managed root no longer exists.",
                     (await verifyCommand.ExecuteScalarAsync())?.ToString());
             }
 

@@ -124,10 +124,13 @@ internal sealed partial class EfLibraryDirectoryOwnershipStore
 internal static class LibraryDirectoryOwnershipRetiredMarkerEvidence
 {
     public static LibraryDirectoryOwnershipRetiredMarker CreateLegacyPending(
-        LibraryDirectoryOwnership ownership)
+        LibraryDirectoryOwnership ownership,
+        int? originalManagedRootFolderId = null)
     {
         ArgumentNullException.ThrowIfNull(ownership);
-        var payloadVersion = ownership.ManagedRootFolderId.HasValue
+        var managedRootFolderId =
+            originalManagedRootFolderId ?? ownership.ManagedRootFolderId;
+        var payloadVersion = managedRootFolderId.HasValue
             && ownership.DirectoryObjectIdentityVersion.HasValue
             && !string.IsNullOrWhiteSpace(ownership.DirectoryObjectIdentity)
                 ? LibraryDirectoryOwnershipMarker.Version
@@ -145,7 +148,7 @@ internal static class LibraryDirectoryOwnershipRetiredMarkerEvidence
             CanonicalPayload = null,
             PayloadSha256 = null,
             PayloadVersion = payloadVersion,
-            OriginalManagedRootFolderId = ownership.ManagedRootFolderId,
+            OriginalManagedRootFolderId = managedRootFolderId,
             DirectoryObjectIdentityVersion =
                 ownership.DirectoryObjectIdentityVersion,
             DirectoryObjectIdentity = ownership.DirectoryObjectIdentity,

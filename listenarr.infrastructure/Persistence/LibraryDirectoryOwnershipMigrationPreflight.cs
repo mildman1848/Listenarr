@@ -4,6 +4,9 @@ namespace Listenarr.Infrastructure.Persistence;
 
 internal static class LibraryDirectoryOwnershipMigrationPreflight
 {
+    internal const string LegacyRemovedRootStateReasonPrefix =
+        "migration:original-managed-root:";
+
     internal const string PredecessorMigrationId =
         "20260726042801_AddDirectoryObjectIdentityAuthorization";
     internal const string ForeignKeyMigrationId =
@@ -27,10 +30,17 @@ internal static class LibraryDirectoryOwnershipMigrationPreflight
         // reference to a root that no longer exists so the upcoming FK rebuild
         // can copy the row. Post-migration reconciliation materializes durable
         // retired-marker evidence before attempting any marker cleanup.
-        var removedRows = context.Database.ExecuteSqlRaw(
-            """
+        var removedRows = context.Database.ExecuteSqlInterpolated(
+            $"""
             UPDATE "LibraryDirectoryOwnerships"
-            SET "ManagedRootFolderId" = NULL
+            SET
+                "StateReason" = {LegacyRemovedRootStateReasonPrefix}
+                    || "ManagedRootFolderId"
+                    || CASE
+                        WHEN "StateReason" IS NULL THEN ''
+                        ELSE char(10) || "StateReason"
+                    END,
+                "ManagedRootFolderId" = NULL
             WHERE "State" = 'Removed'
               AND "ManagedRootFolderId" IS NOT NULL
               AND NOT EXISTS (
@@ -66,5 +76,55 @@ internal static class LibraryDirectoryOwnershipMigrationPreflight
 
         transaction.Commit();
         return removedRows + unavailableRows;
+    }
+
+    internal static string CreateLegacyRemovedRootStateReason(
+        int rootFolderId,
+        string? originalStateReason = null)
+    {
+        if (rootFolderId <= 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(rootFolderId));
+        }
+
+        return LegacyRemovedRootStateReasonPrefix
+            + rootFolderId.ToString(
+                System.Globalization.CultureInfo.InvariantCulture)
+            + (originalStateReason == null
+                ? string.Empty
+                : "\n" + originalStateReason);
+    }
+
+    internal static bool TryReadLegacyRemovedRootState(
+        string? stateReason,
+        out int rootFolderId,
+        out string? originalStateReason)
+    {
+        rootFolderId = default;
+        originalStateReason = null;
+        if (stateReason == null
+            || !stateReason.StartsWith(
+                LegacyRemovedRootStateReasonPrefix,
+                StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        var payload = stateReason[LegacyRemovedRootStateReasonPrefix.Length..];
+        var separator = payload.IndexOf('\n');
+        var rootFolderIdText = separator < 0 ? payload : payload[..separator];
+        if (!int.TryParse(
+                rootFolderIdText,
+                System.Globalization.NumberStyles.None,
+                System.Globalization.CultureInfo.InvariantCulture,
+                out rootFolderId)
+            || rootFolderId <= 0)
+        {
+            rootFolderId = default;
+            return false;
+        }
+
+        originalStateReason = separator < 0 ? null : payload[(separator + 1)..];
+        return true;
     }
 }

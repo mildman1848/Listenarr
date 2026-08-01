@@ -861,6 +861,8 @@ public sealed class EfLibraryDirectoryOwnershipStoreTests : BaseTests
         var ownershipKey = Assert.IsType<string>(ownership.PathOwnershipKey);
         var siblingMarker = LibraryDirectoryOwnershipMarker
             .GetMarkerPaths(ownership)[1];
+        const string originalStateReason =
+            "Legacy cleanup completed.\nPreserve this diagnostic.";
 
         await _store.BeginRemovalAsync(ownership.Id, ownershipKey);
         LibraryDirectoryOwnershipMarker.DeleteInsideMarker(ownership, directory);
@@ -871,6 +873,12 @@ public sealed class EfLibraryDirectoryOwnershipStoreTests : BaseTests
                 candidate => candidate.Id == ownership.Id);
             legacy.State = LibraryDirectoryOwnershipState.Removed;
             legacy.PathOwnershipKey = null;
+            legacy.ManagedRootFolderId = null;
+            legacy.StateReason =
+                LibraryDirectoryOwnershipMigrationPreflight
+                    .CreateLegacyRemovedRootStateReason(
+                        originalRootId,
+                        originalStateReason);
             await db.SaveChangesAsync();
             Assert.Empty(await db.LibraryDirectoryOwnershipRetiredMarkers
                 .Where(marker => marker.OwnershipId == ownership.Id)
@@ -886,6 +894,7 @@ public sealed class EfLibraryDirectoryOwnershipStoreTests : BaseTests
                 .SingleAsync(candidate => candidate.Id == ownership.Id);
             Assert.Equal(LibraryDirectoryOwnershipState.Removed, persisted.State);
             Assert.Null(persisted.ManagedRootFolderId);
+            Assert.Equal(originalStateReason, persisted.StateReason);
             var evidence = await verification
                 .LibraryDirectoryOwnershipRetiredMarkers
                 .SingleAsync(marker => marker.OwnershipId == ownership.Id);
@@ -899,8 +908,24 @@ public sealed class EfLibraryDirectoryOwnershipStoreTests : BaseTests
         }
         Assert.False(File.Exists(siblingMarker));
 
+        await using (var interruptedRace = await _factory.CreateDbContextAsync())
+        {
+            var persisted = await interruptedRace.LibraryDirectoryOwnerships
+                .SingleAsync(candidate => candidate.Id == ownership.Id);
+            persisted.StateReason =
+                LibraryDirectoryOwnershipMigrationPreflight
+                    .CreateLegacyRemovedRootStateReason(
+                        originalRootId,
+                        originalStateReason);
+            await interruptedRace.SaveChangesAsync();
+        }
+
         await CreateOwnershipReconciler().ReconcileAsync();
         await using var repeated = await _factory.CreateDbContextAsync();
+        Assert.Equal(
+            originalStateReason,
+            (await repeated.LibraryDirectoryOwnerships
+                .SingleAsync(candidate => candidate.Id == ownership.Id)).StateReason);
         Assert.Single(await repeated.LibraryDirectoryOwnershipRetiredMarkers
             .Where(marker => marker.OwnershipId == ownership.Id)
             .ToListAsync());

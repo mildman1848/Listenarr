@@ -238,6 +238,10 @@ public sealed class LibraryDirectoryOwnershipReconciler(
             .Where(ownership =>
                 ownership.State == LibraryDirectoryOwnershipState.Removed
                 && (ownership.ManagedRootFolderId != null
+                    || ownership.StateReason != null
+                        && ownership.StateReason.StartsWith(
+                            LibraryDirectoryOwnershipMigrationPreflight
+                                .LegacyRemovedRootStateReasonPrefix)
                     || !db.LibraryDirectoryOwnershipRetiredMarkers.Any(
                         marker => marker.OwnershipId == ownership.Id)))
             .ToListAsync(cancellationToken);
@@ -249,14 +253,26 @@ public sealed class LibraryDirectoryOwnershipReconciler(
                 .AnyAsync(
                     marker => marker.OwnershipId == ownership.Id,
                     cancellationToken);
+            var hasPreservedRoot =
+                LibraryDirectoryOwnershipMigrationPreflight
+                    .TryReadLegacyRemovedRootState(
+                        ownership.StateReason,
+                        out var preservedRootFolderId,
+                        out var originalStateReason);
             if (!evidenceExists)
             {
                 db.LibraryDirectoryOwnershipRetiredMarkers.Add(
                     LibraryDirectoryOwnershipRetiredMarkerEvidence
-                        .CreateLegacyPending(ownership));
+                        .CreateLegacyPending(
+                            ownership,
+                            hasPreservedRoot ? preservedRootFolderId : null));
             }
 
             ownership.ManagedRootFolderId = null;
+            if (hasPreservedRoot)
+            {
+                ownership.StateReason = originalStateReason;
+            }
             try
             {
                 await db.SaveChangesAsync(cancellationToken);
@@ -281,9 +297,25 @@ public sealed class LibraryDirectoryOwnershipReconciler(
                     .SingleAsync(
                         candidate => candidate.Id == ownership.Id,
                         cancellationToken);
+                var requiresOwnershipCleanup =
+                    persistedOwnership.ManagedRootFolderId.HasValue;
                 if (persistedOwnership.ManagedRootFolderId.HasValue)
                 {
                     persistedOwnership.ManagedRootFolderId = null;
+                }
+
+                if (LibraryDirectoryOwnershipMigrationPreflight
+                    .TryReadLegacyRemovedRootState(
+                        persistedOwnership.StateReason,
+                        out _,
+                        out var persistedOriginalStateReason))
+                {
+                    persistedOwnership.StateReason = persistedOriginalStateReason;
+                    requiresOwnershipCleanup = true;
+                }
+
+                if (requiresOwnershipCleanup)
+                {
                     await db.SaveChangesAsync(cancellationToken);
                 }
             }
