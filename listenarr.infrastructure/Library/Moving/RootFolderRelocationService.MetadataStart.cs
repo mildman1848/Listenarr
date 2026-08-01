@@ -134,10 +134,9 @@ public sealed partial class RootFolderRelocationService
             targetResolution.Semantics,
             cancellationToken);
         await db.SaveChangesAsync(cancellationToken);
-        cancellationToken.ThrowIfCancellationRequested();
-        await transaction.CommitAsync(CancellationToken.None);
-
-        var completionToken = CancellationToken.None;
+        var completionToken = RequestCancellationBoundary.EnterNonCancelablePhase(
+            cancellationToken);
+        await transaction.CommitAsync(completionToken);
         AfterMetadataOnlyJournalCommitForTest?.Invoke();
         try
         {

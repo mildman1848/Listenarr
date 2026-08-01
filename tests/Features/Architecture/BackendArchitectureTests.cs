@@ -923,6 +923,39 @@ public sealed class BackendArchitectureTests : BaseTests
         Assert.Empty(violations);
     }
 
+    [Fact]
+    public void NamedNonCancelablePhaseTokens_UseSharedRequestCancellationBoundary()
+    {
+        var roots = new[]
+        {
+            "listenarr.api",
+            "listenarr.application",
+            "listenarr.infrastructure"
+        };
+        var rawPhaseToken = new Regex(
+            @"\b(?:var|CancellationToken)\s+(?:mutationToken|commitToken|completionToken)\s*=\s*CancellationToken\.None\b",
+            RegexOptions.CultureInvariant);
+        var violations = roots
+            .SelectMany(root => Directory.EnumerateFiles(
+                Path.Join(RepositoryRoot, root),
+                "*.cs",
+                SearchOption.AllDirectories))
+            .Where(file => !IsBuildArtifact(file))
+            .Where(file => !file.Contains(
+                $"{Path.DirectorySeparatorChar}Persistence{Path.DirectorySeparatorChar}Migrations{Path.DirectorySeparatorChar}",
+                StringComparison.OrdinalIgnoreCase))
+            .Where(file => rawPhaseToken.IsMatch(File.ReadAllText(file)))
+            .Select(file => Normalize(Path.GetRelativePath(RepositoryRoot, file)))
+            .Order(StringComparer.Ordinal)
+            .ToList();
+
+        Assert.True(
+            violations.Count == 0,
+            "Named request-to-noncancelable phase tokens must be entered through "
+            + "RequestCancellationBoundary.EnterNonCancelablePhase:" + Environment.NewLine
+            + string.Join(Environment.NewLine, violations));
+    }
+
     private static void AssertRequiredConstructorParameter<TParameter>(IEnumerable<Type> serviceTypes)
     {
         foreach (var serviceType in serviceTypes)

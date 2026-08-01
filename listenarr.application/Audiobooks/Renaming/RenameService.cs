@@ -15,6 +15,7 @@
  * You should have received a copy of the GNU Affero General Public License
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
+using Listenarr.Application.Common;
 using Microsoft.Extensions.Logging;
 
 namespace Listenarr.Application.Audiobooks.Renaming
@@ -251,8 +252,7 @@ namespace Listenarr.Application.Audiobooks.Renaming
 
                 // Honor cancellation through complete preflight. Once filesystem mutation
                 // can begin, complete or roll back to a stable persisted state.
-                ct.ThrowIfCancellationRequested();
-                var mutationToken = CancellationToken.None;
+                var mutationToken = RequestCancellationBoundary.EnterNonCancelablePhase(ct);
                 var result = new RenameResult { AudiobookId = operation.AudiobookId };
                 var audiobookRollbackState = CaptureAudiobookPathRollbackState(audiobook);
                 DirectoryRollbackState? directoryRollbackState = null;

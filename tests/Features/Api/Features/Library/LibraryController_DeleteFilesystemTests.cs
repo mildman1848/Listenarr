@@ -781,6 +781,62 @@ namespace Listenarr.Tests.Features.Api.Features.Library
         }
 
         [Fact]
+        public async Task FilesystemDelete_RequestCancelledAfterAuthorizationBeforeMutation_DoesNotDelete()
+        {
+            var tempRoot = FileService.GetTempDirectory("listenarr-delete-pre-mutation-cancel");
+            var bookFolder = Path.Join(tempRoot, "Book");
+            var audioPath = Path.Join(bookFolder, "book.mp3");
+            Directory.CreateDirectory(bookFolder);
+            await File.WriteAllTextAsync(audioPath, "audio");
+            await AddAuthorizedRootAsync(new RootFolder
+            {
+                Name = "Library",
+                Path = tempRoot,
+                IsDefault = true
+            });
+            var ownershipStore = _provider.GetRequiredService<ILibraryDirectoryOwnershipStore>();
+            var ownership = await ownershipStore.RecordCreatedAsync(
+                new LibraryDirectoryOwnershipClaim(
+                    bookFolder,
+                    FileSystemPathSemantics.CurrentHostDefault,
+                    "test-fixture"));
+            var audiobook = await _audiobookRepository.AddAsync(new AudiobookBuilder()
+                .WithTitle("Pre Mutation Cancellation")
+                .WithBasePath(bookFolder)
+                .WithFilePath(audioPath)
+                .Build());
+            await _audiobookFileRepository.AddAsync(new AudiobookFileBuilder()
+                .WithAudiobook(audiobook)
+                .WithPath(audioPath)
+                .Build());
+            using var cancellation = new CancellationTokenSource();
+            var cancelled = false;
+            using var hook = ExclusiveDirectoryCreator.PushBeforeOpenParentHook(path =>
+            {
+                if (cancelled || !string.Equals(path, bookFolder, StringComparison.Ordinal))
+                {
+                    return;
+                }
+
+                cancelled = true;
+                cancellation.Cancel();
+            });
+
+            var service = _provider.GetRequiredService<IAudiobookFilesystemDeleteService>();
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+                service.DeleteAsync(audiobook, deleteFolder: true, cancellation.Token));
+
+            Assert.True(cancelled);
+            Assert.True(File.Exists(audioPath));
+            Assert.True(Directory.Exists(bookFolder));
+            var factory = _provider.GetRequiredService<IDbContextFactory<ListenArrDbContext>>();
+            await using var db = await factory.CreateDbContextAsync();
+            var persisted = await db.LibraryDirectoryOwnerships.AsNoTracking()
+                .SingleAsync(candidate => candidate.Id == ownership.Id);
+            Assert.Equal(LibraryDirectoryOwnershipState.Owned, persisted.State);
+        }
+
+        [Fact]
         public async Task FilesystemDelete_RequestCancelledAfterMutationBeginsCompletesOwnershipRetirement()
         {
             var tempRoot = FileService.GetTempDirectory("listenarr-delete-post-mutation-cancel");

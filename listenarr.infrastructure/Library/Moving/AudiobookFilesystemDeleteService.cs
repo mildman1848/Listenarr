@@ -85,7 +85,6 @@ namespace Listenarr.Infrastructure.Library.Moving
             if (deleteTarget != null)
             {
                 cancellationToken.ThrowIfCancellationRequested();
-                var mutationToken = CancellationToken.None;
                 var targetAuthorization = await AuthorizeDeleteTargetAsync(
                     deleteTarget,
                     result,
@@ -96,8 +95,15 @@ namespace Listenarr.Infrastructure.Library.Moving
                 }
 
                 bool contentsDeleted;
+                CancellationToken mutationToken;
                 using (targetAuthorization)
                 {
+                    // Authorization can perform async persistence and filesystem identity work.
+                    // Request cancellation remains authoritative until that preflight finishes;
+                    // only the destructive mutation and its durable ownership cleanup are
+                    // noncancelable once this final fence has been crossed.
+                    mutationToken = RequestCancellationBoundary.EnterNonCancelablePhase(
+                        cancellationToken);
                     contentsDeleted = TryDeleteFolderContents(
                         deleteTarget,
                         targetAuthorization,
@@ -121,8 +127,8 @@ namespace Listenarr.Infrastructure.Library.Moving
                 var allowedRoots = protectedRoots
                     .Concat(string.IsNullOrWhiteSpace(fallbackFolderRoot) ? [] : [fallbackFolderRoot])
                     .ToList();
-                cancellationToken.ThrowIfCancellationRequested();
-                var mutationToken = CancellationToken.None;
+                var mutationToken = RequestCancellationBoundary.EnterNonCancelablePhase(
+                    cancellationToken);
                 foreach (var trackedFilePath in trackedFilePaths)
                 {
                     TryDeleteFile(trackedFilePath, result, allowedRoots);

@@ -138,8 +138,7 @@ namespace Listenarr.Application.Audiobooks.Jobs
                 job.SetSourceIdentity(command.SourceIdentity);
                 job.SetTargetIdentity(command.TargetIdentity);
 
-                token.ThrowIfCancellationRequested();
-                var commitToken = CancellationToken.None;
+                var commitToken = RequestCancellationBoundary.EnterNonCancelablePhase(token);
                 try
                 {
                     await _persistence.AddAsync(job, commitToken);
