@@ -31,6 +31,127 @@ namespace Listenarr.Tests.Features.Infrastructure.DependencyInjection;
 public sealed class InfrastructureStartupCompositionExtensionsTests : BaseTests
 {
     [Fact]
+    [Trait("Scenario", "CanaryDataPreflight")]
+    public void ApplyListenarrDatabaseMigrations_NormalizesLegacyCanaryDataBeforeConstraints()
+    {
+        using var connection = new SqliteConnection("DataSource=:memory:");
+        connection.Open();
+        var baselineOptions = new DbContextOptionsBuilder<ListenArrDbContext>()
+            .UseSqlite(connection, sqlite =>
+                sqlite.MigrationsAssembly(
+                    typeof(ListenArrDbContext).Assembly.GetName().Name))
+            .Options;
+        var moveJobId = Guid.NewGuid();
+        using (var baseline = new ListenArrDbContext(baselineOptions))
+        {
+            baseline.GetService<IMigrator>().Migrate(
+                "20260621002226_AddApplicationSettingsConcurrency");
+            baseline.Database.ExecuteSqlRaw(
+                """
+                INSERT INTO "RootFolders" ("Id", "Name", "Path", "IsDefault")
+                VALUES (10, 'First', '/library/first', 1),
+                       (20, 'Second', '/library/second', 1);
+                """);
+            baseline.Database.ExecuteSqlInterpolated(
+                $"""
+                INSERT INTO "MoveJobs" (
+                    "Id", "AudiobookId", "RequestedPath", "SourcePath",
+                    "EnqueuedAt", "Status", "AttemptCount", "ActiveDeduplicationKey")
+                VALUES (
+                    {moveJobId}, {501}, {"/library/target"}, {"/library/source"},
+                    {DateTime.UtcNow}, {"Processing"}, {0}, {"legacy-canary-key"});
+                """);
+            baseline.Database.ExecuteSqlRaw(
+                """
+                INSERT INTO "Audiobooks" ("Id", "Explicit", "Abridged", "Monitored")
+                VALUES (601, 0, 0, 1);
+                INSERT INTO "AudiobookFiles" ("AudiobookId", "Path", "CreatedAt")
+                VALUES (601, '/library/legacy.m4b', CURRENT_TIMESTAMP);
+                """);
+        }
+
+        var services = new ServiceCollection();
+        services.AddDbContextFactory<ListenArrDbContext>(options =>
+            options
+                .UseSqlite(connection, sqlite =>
+                    sqlite.MigrationsAssembly(
+                        typeof(ListenArrDbContext).Assembly.GetName().Name))
+                .ConfigureWarnings(warnings => warnings.Throw(
+                    RelationalEventId.NonTransactionalMigrationOperationWarning)));
+        using var provider = services.BuildServiceProvider();
+
+        provider.ApplyListenarrDatabaseMigrations();
+
+        using var verification = provider
+            .GetRequiredService<IDbContextFactory<ListenArrDbContext>>()
+            .CreateDbContext();
+        var moveJob = verification.MoveJobs.AsNoTracking().Single(job => job.Id == moveJobId);
+        Assert.Equal(MoveJobStatus.Running, moveJob.Status);
+        Assert.Equal(1, moveJob.IdentityKeyVersion);
+        Assert.Equal(
+            $"legacy:{moveJobId.ToString().ToUpperInvariant()}",
+            moveJob.ActiveDeduplicationKey);
+        Assert.Equal([10], verification.RootFolders
+            .AsNoTracking()
+            .Where(root => root.IsDefault)
+            .Select(root => root.Id)
+            .ToList());
+        var audiobookFile = verification.AudiobookFiles.AsNoTracking().Single();
+        Assert.Equal(FileSystemCaseSensitivity.Unknown, audiobookFile.PathCaseSensitivity);
+        Assert.Equal(FileSystemCaseSensitivityMode.Auto, audiobookFile.PathCaseSensitivityMode);
+        Assert.Equal(1, audiobookFile.PathIdentityVersion);
+        Assert.Equal(PathIdentityState.Unavailable, audiobookFile.PathIdentityState);
+        Assert.Throws<SqliteException>(() => verification.Database.ExecuteSqlRaw(
+            "UPDATE \"RootFolders\" SET \"IsDefault\" = 1 WHERE \"Id\" = 20"));
+    }
+
+    [Fact]
+    [Trait("Scenario", "RepeatedMigrationStartup")]
+    public void ApplyListenarrDatabaseMigrations_RepeatedStartupPreservesCurrentMoveIdentity()
+    {
+        using var connection = new SqliteConnection("DataSource=:memory:");
+        connection.Open();
+        var services = new ServiceCollection();
+        services.AddDbContextFactory<ListenArrDbContext>(options =>
+            options.UseSqlite(connection, sqlite =>
+                sqlite.MigrationsAssembly(
+                    typeof(ListenArrDbContext).Assembly.GetName().Name)));
+        using var provider = services.BuildServiceProvider();
+
+        provider.ApplyListenarrDatabaseMigrations();
+
+        var moveJobId = Guid.NewGuid();
+        const string currentKey = "v5:current-startup-regression";
+        using (var setup = provider
+            .GetRequiredService<IDbContextFactory<ListenArrDbContext>>()
+            .CreateDbContext())
+        {
+            setup.MoveJobs.Add(new MoveJob
+            {
+                Id = moveJobId,
+                AudiobookId = 701,
+                RequestedPath = "/library/current-target",
+                SourcePath = "/library/current-source",
+                EnqueuedAt = DateTime.UtcNow,
+                Status = MoveJobStatus.Running,
+                IdentityKeyVersion = MoveManifestIdentity.Version,
+                ActiveDeduplicationKey = currentKey
+            });
+            setup.SaveChanges();
+        }
+
+        provider.ApplyListenarrDatabaseMigrations();
+
+        using var verification = provider
+            .GetRequiredService<IDbContextFactory<ListenArrDbContext>>()
+            .CreateDbContext();
+        var moveJob = verification.MoveJobs.AsNoTracking().Single(job => job.Id == moveJobId);
+        Assert.Equal(MoveJobStatus.Running, moveJob.Status);
+        Assert.Equal(MoveManifestIdentity.Version, moveJob.IdentityKeyVersion);
+        Assert.Equal(currentKey, moveJob.ActiveDeduplicationKey);
+    }
+
+    [Fact]
     [Trait("Scenario", "LegacyOwnershipForeignKeyMigration")]
     public void ApplyListenarrDatabaseMigrations_RepairsLegacyOwnershipBeforeForeignKey()
     {

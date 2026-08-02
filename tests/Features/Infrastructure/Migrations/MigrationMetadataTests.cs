@@ -45,22 +45,6 @@ namespace Listenarr.Tests.Features.Infrastructure.Migrations
         }
 
         [Fact]
-        public void ReconcileDurableMoveJobs_DownResetsRetryScheduledDeduplicationKeys()
-        {
-            var migration = new ReconcileDurableMoveJobs();
-            var builder = new MigrationBuilder("Microsoft.EntityFrameworkCore.Sqlite");
-            typeof(ReconcileDurableMoveJobs)
-                .GetMethod("Down", BindingFlags.Instance | BindingFlags.NonPublic)!
-                .Invoke(migration, [builder]);
-
-            var sql = string.Join(
-                Environment.NewLine,
-                builder.Operations.OfType<SqlOperation>().Select(operation => operation.Sql));
-
-            Assert.Contains("'Queued', 'Processing', 'RetryScheduled'", sql, StringComparison.Ordinal);
-        }
-
-        [Fact]
         public void AddLibraryDirectoryOwnershipRootForeignKeyMigration_IsDiscoverableByEf()
         {
             var attribute = typeof(AddLibraryDirectoryOwnershipRootForeignKey)

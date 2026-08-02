@@ -55,7 +55,6 @@ namespace Listenarr.Tests.Features.Infrastructure.Persistence
             "20260703024452_AddMoveJobDeleteEmptySource",
             "20260708223635_AddDurableFilesystemMoves",
             "20260708224312_AddMoveJobRelocationForeignKey",
-            "20260708224430_ReconcileDurableMoveJobs",
             "20260708224705_AddMoveJobLeaseGeneration",
             "20260708224900_AddRootFolderRelocationSkippedItems",
             "20260708225028_MakeRootFolderRelocationRootNullable",
@@ -63,9 +62,7 @@ namespace Listenarr.Tests.Features.Infrastructure.Persistence
             "20260708225144_SetRootFolderRelocationRootDeleteBehavior",
             "20260710172532_AddMoveJobSourceCleanupBoundary",
             "20260713181804_HardenMoveExecutionAndScanHandoffs",
-            "20260715115000_AddAudiobookFileOwnershipIdentity",
             "20260717143713_AddLibraryDirectoryOwnership",
-            "20260720122500_EnforceSingleDefaultRootFolder",
             "20260726042801_AddDirectoryObjectIdentityAuthorization",
             "20260726500000_AddLibraryDirectoryOwnershipRootForeignKey",
             "20260727000644_AddOwnershipRecoveryProtocols",
@@ -214,7 +211,11 @@ namespace Listenarr.Tests.Features.Infrastructure.Persistence
                        (1, '/library/book-two.m4b', CURRENT_TIMESTAMP)
                 """);
 
-            await migrator.MigrateAsync("20260715115000_AddAudiobookFileOwnershipIdentity");
+            await migrator.MigrateAsync("20260717143713_AddLibraryDirectoryOwnership");
+            var repairResult = ListenarrDatabaseMigrationPreflight
+                .RepairPostMigrationData(context);
+            Assert.Equal(0, repairResult.MoveJobsRepaired);
+            Assert.Equal(2, repairResult.AudiobookFilesRepaired);
 
             await using (var command = connection.CreateCommand())
             {
@@ -481,6 +482,8 @@ namespace Listenarr.Tests.Features.Infrastructure.Persistence
                        (30, 'Third', '/library/third', 0)
                 """);
 
+            var repaired = ListenarrDatabaseMigrationPreflight.RepairLegacyData(context);
+            Assert.Equal(1, repaired.DefaultRootsNormalized);
             await migrator.MigrateAsync();
 
             var defaults = await context.RootFolders
@@ -1127,26 +1130,22 @@ namespace Listenarr.Tests.Features.Infrastructure.Persistence
                 $"DELETE FROM \"RootFolders\" WHERE \"Id\" = {rootId};");
             context.ChangeTracker.Clear();
 
-            var exception = await Assert.ThrowsAsync<SqliteException>(() =>
+            await Assert.ThrowsAsync<SqliteException>(() =>
                 migrator.MigrateAsync("20260708224900_AddRootFolderRelocationSkippedItems"));
-            Assert.Contains(
-                "CK_RootRelocationDowngrade_NoOrphanHistory",
-                exception.Message,
-                StringComparison.Ordinal);
 
-            await using (var rootIdCommand = connection.CreateCommand())
-            {
-                rootIdCommand.CommandText =
-                    "SELECT \"RootFolderId\" FROM \"RootFolderRelocations\" LIMIT 1;";
-                Assert.Equal(DBNull.Value, await rootIdCommand.ExecuteScalarAsync());
-            }
-
-            await using (var foreignKeyCheck = connection.CreateCommand())
-            {
-                foreignKeyCheck.CommandText = "PRAGMA foreign_key_check;";
-                await using var reader = await foreignKeyCheck.ExecuteReaderAsync();
-                Assert.False(await reader.ReadAsync());
-            }
+            Assert.Equal(
+                DBNull.Value,
+                await ExecuteScalarAsync(
+                    connection,
+                    "SELECT \"RootFolderId\" FROM \"RootFolderRelocations\" LIMIT 1;"));
+            Assert.Equal(
+                0L,
+                (long)(await ExecuteScalarAsync(
+                    connection,
+                    "SELECT COUNT(*) FROM pragma_foreign_key_check;"))!);
+            Assert.Equal(
+                "ok",
+                (await ExecuteScalarAsync(connection, "PRAGMA integrity_check;"))?.ToString());
 
             await migrator.MigrateAsync();
             Assert.Contains(

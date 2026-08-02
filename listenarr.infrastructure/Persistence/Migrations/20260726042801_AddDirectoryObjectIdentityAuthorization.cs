@@ -77,6 +77,13 @@ namespace Listenarr.Infrastructure.Persistence.Migrations
                 nullable: true);
 
             migrationBuilder.CreateIndex(
+                name: "IX_RootFolders_SingleDefault",
+                table: "RootFolders",
+                column: "IsDefault",
+                unique: true,
+                filter: "\"IsDefault\" = 1");
+
+            migrationBuilder.CreateIndex(
                 name: "IX_LibraryDirectoryOwnerships_ManagedRootFolderId",
                 table: "LibraryDirectoryOwnerships",
                 column: "ManagedRootFolderId");
@@ -85,6 +92,10 @@ namespace Listenarr.Infrastructure.Persistence.Migrations
         /// <inheritdoc />
         protected override void Down(MigrationBuilder migrationBuilder)
         {
+            migrationBuilder.DropIndex(
+                name: "IX_RootFolders_SingleDefault",
+                table: "RootFolders");
+
             migrationBuilder.DropIndex(
                 name: "IX_LibraryDirectoryOwnerships_ManagedRootFolderId",
                 table: "LibraryDirectoryOwnerships");

@@ -62,6 +62,15 @@ public static class InfrastructureStartupCompositionExtensions
             using var migrateScope = serviceProvider.CreateScope();
             var factory = migrateScope.ServiceProvider.GetRequiredService<IDbContextFactory<ListenArrDbContext>>();
             using var ctx = factory.CreateDbContext();
+            var repairedLegacyData =
+                ListenarrDatabaseMigrationPreflight.RepairLegacyData(ctx);
+            if (repairedLegacyData.DefaultRootsNormalized > 0)
+            {
+                Log.Logger.Warning(
+                    "[Startup] Normalized {Count} duplicate default root folder row(s) before applying the single-default constraint",
+                    repairedLegacyData.DefaultRootsNormalized);
+            }
+
             var repairedOwnershipReferences =
                 LibraryDirectoryOwnershipMigrationPreflight
                     .RepairLegacyForeignKeyReferences(ctx);
@@ -73,6 +82,20 @@ public static class InfrastructureStartupCompositionExtensions
             }
 
             ctx.Database.Migrate();
+            var repairedPostMigrationData =
+                ListenarrDatabaseMigrationPreflight.RepairPostMigrationData(ctx);
+            if (repairedPostMigrationData.MoveJobsRepaired > 0)
+            {
+                Log.Logger.Warning(
+                    "[Startup] Normalized {Count} legacy move job row(s) after applying durable move migrations",
+                    repairedPostMigrationData.MoveJobsRepaired);
+            }
+            if (repairedPostMigrationData.AudiobookFilesRepaired > 0)
+            {
+                Log.Logger.Warning(
+                    "[Startup] Normalized {Count} legacy audiobook file identity row(s) after applying ownership schema migrations",
+                    repairedPostMigrationData.AudiobookFilesRepaired);
+            }
             Log.Logger.Information("[Startup] EF Core migrations applied successfully");
         }
         catch (Exception ex) when (ex is not OperationCanceledException && ex is not OutOfMemoryException && ex is not StackOverflowException)
