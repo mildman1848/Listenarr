@@ -1,4 +1,5 @@
 using System.ComponentModel;
+using Listenarr.Domain.Common;
 
 namespace Listenarr.Infrastructure.FileSystem;
 
@@ -57,10 +58,17 @@ internal sealed class DirectoryObjectIdentityResolver(
     {
         cancellationToken.ThrowIfCancellationRequested();
         ArgumentException.ThrowIfNullOrWhiteSpace(path);
+        if (!FileSystemPathIdentity.TryCanonicalizeStoredAbsolutePathForHost(
+                path,
+                out var canonicalPath,
+                out var pathReason))
+        {
+            return DirectoryObjectIdentityResolution.Unavailable(pathReason);
+        }
 
         try
         {
-            using var anchor = PinnedDirectoryCreation.OpenPinnedBoundary(path);
+            using var anchor = PinnedDirectoryCreation.OpenPinnedBoundary(canonicalPath);
             var nativeIdentity = _nativeIdentityResolver(anchor);
             if (!anchor.VisiblePathMatches())
             {

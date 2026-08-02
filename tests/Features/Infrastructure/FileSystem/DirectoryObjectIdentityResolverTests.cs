@@ -109,6 +109,46 @@ public sealed class DirectoryObjectIdentityResolverTests : BaseTests
     }
 
     [Fact]
+    public async Task ResolveAsync_ForeignPersistedSyntax_FailsClosedBeforeNativeProbeOrEnrollment()
+    {
+        var directory = FileService.GetTempDirectory("directory-object-identity-foreign-syntax");
+        var nativeProbeCount = 0;
+        var resolver = new DirectoryObjectIdentityResolver(
+            nativeIdentityResolver: _ =>
+            {
+                nativeProbeCount++;
+                return "should-not-be-probed";
+            });
+        var foreignPath = OperatingSystem.IsWindows()
+            ? "/" + Path.GetRelativePath(Path.GetPathRoot(directory)!, directory)
+                .Replace('\\', '/')
+            : @"C:\Listenarr\foreign-root";
+        var expectedForeignSyntax = OperatingSystem.IsWindows()
+            ? FileSystemPathSyntax.Unix
+            : FileSystemPathSyntax.Windows;
+
+        var resolution = await resolver.ResolveAsync(foreignPath);
+        var existing = await resolver.ResolveExistingAsync(foreignPath);
+        var legacy = await resolver.UpgradeLegacyAsync(
+            foreignPath,
+            legacyVersion: 1,
+            legacyValue: "persisted-foreign-native-identity");
+
+        foreach (var candidate in new[] { resolution, existing, legacy })
+        {
+            Assert.False(candidate.IsAvailable);
+            Assert.Contains(
+                $"{expectedForeignSyntax} filesystem syntax",
+                candidate.UnavailableReason,
+                StringComparison.Ordinal);
+        }
+        Assert.Equal(0, nativeProbeCount);
+        Assert.False(File.Exists(Path.Join(
+            directory,
+            ManagedDirectoryEnrollment.FileName)));
+    }
+
+    [Fact]
     public async Task ResolveAsync_ReturnsUnavailableForMissingDirectory()
     {
         var directory = Path.Join(
