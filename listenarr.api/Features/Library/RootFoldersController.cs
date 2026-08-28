@@ -338,6 +338,14 @@ namespace Listenarr.Api.Features.Library
                     message = "The root folder confirmation request is invalid."
                 });
             }
+            catch (PlatformNotSupportedException)
+            {
+                return Conflict(new
+                {
+                    message = "The current storage does not expose the durable physical identity required to confirm this folder for filesystem mutation.",
+                    code = "root_folder_identity_unsupported"
+                });
+            }
             catch (InvalidOperationException)
             {
                 return Conflict(new

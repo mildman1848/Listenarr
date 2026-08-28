@@ -2069,6 +2069,41 @@ namespace Listenarr.Tests.Features.Api.Features.Library
         }
 
         [Fact]
+        public async Task ConfirmCurrentFolder_IdentityUnsupported_ReturnsSpecificConflictCode()
+        {
+            var path = FileUtils.GetAbsolutePath("confirm-unsupported-root");
+            const string confirmationToken = "token";
+            var svc = new FakeService();
+            var confirmationService = new Mock<IRootFolderStorageConfirmationService>(MockBehavior.Strict);
+            confirmationService
+                .Setup(service => service.ConfirmCurrentFolderAsync(
+                    1,
+                    path,
+                    confirmationToken,
+                    It.IsAny<CancellationToken>()))
+                .ThrowsAsync(new PlatformNotSupportedException(
+                    "No durable filesystem identity is available."));
+            var db = CreateDb();
+            var controller = new RootFoldersController(
+                svc,
+                _fakeQueue,
+                new EfAudiobookFileRepository(db),
+                new AudiobookRepository(db),
+                new LocalFileSystem(),
+                storageConfirmationService: confirmationService.Object);
+
+            var result = await controller.ConfirmCurrentFolder(
+                1,
+                new RootFolderConfirmationRequest(path, confirmationToken),
+                CancellationToken.None);
+
+            var conflict = Assert.IsType<Microsoft.AspNetCore.Mvc.ConflictObjectResult>(result);
+            var json = JsonSerializer.Serialize(conflict.Value);
+            Assert.Contains("root_folder_identity_unsupported", json, StringComparison.Ordinal);
+            confirmationService.VerifyAll();
+        }
+
+        [Fact]
         public async Task ConfirmCurrentFolder_BlockedState_ReturnsConflictCode()
         {
             var path = FileUtils.GetAbsolutePath("confirm-blocked-root");
