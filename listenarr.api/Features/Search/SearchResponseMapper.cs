@@ -57,6 +57,7 @@ public sealed class SearchResponseMapper
             r.Series,
             r.SeriesNumber,
             r.ProductUrl,
+            Region = ResolveSearchResultRegion(r),
             r.PublishedDate,
             r.PublishYear,
             r.Genres,
@@ -66,6 +67,52 @@ public sealed class SearchResponseMapper
             r.SourceLink,
             r.Score
         }).Cast<object>().ToList() ?? new List<object>();
+    }
+
+    private static string? ResolveSearchResultRegion(SearchResult r)
+    {
+        var normalized = AudiobookIdentifierNormalizer.NormalizeRegion(r.Region);
+        if (!string.IsNullOrWhiteSpace(normalized))
+        {
+            return normalized;
+        }
+
+        return InferAudibleRegionFromUrl(r.ProductUrl) ?? InferAudibleRegionFromUrl(r.SourceLink);
+    }
+
+    private static string? InferAudibleRegionFromUrl(string? url)
+    {
+        if (string.IsNullOrWhiteSpace(url) || !Uri.TryCreate(url, UriKind.Absolute, out var uri))
+        {
+            return null;
+        }
+
+        var host = uri.Host.Trim().ToLowerInvariant();
+        if (host.StartsWith("www.", StringComparison.Ordinal))
+        {
+            host = host[4..];
+        }
+
+        if (!host.StartsWith("audible.", StringComparison.Ordinal))
+        {
+            return null;
+        }
+
+        var suffix = host["audible.".Length..];
+        return suffix switch
+        {
+            "de" => "de",
+            "fr" => "fr",
+            "es" => "es",
+            "it" => "it",
+            "ca" => "ca",
+            "com.au" => "au",
+            "co.uk" => "uk",
+            "co.jp" => "jp",
+            "in" => "in",
+            "com" => "us",
+            _ => null
+        };
     }
 
     public void SanitizeResultForPublicApi(SearchResult r, string region = "us")

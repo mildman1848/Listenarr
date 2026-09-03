@@ -78,6 +78,39 @@ namespace Listenarr.Tests.Features.Infrastructure.Metadata.Parsing
             Assert.Equal("B0DQR9D4YG", result.Asin);
         }
 
+        [Theory]
+        [InlineData("Vor aller Augen [B0FPXP67JW]", "B0FPXP67JW")]
+        [InlineData("Feuermond [B0B1QRFPHB]/Feuermond: Die drei ???, Folge 125 [B0B1QRFPHB].m4b", "B0B1QRFPHB")]
+        [InlineData(@"C:\Books\Adrenalin [B09VPYXHRC]\book.m4b", "B09VPYXHRC")]
+        [InlineData("Achtsam morden [383714710X]", null)] // ISBN-like, not an Audible ASIN
+        [InlineData("Plain Title Without Identifier", null)]
+        [InlineData("Series [Stormlight 1]", null)] // bracket content is not an ASIN
+        [InlineData("", null)]
+        [InlineData("Vor aller Augen B0FPXP67JW", "B0FPXP67JW")] // unbracketed folder token
+        [InlineData("B0FPXP67JW - Vor aller Augen", "B0FPXP67JW")] // leading token with dash separator
+        [InlineData("/books/B0FPXP67JW/book.m4b", "B0FPXP67JW")] // ASIN as folder name itself
+        [InlineData("/books/Feuermond/Feuermond B0B1QRFPHB.m4b", "B0B1QRFPHB")] // unbracketed file token
+        [InlineData("/books/Feuermond B0FPXP67JW/file.m4b", "B0FPXP67JW")] // unbracketed folder segment
+        [InlineData("Achtsam morden 383714710X", null)] // unbracketed ISBN-like token must not match
+        public void ExtractAsinFromPath_StrictAsinAnywhereInPath(string path, string? expected)
+        {
+            Assert.Equal(expected, PathMetadataParser.ExtractAsinFromPath(path));
+        }
+
+        [Fact]
+        public void ExtractAsinFromPath_PrefersFirstOccurrence()
+        {
+            var path = "/books/Series [B0AAAAAAA1]/Title [B0BBBBBBB2].m4b";
+            Assert.Equal("B0AAAAAAA1", PathMetadataParser.ExtractAsinFromPath(path));
+        }
+
+        [Fact]
+        public void ExtractAsinFromPath_TrailingSeparator_TreatedAsFolder()
+        {
+            var path = "/books/Vor aller Augen [B0FPXP67JW]/";
+            Assert.Equal("B0FPXP67JW", PathMetadataParser.ExtractAsinFromPath(path));
+        }
+
         [Fact]
         public void ParseEmbeddedTagsFromFfprobeJson_ParsesMp3UserTextAsinTag()
         {

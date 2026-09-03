@@ -109,6 +109,7 @@ namespace Listenarr.Domain.Search
         public string? Series { get; set; }
         public string? SeriesNumber { get; set; }
         public string? ProductUrl { get; set; } // Direct link to Amazon/Audible product page
+        public string? Region { get; set; } // Market/region used for Audible/Amazon identifiers
         public List<string>? Genres { get; set; } // Genres from metadata sources (e.g., Audible)
         // Indicates this result had a successful full metadata enrichment pass
         public bool IsEnriched { get; set; }
@@ -167,6 +168,7 @@ namespace Listenarr.Domain.Search
         public string? Series { get; set; }
         public string? SeriesNumber { get; set; }
         public string? ProductUrl { get; set; } // Direct link to Amazon/Audible product page
+        public string? Region { get; set; } // Market/region used for Audible/Amazon identifiers
         public List<string>? Genres { get; set; } // Genres from metadata sources (e.g., Audible)
         // Indicates this result had a successful full metadata enrichment pass (Audible product scrape)
         public bool IsEnriched { get; set; }

@@ -290,6 +290,27 @@ namespace Listenarr.Infrastructure.Metadata.Parsing
             return match.Success ? match.Value.ToUpperInvariant() : null;
         }
 
+        /// <summary>
+        /// Extracts a strict Audible ASIN (B0-prefixed, 10 chars) from a file path.
+        /// Both the full folder name and the file name are scanned for a standalone
+        /// B0 identifier, so "Title [B0XXXXXXXX]", "Title B0XXXXXXXX" and
+        /// "B0XXXXXXXX - Title" all work. Word boundaries plus the strict B0 prefix
+        /// keep ISBN-like tokens (e.g. 383714710X) and plain words from matching.
+        /// Returns null when no strict ASIN is present, so callers can keep their
+        /// title/author fallback.
+        /// </summary>
+        public static string? ExtractAsinFromPath(string path)
+        {
+            if (string.IsNullOrWhiteSpace(path)) return null;
+
+            var match = Regex.Match(
+                path,
+                @"\bB0[A-Z0-9]{8}\b",
+                RegexOptions.IgnoreCase);
+
+            return match.Success ? match.Value.ToUpperInvariant() : null;
+        }
+
         private static void TryReadSidecar(string folder, string filename, Action<string> assign)
         {
             try

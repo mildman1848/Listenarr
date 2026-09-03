@@ -119,5 +119,40 @@ namespace Listenarr.Tests.Features.Api.Services
             Assert.Contains(groups, group => group.Single() == fileA);
             Assert.Contains(groups, group => group.Single() == fileB);
         }
+        [Fact]
+        public void FilterUntrackedFiles_ExcludesRetainedHardlinkSourceByPhysicalIdentity()
+        {
+            var semantics = FileSystemPathSemantics.CurrentHostDefault;
+            var trackedPath = Path.Join(Path.GetTempPath(), "library", "existing.m4b");
+            var retainedSource = Path.Join(Path.GetTempPath(), "audible", "same-hardlink.m4b");
+            var newSource = Path.Join(Path.GetTempPath(), "audible", "new-book.m4b");
+            var samePathCandidate = trackedPath;
+            var trackedNormalized = new HashSet<string>(
+                [NormalizeForTest(trackedPath, semantics)],
+                semantics.Comparer);
+            var trackedPhysical = new HashSet<string>(StringComparer.Ordinal)
+            {
+                "physical:same-inode"
+            };
+            var candidatePhysical = new Dictionary<string, string>(semantics.Comparer)
+            {
+                [NormalizeForTest(retainedSource, semantics)] = "physical:same-inode",
+                [NormalizeForTest(newSource, semantics)] = "physical:new-inode"
+            };
+
+            var unmatched = Listenarr.Infrastructure.Library.Scanning.UnmatchedScanProcessor.FilterUntrackedFiles(
+                    [samePathCandidate, retainedSource, newSource],
+                    trackedNormalized,
+                    trackedPhysical,
+                    candidatePhysical,
+                    semantics)
+                .ToList();
+
+            var remaining = Assert.Single(unmatched);
+            Assert.Equal(newSource, remaining);
+        }
+
+        private static string NormalizeForTest(string path, FileSystemPathSemantics semantics) =>
+            FileSystemPathIdentity.Canonicalize(path, semantics.Syntax);
     }
 }

@@ -78,6 +78,7 @@ export interface MetadataSearchResult extends BaseSearchResult {
   seriesList?: string[]
   genres?: string[] // Genres from metadata sources (e.g., Audible)
   productUrl?: string // Direct link to Amazon/Audible product page
+  region?: string
   isEnriched?: boolean
   metadataSource?: string // Which metadata API enriched this result
   // Audible-style fields (when backend returns Audible-shaped JSON)
@@ -87,6 +88,8 @@ export interface MetadataSearchResult extends BaseSearchResult {
   link?: string
   releaseDate?: string
   publishDate?: string
+  // Simplified search API sends publishYear directly (camelCase of PublishYear)
+  publishYear?: string | number
 }
 
 // Legacy SearchResult interface - kept for backwards compatibility
@@ -123,6 +126,7 @@ export interface SearchResult extends BaseSearchResult {
   seriesList?: string[]
   genres?: string[] // Genres from metadata sources (e.g., Audible)
   productUrl?: string // Direct link to Amazon/Audible product page
+  region?: string
   isEnriched?: boolean
   metadataSource?: string // Which metadata API enriched this result
   // Audible-style fields
@@ -132,6 +136,8 @@ export interface SearchResult extends BaseSearchResult {
   link?: string
   releaseDate?: string
   publishDate?: string
+  // Simplified search API sends publishYear directly (camelCase of PublishYear)
+  publishYear?: string | number
 }
 
 export interface Download {

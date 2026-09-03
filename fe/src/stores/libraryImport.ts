@@ -95,10 +95,13 @@ function unmatchedToImportItem(item: UnmatchedFileItem): LibraryImportItem {
 }
 
 function matchToMetadata(result: SearchResult): AudibleBookMetadata {
+  // The search API returns simplified results with string fields (artist/narrator),
+  // while richer sources may provide author/narrator object arrays. Support both
+  // so library imports keep author metadata instead of producing "Unknown Author".
   const authors: string[] =
     result.authors && result.authors.length > 0
       ? result.authors.map((a) => a.name ?? '').filter(Boolean)
-      : []
+      : splitNameList(result.artist)
 
   // series may come back as AudibleSeries[] from the search endpoint
   const seriesRaw = result.series as unknown
@@ -108,6 +111,11 @@ function matchToMetadata(result: SearchResult): AudibleBookMetadata {
   const series = seriesItem?.name ?? (typeof seriesRaw === 'string' ? seriesRaw : undefined)
   const seriesNumber = seriesItem?.position ?? result.seriesNumber
   const seriesAsin = seriesItem?.asin ?? result.seriesAsin
+
+  const narrators: string[] | undefined =
+    result.narrators && result.narrators.length > 0
+      ? result.narrators.map((n) => n.name ?? '').filter(Boolean)
+      : splitNameList(result.narrator)
 
   return {
     title: result.title ?? '',
@@ -125,10 +133,25 @@ function matchToMetadata(result: SearchResult): AudibleBookMetadata {
     // SearchResult.genres comes as objects {asin, name, type} from Audible;
     // AudibleBookMetadata.genres expects string[] (genre names only)
     genres: normalizeGenres(result.genres),
-    narrators: result.narrators?.map((n) => n.name ?? '').filter(Boolean),
-    publishYear: result.releaseDate?.substring(0, 4) ?? result.publishDate?.substring(0, 4),
+    narrators,
+    publishYear:
+      result.publishYear !== undefined
+        ? String(result.publishYear)
+        : (result.releaseDate?.substring(0, 4) ??
+          result.publishDate?.substring(0, 4) ??
+          result.publishedDate?.substring(0, 4)),
     metadataSource: result.metadataSource,
+    region: result.region,
   }
+}
+
+// Split a comma-separated display name list ("A, B & C") into clean names.
+function splitNameList(value?: string): string[] {
+  if (!value) return []
+  return value
+    .split(/[,;&]+/)
+    .map((s) => s.trim())
+    .filter(Boolean)
 }
 
 export const useLibraryImportStore = defineStore('libraryImport', () => {

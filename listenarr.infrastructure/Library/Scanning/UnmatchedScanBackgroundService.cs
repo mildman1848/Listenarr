@@ -218,6 +218,36 @@ namespace Listenarr.Infrastructure.Library.Scanning
                 cancellationToken);
         }
 
+        internal static IEnumerable<string> FilterUntrackedFiles(
+            IEnumerable<string> candidates,
+            ISet<string> trackedNormalizedPaths,
+            ISet<string> trackedPhysicalIdentities,
+            IReadOnlyDictionary<string, string> candidatePhysicalIdentities,
+            FileSystemPathSemantics semantics)
+        {
+            ArgumentNullException.ThrowIfNull(candidates);
+            ArgumentNullException.ThrowIfNull(trackedNormalizedPaths);
+            ArgumentNullException.ThrowIfNull(trackedPhysicalIdentities);
+            ArgumentNullException.ThrowIfNull(candidatePhysicalIdentities);
+
+            foreach (var candidate in candidates)
+            {
+                var normalized = NormalizePath(candidate, semantics.Syntax);
+                if (trackedNormalizedPaths.Contains(normalized))
+                {
+                    continue;
+                }
+
+                if (candidatePhysicalIdentities.TryGetValue(normalized, out var physicalIdentity)
+                    && trackedPhysicalIdentities.Contains(physicalIdentity))
+                {
+                    continue;
+                }
+
+                yield return candidate;
+            }
+        }
+
         private async Task<List<UnmatchedFileResult>> ScanAsync(string rootFolderPath, CancellationToken ct)
         {
             using var scope = _scopeFactory.CreateScope();
@@ -251,6 +281,7 @@ namespace Listenarr.Infrastructure.Library.Scanning
             // Check BOTH AudiobookFiles (multi-file imports) AND Audiobook.FilePath (single-file imports)
             // so that files already in the library are not reported as unmatched.
             var trackedFromFiles = await fileRepository.GetAllFilePathsAsync(semantics, ct);
+            var trackedFileRecords = await fileRepository.GetAllAsync(ct);
 
             var allAudiobooks = await audiobookRepository.GetAllAsync();
             var trackedFromAudiobooks = allAudiobooks
@@ -262,6 +293,11 @@ namespace Listenarr.Infrastructure.Library.Scanning
                 trackedFromFiles.Concat(trackedFromAudiobooks)
                     .Select(path => NormalizePath(path, semantics.Syntax)),
                 semantics.Comparer);
+            var trackedPhysicalIdentities = trackedFileRecords
+                .Select(file => file.PhysicalObjectIdentity)
+                .Where(identity => !string.IsNullOrWhiteSpace(identity))
+                .Select(identity => identity!)
+                .ToHashSet(StringComparer.Ordinal);
 
             // Walk the root folder tree through the same pinned/generation-aware
             // enumeration primitive used by authoritative audiobook scans.
@@ -292,9 +328,15 @@ namespace Listenarr.Infrastructure.Library.Scanning
             }
             var candidates = enumeration.Candidates.ToList();
 
-            // Filter to untracked files
-            var unmatched = candidates
-                .Where(f => !trackedNormalized.Contains(NormalizePath(f, semantics.Syntax)))
+            // Filter to untracked files. Path comparison catches ordinary library files;
+            // physical identity comparison catches retained hardlink sources that live
+            // under another root but are already represented by an AudiobookFile record.
+            var unmatched = FilterUntrackedFiles(
+                candidates,
+                trackedNormalized,
+                trackedPhysicalIdentities,
+                enumeration.FileObjectIdentities,
+                semantics)
                 .ToList();
 
             // Two-level grouping:
@@ -392,6 +434,18 @@ namespace Listenarr.Infrastructure.Library.Scanning
                         if (tags != null)
                         {
                             ApplyEmbeddedTags(parsed, tags);
+                        }
+
+                        // Fallback: Audible exports often carry the ASIN only in the
+                        // folder/file name ("Title [B0XXXXXXXX]"), not in embedded tags.
+                        // Extract a strict B0 ASIN so the UI can match by identifier
+                        // while title/author fallback stays available for the rest.
+                        if (string.IsNullOrEmpty(parsed.Asin))
+                        {
+                            parsed.Asin = PathMetadataParser.ExtractAsinFromPath(
+                                !string.IsNullOrEmpty(parsed.BookFolderPath)
+                                    ? parsed.BookFolderPath
+                                    : representative);
                         }
 
                         var relativeFolder = bookFolder.Length > rootFolderPath.Length

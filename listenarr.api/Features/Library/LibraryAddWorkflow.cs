@@ -140,7 +140,7 @@ namespace Listenarr.Api.Features.Library
                 metadata.Series,
                 AudibleBookMetadata.ToStringOrFirst(metadata.SeriesNumber));
 
-            AudiobookIdentifierMapper.SyncImportedIdentifiersFromLegacyFields(audiobook);
+            AudiobookIdentifierMapper.SyncImportedIdentifiersFromLegacyFields(audiobook, metadata.Region);
 
             _logger.LogInformation("Created Audiobook entity: Title={Title}, Asin={Asin}, PublishYear={PublishYear}",
                 LogRedaction.SanitizeText(audiobook.Title), LogRedaction.SanitizeText(audiobook.Asin), LogRedaction.SanitizeText(audiobook.PublishYear));

@@ -340,7 +340,8 @@ public class MetadataConverters
             Asin = asin,
             Isbn = metadata.Isbn ?? new List<string>(),
             Genres = genreList,
-            ProductUrl = productUrl
+            ProductUrl = productUrl,
+            Region = AudiobookIdentifierNormalizer.NormalizeRegion(metadata.Region)
         };
 
         _logger.LogInformation("SearchResult for ASIN {Asin}: PublishYear='{PublishYear}', PublishedDate={PublishedDate:yyyy-MM-dd}",
