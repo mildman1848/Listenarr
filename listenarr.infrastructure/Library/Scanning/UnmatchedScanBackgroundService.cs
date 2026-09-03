@@ -311,10 +311,9 @@ namespace Listenarr.Infrastructure.Library.Scanning
                 .ToList();
 
             // Resolve ffprobe path once for the whole scan (null = not available)
-            var ffprobePath = hasDurableGenerationProof
-                && (OperatingSystem.IsWindows()
+            var ffprobePath = OperatingSystem.IsWindows()
                     || OperatingSystem.IsLinux()
-                    || OperatingSystem.IsMacOS())
+                    || OperatingSystem.IsMacOS()
                     ? await _ffmpegService.GetFfprobePathAsync()
                     : null;
 
@@ -337,6 +336,7 @@ namespace Listenarr.Infrastructure.Library.Scanning
                             ffprobePath,
                             semantics,
                             enumeration.FileObjectIdentities,
+                            hasDurableGenerationProof,
                             token);
                         groupedFiles = BuildGroupedFilesForFolder(
                             folderFiles,
@@ -373,20 +373,11 @@ namespace Listenarr.Infrastructure.Library.Scanning
                         }
                         else if (!string.IsNullOrEmpty(ffprobePath))
                         {
-                            var canonicalRepresentative = FileSystemPathIdentity.Canonicalize(
+                            using var lease = OpenPinnedUnmatchedMetadataLease(
                                 representative,
-                                semantics.Syntax);
-                            if (!enumeration.FileObjectIdentities.TryGetValue(
-                                    canonicalRepresentative,
-                                    out var expectedPhysicalObjectIdentity))
-                            {
-                                throw new InvalidOperationException(
-                                    "The unmatched metadata candidate lacks its enumerated physical generation.");
-                            }
-
-                            using var lease = PinnedAudiobookFileRegistrationLease.Open(
-                                representative,
-                                expectedPhysicalObjectIdentity);
+                                semantics,
+                                enumeration.FileObjectIdentities,
+                                hasDurableGenerationProof);
                             tags = await PathMetadataParser.ReadEmbeddedTagsAsync(
                                 lease.MetadataPath,
                                 ffprobePath,

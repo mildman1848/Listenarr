@@ -279,8 +279,8 @@ namespace Listenarr.Tests.Features.Api.Services
             Assert.Equal("M4B", result.Format);
         }
 
-        [Fact]
-        public async Task UnmatchedScanProcessor_PinnedPathOnly_DoesNotReopenFilesForMetadataEnrichment()
+        [LinuxFact]
+        public async Task UnmatchedScanProcessor_PinnedPathOnly_ReadsEmbeddedAsinWithoutFilesystemSidecars()
         {
             var root = FileService.GetTempDirectory("unmatched-processor-limited-root");
             var bookDirectory = Path.Join(root, "Author", "2026 - Limited Book");
@@ -298,6 +298,16 @@ namespace Listenarr.Tests.Features.Api.Services
             await File.WriteAllTextAsync(
                 Path.Join(bookDirectory, "cover.jpg"),
                 "filesystem-cover");
+            var ffprobePath = await FileService.GetTempFileAsync("ffprobe-pinned-path-only");
+            await File.WriteAllTextAsync(
+                ffprobePath,
+                "#!/usr/bin/env bash\ncat <<'JSON'\n{ \"format\": { \"tags\": { \"ASIN\": \"B012345678\", \"DESCRIPTION\": \"embedded description\", \"composer\": \"Embedded Narrator\" } } }\nJSON\n");
+            using (var chmod = System.Diagnostics.Process.Start("chmod", $"+x {ffprobePath}"))
+            {
+                Assert.NotNull(chmod);
+                await chmod.WaitForExitAsync();
+                Assert.Equal(0, chmod.ExitCode);
+            }
             var expectedSize = new FileInfo(file).Length;
             var semantics = FileSystemPathSemantics.CurrentHostDefault;
             var pathIdentity = new PathIdentitySnapshot(
@@ -325,6 +335,7 @@ namespace Listenarr.Tests.Features.Api.Services
                 _provider.GetRequiredService<IFileSystemSemanticsResolver>());
             CreateHubProxy<SettingsHub>(out var hubContext);
             var ffmpeg = new Mock<IFfmpegService>(MockBehavior.Strict);
+            ffmpeg.Setup(service => service.GetFfprobePathAsync()).ReturnsAsync(ffprobePath);
             var processor = new UnmatchedScanProcessor(
                 queue,
                 _provider.GetRequiredService<IServiceScopeFactory>(),
@@ -344,9 +355,11 @@ namespace Listenarr.Tests.Features.Api.Services
             Assert.Equal(expectedSize, result.Size);
             Assert.Equal("Limited Book", result.Title);
             Assert.Equal("Author", result.Author);
-            Assert.Null(result.Description);
-            Assert.Null(result.Narrator);
+            Assert.Equal("embedded description", result.Description);
+            Assert.Equal("Embedded Narrator", result.Narrator);
             Assert.Null(result.CoverPath);
+            Assert.Equal("B012345678", result.Asin);
+            ffmpeg.Verify(service => service.GetFfprobePathAsync(), Times.Once);
             ffmpeg.VerifyNoOtherCalls();
             authorization.VerifyAll();
         }

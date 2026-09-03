@@ -180,25 +180,17 @@ namespace Listenarr.Infrastructure.Library.Scanning
             string ffprobePath,
             FileSystemPathSemantics semantics,
             IReadOnlyDictionary<string, string> fileObjectIdentities,
+            bool hasDurableGenerationProof,
             CancellationToken ct)
         {
             var result = new Dictionary<string, PathParsedMetadata>(semantics.Comparer);
             foreach (var file in files)
             {
-                var canonicalFile = FileSystemPathIdentity.Canonicalize(
+                using var lease = OpenPinnedUnmatchedMetadataLease(
                     file,
-                    semantics.Syntax);
-                if (!fileObjectIdentities.TryGetValue(
-                        canonicalFile,
-                        out var expectedPhysicalObjectIdentity))
-                {
-                    throw new InvalidOperationException(
-                        "The unmatched metadata candidate lacks its enumerated physical generation.");
-                }
-
-                using var lease = PinnedAudiobookFileRegistrationLease.Open(
-                    file,
-                    expectedPhysicalObjectIdentity);
+                    semantics,
+                    fileObjectIdentities,
+                    hasDurableGenerationProof);
                 result[file] = await PathMetadataParser.ReadEmbeddedTagsAsync(
                     lease.MetadataPath,
                     ffprobePath,
@@ -211,6 +203,32 @@ namespace Listenarr.Infrastructure.Library.Scanning
             }
 
             return result;
+        }
+
+        private static PinnedAudiobookFileRegistrationLease OpenPinnedUnmatchedMetadataLease(
+            string filePath,
+            FileSystemPathSemantics semantics,
+            IReadOnlyDictionary<string, string> fileObjectIdentities,
+            bool hasDurableGenerationProof)
+        {
+            var canonicalFile = FileSystemPathIdentity.Canonicalize(
+                filePath,
+                semantics.Syntax);
+
+            if (hasDurableGenerationProof)
+            {
+                if (!fileObjectIdentities.TryGetValue(canonicalFile, out var expectedPhysicalObjectIdentity))
+                    throw new InvalidOperationException(
+                        "The unmatched metadata candidate lacks its enumerated physical generation.");
+
+                return PinnedAudiobookFileRegistrationLease.Open(filePath, expectedPhysicalObjectIdentity);
+            }
+
+            var parentPath = Path.GetDirectoryName(canonicalFile)
+                ?? throw new InvalidOperationException("The unmatched metadata candidate has no parent directory.");
+            using var parent = PinnedDirectoryCreation.OpenPinnedHierarchyNoFollow(parentPath, createMissing: false);
+            var file = parent.OpenExistingFileForStableRead(Path.GetFileName(canonicalFile));
+            return PinnedAudiobookFileRegistrationLease.CreatePinnedPathOnly(file, canonicalFile);
         }
 
         internal static async Task ApplyPinnedFolderMetadataAsync(
